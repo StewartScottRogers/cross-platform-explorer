@@ -6,6 +6,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { styleBlock, declaration, contentIndependentHeightReason } from "../svelteCss";
 
 const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
 vi.mock("../invoke", () => ({
@@ -218,5 +221,95 @@ describe("MacrosDialog delete/export/import (CPE-1189)", () => {
     await fireEvent.click(screen.getByTestId("import-btn"));
 
     expect(invokeMock).toHaveBeenCalledWith("macro_import", { json: '{"name":"Imported","steps":[]}' });
+  });
+});
+
+/**
+ * CPE-1968 — the swallowed-click shape, guarded here BEFORE it ever bit.
+ *
+ * `OrganizeDialog.svelte` shipped a header control above a body that grew when an async load landed,
+ * on a vertically centred backdrop: the growth re-centred the dialog, the control slid up ~98px under
+ * the pointer, and the resulting click was eaten by `.dialog`'s `on:click|stopPropagation` in total
+ * silence. This dialog has the identical shape — `+ New macro` in the `<header>`, `.list` below it,
+ * `onMount(refresh)` -> `commands.macroList()` filling that list ~a frame later.
+ *
+ * It never failed in CI, and the reason is worth writing down because it is the reason a guard is
+ * needed rather than a reason one is not: `gui-smoke/specs/macro-in-menu.smoke.ts` clicks
+ * `[data-testid="new-macro-btn"]` against an EMPTY catalog, so the load resolves to `[]` and the box
+ * does not change height. That is the harness's case. Any user who has saved a macro gets the growth
+ * every single time the dialog opens, which is the ordinary case, not the exotic one.
+ *
+ * So this asserts the same invariant CPE-1968 put on `.preview`, from the same derivation
+ * (`src/lib/svelteCss.ts`, shared rather than copied): `.list`'s height must not depend on its
+ * CONTENT. Viewport-dependent is fine — the viewport does not change while `macroList` is in flight.
+ *
+ * RED-PROOF, run and recorded here rather than only in the PR body (CPE-1933 rule 3): restoring
+ * `.list { max-height: 30vh; … }` reds 2 of 16 in this file — "`.list` declares a max-height again
+ * with no matching height … expected '30vh' to be undefined" and the `flex: 0 0 auto` assertion.
+ * Reverted; 16/16 green. The flex leg was red-proofed SEPARATELY, because removing both at once only
+ * proves the pair: with the `height` in place and `flex: 0 0 auto` alone deleted, exactly 1 of 16
+ * reds — the flex assertion. So it is not decorative. Without it `.dialog`'s flex column shrinks the
+ * fixed height back toward content and undoes the fix while the `height` declaration still reads
+ * correct, which is the version of this bug that would be hardest to see.
+ *
+ * NOT ASSERTED, and deliberately: the `{#if editingName !== null}` editor also changes the dialog's
+ * height, and `startEdit` awaits `commands.macroLoad` before rendering it. That growth follows the
+ * user's own click rather than arriving unbidden after mount, so it is not this shape.
+ */
+describe("CPE-1968 — the macro list's height does not depend on the loaded catalog", () => {
+  const SRC = readFileSync(join(process.cwd(), "src", "lib", "components", "MacrosDialog.svelte"), "utf8");
+  /** `src-tauri/src/lib.rs`'s `.inner_size(1000.0, 700.0)`; only the vh terms below read it. */
+  const VIEWPORT_H = 700;
+
+  it("gives .list a content-independent height, so loading the catalog cannot move the header", () => {
+    const list = styleBlock(SRC, "list");
+
+    expect(
+      declaration(list, "max-height"),
+      "`.list` declares a max-height again with no matching height. That is the CPE-1968 shape: the " +
+        "box is ~42px while `macroList()` is in flight and up to the cap once it resolves, so the " +
+        "centred dialog slides `+ New macro` up out from under the pointer and `.dialog`'s " +
+        "on:click|stopPropagation eats the click in silence.",
+    ).toBeUndefined();
+
+    const reason = contentIndependentHeightReason(list, VIEWPORT_H);
+    expect(reason, `\`.list\` ${reason}. See CPE-1968 and OrganizeDialog.svelte's \`.preview\`.`).toBeNull();
+  });
+
+  it("keeps that height fixed under flex, which would otherwise shrink it back to its content", () => {
+    // `.dialog` is a flex column with a `max-height`, so a flex item's definite height is only
+    // honoured while `flex-shrink` is 0 — without this the fix above is undone by the layout.
+    expect(declaration(styleBlock(SRC, "dialog"), "display")).toMatch(/flex/);
+    expect(
+      declaration(styleBlock(SRC, "list"), "flex"),
+      "`.list` needs `flex: 0 0 auto` — inside `.dialog`'s flex column a shrinkable item falls back " +
+        "toward its content height, which reintroduces the CPE-1968 growth the fixed height removes",
+    ).toMatch(/^0\s+0\b/);
+  });
+
+  it("renders both an empty and a populated catalog into that same box", async () => {
+    // The runtime half: the catalog only ever changes what is INSIDE `.list`, never what is around
+    // it, so the fixed height above is sufficient — nothing above the header's controls varies.
+    const outsideList = (): string => {
+      const clone = (document.querySelector(".dialog") as HTMLElement).cloneNode(true) as HTMLElement;
+      clone.querySelector('[data-testid="macro-list"]')!.innerHTML = "";
+      return clone.innerHTML;
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => (cmd === "macro_list" ? [] : null));
+    const empty = render(MacrosDialog);
+    await screen.findByTestId("macro-list");
+    const withNothing = outsideList();
+    empty.unmount();
+
+    invokeMock.mockImplementation(async (cmd: string) => (cmd === "macro_list" ? SUMMARIES : null));
+    render(MacrosDialog);
+    await screen.findByTestId("macro-Tidy screenshots");
+
+    expect(
+      outsideList().replace(/>\d+ macros?</, ">N macros<"),
+      "loading a non-empty catalog changed the dialog outside `.list` — with the box's height now " +
+        "fixed, that is the only remaining way the header could move (CPE-1968)",
+    ).toEqual(withNothing.replace(/>\d+ macros?</, ">N macros<"));
   });
 });

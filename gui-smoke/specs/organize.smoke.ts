@@ -98,12 +98,25 @@ describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a groupe
     // CPE-1965 — WAIT FOR THE DEFAULT RULE'S PREVIEW TO LAND BEFORE CLICKING A RULE PILL, and do NOT
     // replace this with a longer `waitForClickable`: clickability was never the problem.
     //
-    // `OrganizeDialog.svelte`'s backdrop is `display:grid; place-items:center` (the app-wide dialog
-    // convention — 28 components share the rule), and its `.preview` box goes from `min-height:120px`
-    // while the first `organize_plan` is in flight to as much as `max-height:45vh` once the plan
-    // renders. At the 1000x700 window this harness sets, that is a ~195px growth on a VERTICALLY
-    // CENTRED dialog, so the `.rules` row above it slides UP by ~98px about 120ms (the dialog's own
-    // debounce) after mount. The rule pills are 28px tall. Clicking inside that window is a coin flip:
+    // CPE-1968 UPDATE, READ THIS FIRST: the app defect described below is FIXED. `.preview` now has a
+    // single plan-independent height (`clamp(200px, 40vh, 340px)`), so the dialog no longer changes
+    // height when the plan lands and there is no longer a reflow to sit out. This wait is therefore
+    // BELT-AND-BRACES, not load-bearing — kept because waiting for the preview the very next
+    // assertion depends on is honest regardless, and because it costs one poll. The paragraphs below
+    // are retained as the diagnosis of a fixed bug, NOT as a live description of the component: they
+    // quote declarations (`min-height:120px`, `max-height:45vh`) that no longer exist.
+    // `src/lib/components/OrganizeDialog.test.ts` re-derives the real ones on every run and now
+    // asserts the OPPOSITE — that the loading and settled heights are equal — so if a content-driven
+    // height is ever reintroduced it reds there, at the component, rather than resurfacing here as a
+    // 4.3% flake.
+    //
+    // [FIXED IN CPE-1968 — historical] `OrganizeDialog.svelte`'s backdrop is `display:grid;
+    // place-items:center` (the app-wide dialog
+    // convention — 28 components share the rule), and its `.preview` box went from `min-height:120px`
+    // while the first `organize_plan` was in flight to as much as `max-height:45vh` once the plan
+    // rendered. At the 1000x700 window this harness sets, that was a ~195px growth on a VERTICALLY
+    // CENTRED dialog, so the `.rules` row above it slid UP by ~98px about 120ms (the dialog's own
+    // debounce) after mount. The rule pills are 28px tall. Clicking inside that window was a coin flip:
     // WebDriver computes the element's centre point, the reflow happens, and the synthesized click
     // lands ~98px lower — inside `.preview`, whose ancestor `.dialog` has `on:click|stopPropagation`.
     // So the click SUCCEEDS at the protocol level, nothing is intercepted, the dialog stays open, and

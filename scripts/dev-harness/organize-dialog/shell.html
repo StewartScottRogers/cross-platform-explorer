@@ -1,0 +1,45 @@
+<!doctype html>
+<!--
+  CPE-1968 — the outer shell that pins the inner page's viewport to EXACTLY 1000x700.
+
+  Why it exists, measured rather than assumed: `chrome --headless=new --window-size=1000,700` does NOT
+  give the document a 1000x700 viewport. The first run of shots.mjs against index.html directly
+  reported `viewport=984x549` in its own probe badge — 151px of it eaten by window chrome — and the
+  pills' measured shift came out at 63.5px instead of the ~98px CPE-1965 measured, purely because
+  `45vh` was resolving against 549px rather than 700px. A `vh`-dependent layout photographed at the
+  wrong viewport is a picture of a different bug.
+
+  An iframe's content document gets a viewport of exactly the iframe's own box, so `100vh` inside it is
+  700px by construction, whatever the outer window does. This is the same outer-shell trick
+  scripts/dev-harness/statusbar-notice/ and checkpoint-narrow/ already use for their own width work.
+
+  The whole query string is forwarded to the inner page unchanged, so every parameter documented in
+  index.html works here too.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1968 — Organize dialog reflow (1000x700 shell)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #8a8a8a;
+      }
+      iframe {
+        display: block;
+        width: 1000px;
+        height: 700px;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <iframe id="frame" title="Organize dialog at 1000x700"></iframe>
+    <script type="module">
+      // Same directory, so a relative src keeps this working under any dev-server port or base path.
+      document.getElementById("frame").src = `./index.html${location.search}`;
+    </script>
+  </body>
+</html>
