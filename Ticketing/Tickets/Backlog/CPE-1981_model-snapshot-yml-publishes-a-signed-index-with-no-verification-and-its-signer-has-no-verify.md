@@ -82,3 +82,35 @@ Related: **CPE-1978** (PR #1095 — the same defect in `release.yml`, and the pu
 bound), **CPE-1939** (the model snapshot's `==`/`<` conflation — the *other* known defect in this same
 workflow's index handling, worth doing in the same neighbourhood), **CPE-1932** (enumerate, don't
 recall), **CPE-1933** (derive provenance, don't claim it).
+
+## Correction (2026-08-28, same day, from PR #1095's Reviewer)
+
+The line above — *"The guard PR #1095 added reds the day a `verify` subcommand appears"* — **is true for
+exactly one spelling of "appears", and it was written by the Foreman without measuring it.**
+
+PR #1095's Reviewer sabotaged it: a **real** verify path spelled `args[1] == "check"` added to
+`model_snapshot_sign.rs`, with `model-snapshot.yml` still publishing unverified, gives **62 passed / 0
+red**. The control — the same sabotage spelled `"verify"` — gives **2 red**.
+
+**And the direction is the bad one.** `hasVerifySubcommand` returning `false` **excludes** the signer from
+`stillUnverified`, so the workflow is **excused**. A missed spelling does not over-report a closed gap; it
+**silently under-reports an open one**. Two further shapes read as absent the same way: a subcommand
+routed through a **module** or a **`clap` builder in another file**, since the detector reads only the
+single file the `[[bin]]`'s `path` names.
+
+So the guard is a **pin on today's instance**, not a tripwire on the class:
+
+- What actually holds this open is the assertion *"`model-snapshot-sign` still has no verify
+  subcommand"* — remove that pin, or add a verify path under any name but `verify`, and the guard goes
+  quiet.
+- **Whoever works this ticket therefore cannot rely on the guard to tell them they are done.** If you add
+  a `verify` subcommand spelled anything else, wire the workflow **and** widen the detector in the same
+  diff — an unrecognised binary treated as "cannot verify" is the fail-open direction, and this repo's
+  standing answer to that is to **refuse rather than guess**.
+- Write any blind-spot list here as "**at least** these" (CLAUDE.md's round-9 rule). PR #1095's
+  `signFamilyCalls` list already does; `hasVerifySubcommand`'s does not, which is how this one got
+  written as a closed claim.
+
+Recorded here rather than only in the PR thread, because this ticket's whole premise is *"there is no
+`verify` subcommand to call"* — and the guard that was supposed to notice when that stops being true is
+narrower than the sentence that introduced it.
