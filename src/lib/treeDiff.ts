@@ -10,6 +10,13 @@ export interface CompareNode {
   size?: number;
   modified?: number | null;
   children?: CompareNode[];
+  /** The scan could not `read_dir` this directory, so `children` is empty for want of access, not of
+   *  content (CPE-1925). Set by `scan_tree`; never set on a file. `null` as well as `undefined`
+   *  because that is what the generated `TreeNode` binding for an `Option<bool>` says. */
+  unreadable?: boolean | null;
+  /** The scan's depth cap stopped here, so `children` is empty for want of descent (CPE-1925). Set by
+   *  `scan_tree`; never set on a file. */
+  truncated?: boolean | null;
 }
 
 export type DiffStatus = "added" | "removed" | "changed" | "identical";
@@ -20,6 +27,25 @@ export interface DiffNode {
   isDir: boolean;
   status: DiffStatus;
   children?: DiffNode[];
+  /** Carried through from the `CompareNode` this node was classified from (CPE-1925), so a consumer
+   *  downstream of the diff can still tell an **empty** directory from one the scan could not see
+   *  inside. `planBackup` is the consumer that needs it: it creates missing directories in a backup
+   *  destination, and creating one because the source directory *looked* childless would be a
+   *  fabrication whenever the real reason was an unreadable directory or the depth cap.
+   *
+   *  For a node present on both sides these come from the **right** (in `planBackup`'s call, the
+   *  source) node — the side whose shape is being reproduced. A `removed` node has only a left node,
+   *  so they describe that one. */
+  unreadable?: boolean;
+  truncated?: boolean;
+}
+
+/** Copy the CPE-1925 "children are unknown, not absent" flags onto a diff node, omitting them entirely
+ *  when unset so the diff tree stays byte-identical for the ordinary readable directory. */
+function withUnknownChildren(out: DiffNode, from: CompareNode): DiffNode {
+  if (from.unreadable) out.unreadable = true;
+  if (from.truncated) out.truncated = true;
+  return out;
 }
 
 /** Dirs first, then case-sensitive name — a stable, predictable order for the compare view. */
@@ -36,6 +62,7 @@ function markSubtree(node: CompareNode, status: "added" | "removed"): DiffNode {
   const out: DiffNode = { name: node.name, isDir: node.isDir, status };
   if (node.isDir) {
     out.children = ordered((node.children ?? []).map((c) => markSubtree(c, status)));
+    withUnknownChildren(out, node);
   }
   return out;
 }
@@ -66,7 +93,10 @@ export function diffTrees(left: CompareNode[], right: CompareNode[]): DiffNode[]
       } else if (l.isDir) {
         const children = diffTrees(l.children ?? [], r.children ?? []);
         const changed = children.some((c) => c.status !== "identical");
-        out.push({ name, isDir: true, status: changed ? "changed" : "identical", children });
+        // The flags come from `r`, the right-hand node: `planBackup` calls `diffTrees(dest, source)`,
+        // so the right side is the tree whose shape is being reproduced, and it is that side's
+        // readability the consumer must not guess at.
+        out.push(withUnknownChildren({ name, isDir: true, status: changed ? "changed" : "identical", children }, r));
       } else {
         out.push({ name, isDir: false, status: fileChanged(l, r) ? "changed" : "identical" });
       }

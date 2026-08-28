@@ -18,6 +18,13 @@
  * with auto-run off is never started unattended by any drive connect. Both are real regressions
  * otherwise, and nothing else drives the scheduler end to end.
  *
+ * **CPE-1925 added two more, and they belong here specifically.** This path — a stored `job.source`, a
+ * drive appearing, no dashboard row open, no preview, nobody watching — is where an empty source folder
+ * silently failed to arrive, and where a source folder the scan could not read silently took the
+ * destination's copies with it. So the plan's `createDirs` entries reaching the backend, and the
+ * skipped-folder disclosure reaching the toast, are pinned against the REAL `runBackupJobNow` here
+ * rather than only against the pure planner.
+ *
  * Harness follows App.dropStackTransfer.test.ts (mounted App, mocked backend, multi-handler event bus).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -49,6 +56,17 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 let connectedDrives: Place[] = [];
 /** Every `apply_backup_plan_stream` call's args. */
 let backupCalls: Record<string, unknown>[] = [];
+/** What `scan_tree` returns for the job's SOURCE root. Per-test, because CPE-1925's two unattended
+ *  claims are both about shapes the source can have and the destination cannot. */
+let sourceTree: unknown[] = [];
+/** Per-`OpResult` batches the mocked backend streams back, so a run can report something. */
+let streamedResults: { path: string; ok: boolean; error: string }[] = [];
+/** When set, `scan_tree` REJECTS for the source root — `scan_tree`'s CPE-1925 answer for a root it
+ *  cannot list, which used to be a silent `Ok([])`. */
+let scanError = "";
+/** How many times a job's plan has been scanned. The signal that a run STARTED, which `backupCalls`
+ *  cannot be — a run that fails at the scan never reaches the backend at all. */
+let sourceScans = 0;
 
 beforeEach(() => {
   localStorage.clear();
@@ -56,6 +74,10 @@ beforeEach(() => {
   stopDriveScheduler();
   Element.prototype.scrollIntoView = vi.fn();
   backupCalls = [];
+  sourceTree = [];
+  streamedResults = [];
+  scanError = "";
+  sourceScans = 0;
   connectedDrives = [{ name: "Local Disk (C:)", path: PATH_A, kind: "drive" }];
 
   invoke.mockReset();
@@ -70,9 +92,13 @@ beforeEach(() => {
       // The two scans the job's plan is built from. Dest holds a file the source doesn't, so the plan
       // carries a mirror DELETE — the destructive shape whose consent is the point of this test.
       case "scan_tree":
-        return args.path === JOB_DEST ? [{ name: "stale.txt", isDir: false, size: 1, modified: 1 }] : [];
+        if (args.path === JOB_DEST) return [{ name: "stale.txt", isDir: false, size: 1, modified: 1 }];
+        sourceScans += 1;
+        if (scanError) throw scanError;
+        return sourceTree;
       case "apply_backup_plan_stream":
         backupCalls.push(args);
+        (args.onResult as { onmessage: (b: unknown) => void }).onmessage(streamedResults);
         return 0;
       default: return null;
     }
@@ -98,7 +124,13 @@ async function connectTheBackupDrive(job: Record<string, unknown>) {
   await vi.advanceTimersByTimeAsync(20_000);
   // Now the destination drive appears…
   connectedDrives = [...connectedDrives, { name: "Backup (D:)", path: DEST_DRIVE, kind: "drive" }];
-  await vi.advanceTimersByTimeAsync(20_000); // …and the next poll sees the transition
+  // …and the next poll sees the transition. Stepped one second at a time rather than in one 20-second
+  // jump: same elapsed time, but the run's completion notice has a 5s auto-clear, and a single long
+  // advance fires that clear inside the same call — the notice would be set and gone before any
+  // assertion could see it. Stopping as soon as the run has STARTED leaves it on screen. The stop
+  // condition is the source scan rather than `backupCalls`, because a run that fails at the scan
+  // (CPE-1925 case 7) raises its notice without ever reaching the backend.
+  for (let i = 0; i < 20 && sourceScans === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
 }
 
 describe("App — the drive-connect scheduler's backup wiring (CPE-1664)", () => {
@@ -116,6 +148,56 @@ describe("App — the drive-connect scheduler's backup wiring (CPE-1664)", () =>
     // …and it really is the destructive shape reaching the backend.
     expect(backupCalls[0].deletePaths).toEqual(["stale.txt"]);
     expect(backupCalls[0].destRoot).toBe(JOB_DEST);
+  });
+
+  // ---- CPE-1925 round 2: the unattended path is the one nobody is watching, and it is exactly where
+  // the destructive shapes reach. Round 1 argued both of these mattered and tested neither here.
+
+  it("carries the plan's directory entries to the backend on the unattended path (CPE-1925)", async () => {
+    // A source folder with no files under it. Before CPE-1925 the plan model had no entry kind for it,
+    // so the run reported a clean ok and the folder simply never arrived in the destination — and on
+    // this path there is no dashboard row and nobody watching to notice the shape had changed.
+    sourceTree = [{ name: "logs", isDir: true, children: [] }];
+    await connectTheBackupDrive({
+      id: "j3", name: "Photos", source: "C:\\pics", dest: JOB_DEST, mirror: true, autoRun: true,
+    });
+
+    await waitFor(() => expect(backupCalls.length).toBe(1));
+    expect(backupCalls[0].createDirs).toEqual(["logs"]);
+  });
+
+  it("discloses the folders it could not see inside, on the run nobody is watching (CPE-1925)", async () => {
+    // The scan reached this folder and could not read it, so its emptiness is unknown: it gets no
+    // `createDirs` entry, nothing under it is mirror-deleted, and — the part this test exists for — the
+    // toast SAYS SO. On the dashboard the plan preview shows the same count; on this path there is no
+    // preview, so silence here would be total, and silence is the one answer this ticket does not allow.
+    sourceTree = [{ name: "locked", isDir: true, children: [], unreadable: true }];
+    streamedResults = [{ path: "stale.txt", ok: true, error: "" }];
+    await connectTheBackupDrive({
+      id: "j4", name: "Photos", source: "C:\\pics", dest: JOB_DEST, mirror: true, autoRun: true,
+    });
+
+    await waitFor(() => expect(backupCalls.length).toBe(1));
+    expect(backupCalls[0].createDirs).toEqual([]); // its emptiness was never established
+
+    await waitFor(() => expect(document.body.textContent).toContain("Folders not carried: 1"));
+    expect(document.body.textContent).toContain("locked");
+  });
+
+  it("a source root the scan cannot list stops the run and says so, rather than mirroring an empty tree (CPE-1925)", async () => {
+    // Case 7. `scan_tree` used to answer `Ok([])` for a root `read_dir` had refused — byte-identical to
+    // an empty folder — and `planBackup` in mirror mode turns an empty source into `delete everything
+    // in the destination`. Measured on the round-1 branch, on ext4, with a `0o000` source root:
+    // `delete: ["a.txt","b.txt"]`, engine `ok=2 fail=0`, destination empty afterwards, source untouched.
+    // The scan is now an Err, and this is the assertion that the Err reaches the user and stops the run
+    // rather than being swallowed — the whole reason it was made fail-closed.
+    scanError = "C:\\pics: could not be listed completely, so this scan cannot say what is in it";
+    await connectTheBackupDrive({
+      id: "j5", name: "Photos", source: "C:\\pics", dest: JOB_DEST, mirror: true, autoRun: true,
+    });
+
+    expect(backupCalls).toHaveLength(0); // nothing was applied, so nothing was deleted
+    await waitFor(() => expect(document.body.textContent).toContain("could not be listed completely"));
   });
 
   it("a job with auto-run off is never run unattended at all — no drive connect can start it", async () => {

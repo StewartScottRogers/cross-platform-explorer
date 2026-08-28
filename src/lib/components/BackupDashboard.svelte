@@ -89,7 +89,10 @@
     const dstRoot = reverse ? job.source : job.dest;
     try {
       const p = await computePlan(job, reverse);
-      total = p.copy.length + p.update.length + p.delete.length;
+      // CPE-1925: directory entries are counted like any other entry. A run whose whole job is to
+      // recreate five empty folders used to show `0 / 0` and finish instantly, which reads as "there
+      // was nothing to do" rather than "the folders were never in the plan".
+      total = p.copy.length + p.update.length + p.delete.length + p.createDirs.length;
       // Stream per-file results so the row shows live progress instead of one blocking round-trip.
       const results: OpResult[] = [];
       const channel = createChannel<OpResult[]>();
@@ -99,7 +102,7 @@
       };
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: srcRoot, destRoot: dstRoot,
-        copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
+        copy: p.copy, update: p.update, deletePaths: p.delete, createDirs: p.createDirs, verify: true,
         // CPE-1664: the backend refuses the plan outright without this. `apply` is only reachable from
         // the Run / Restore buttons below, so the flag rides on a real click — a mirror plan deletes
         // files under the destination root with no Recycle Bin copy and no undo.
@@ -193,8 +196,24 @@
     {/if}
     {#if plan}
       <div class="plan" data-testid="plan-summary">
-        Dry-run: <b>{plan.copy.length}</b> copy · <b>{plan.update.length}</b> update · <b>{plan.delete.length}</b> delete · {plan.unchanged} unchanged
+        Dry-run: <b>{plan.copy.length}</b> copy · <b>{plan.update.length}</b> update · <b>{plan.delete.length}</b> delete · <b>{plan.createDirs.length}</b> new folders · {plan.unchanged} unchanged
       </div>
+      <!-- CPE-1925: the plan's own disclosure of what it will NOT carry. A folder the scan could not
+           read, or one the depth cap stopped at, is not created in the destination (its emptiness was
+           never established) and nothing under it is mirror-deleted — and the user is told which, in
+           the preview, before the run rather than after it.
+           Deliberately literal, with the reason rendered as data rather than mapped to prose in the
+           markup: every added render site here is one more entry in `bidiEscape.guard.test.ts`'s
+           REGISTRY ratchet, so the wording that could have lived in three ternaries lives in the
+           surrounding static text instead. -->
+      {#if plan.skippedDirs.length > 0}
+        <div class="plan skipped" data-testid="plan-skipped">
+          Folders not carried — this backup cannot see inside them: <b>{plan.skippedDirs.length}</b>
+          {#each plan.skippedDirs as sd (sd.path)}
+            <span class="skipped-dir">{displaySafePath(sd.path)} ({displaySafePath(sd.reason)})</span>
+          {/each}
+        </div>
+      {/if}
     {/if}
 
     <div class="builder" data-testid="add-job">
@@ -225,6 +244,10 @@
   .status { font-size: 11.5px; color: #2e9e4f; }
   .status.bad { color: var(--danger); }
   .status.running { color: var(--accent-text); }
+  /* CPE-1925 skipped-folder disclosure. A row of pills, so it reflows onto more rows and grows its
+     height while each pill keeps its path on one line (the tick-tack rule). */
+  .plan.skipped { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; color: var(--text-dim); }
+  .skipped-dir { flex: 0 0 auto; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--surface-alt); border: 1px solid var(--border); }
   /* CPE-1879 review finding 3: the first refusal's path + reason, own line so it never crowds the
      status pill; truncated with the full text in the native tooltip (`title`) rather than wrapped. */
   .status-detail { flex-basis: 100%; font-size: 11px; color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

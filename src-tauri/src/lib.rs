@@ -4455,6 +4455,7 @@ async fn apply_backup_plan_stream(
     copy: Vec<String>,
     update: Vec<String>,
     delete_paths: Vec<String>,
+    create_dirs: Vec<String>,
     verify: bool,
     confirmed: bool,
     on_result: tauri::ipc::Channel<Vec<OpResult>>,
@@ -4468,6 +4469,7 @@ async fn apply_backup_plan_stream(
             &copy,
             &update,
             &delete_paths,
+            &create_dirs,
             verify,
             confirmed,
             |r| {
@@ -4495,6 +4497,9 @@ async fn apply_backup_plan_stream(
 /// drive-connect scheduler, for a job the user ticked auto-run for) are the only call sites allowed to
 /// set it. See `cpe_server::backup::apply_backup_plan_walk` for exactly what the flag does and does not
 /// defend — it is UI discipline enforced in Rust, not an authorization boundary.
+// Over clippy's threshold since CPE-1925 added `create_dirs`; the argument list is the IPC payload
+// shape the frontend sends, so it cannot be collapsed without changing the command's public signature.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn apply_backup_plan(
@@ -4503,6 +4508,7 @@ async fn apply_backup_plan(
     copy: Vec<String>,
     update: Vec<String>,
     delete_paths: Vec<String>,
+    create_dirs: Vec<String>,
     verify: bool,
     confirmed: bool,
 ) -> Result<Vec<OpResult>, String> {
@@ -4513,6 +4519,7 @@ async fn apply_backup_plan(
             &copy,
             &update,
             &delete_paths,
+            &create_dirs,
             verify,
             confirmed,
         )
