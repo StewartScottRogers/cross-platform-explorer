@@ -3382,3 +3382,44 @@ complementary is a much stronger structure than one derivation nobody has bounde
 Set against the six rounds on #1087 — where each fix replaced a false sentence with a more specific false
 sentence — this is what the alternative looks like when someone takes it seriously: **not a better
 sentence, but no sentence, replaced by something that computes the answer.**
+
+## 2026-08-28 — a textually clean rebase that reintroduced the defect its base had just fixed
+
+#1090 merged at 06:45 and removed run-aborts from the zip extraction loop: one unwritable entry must be
+recorded and skipped, never take the archive down. #1089 rebased onto it an hour later. The rebase hit
+two conflicts, both resolved correctly — an interdiff confirms it, and the reviewer checked.
+
+**And #1089 reintroduced the defect anyway**, because it *adds a new per-entry failure point* — a
+`sync_all` plus a rename that can be refused — and committed it with a bare `?`. Measured against `main`
+with no race and no sabotage, just a destination held open by another process without
+`FILE_SHARE_DELETE`, which is what most non-Rust programs do:
+
+```
+base 104b0bc5 : Ok(done: 3)        before=BEFORE  victim=REPLACEMENT  after=AFTER
+head 9902e1f5 : Err("… could not be replaced …")  before=BEFORE  victim=ORIGINAL  after=ABSENT
+```
+
+**Neither PR's tests could catch it.** #1090 shipped exactly the right test —
+`cpe1935_a_blocked_entry_never_takes_the_run_down` fails loudly the moment a commit failure is driven —
+but **nothing in the tree drives one**. The contract had a guard; the new failure point was simply
+outside what any existing input could reach.
+
+**The general shape, and it is a real gap in how conflicts get reviewed.** A merge conflict shows you the
+lines two changes both touched. It cannot show you a line only *one* side touched whose meaning is set by
+a contract the *other* side changed. Here #1089's `?` was written weeks ago against a loop that aborted
+on failure; #1090 changed what that loop promises; the `?` never appeared in a conflict hunk and its
+diff still reads as untouched. **A clean interdiff proves the resolutions right and is silent about
+this entire class.**
+
+**The check that would have caught it, and it is cheap:** after rebasing onto a base that changed a
+loop's or a function's contract, **enumerate every early return you introduce inside it — every `?`,
+every `return`, every `break` — and check each against the contract as it exists on `main` today, not as
+it existed when the line was written.** #1089 has exactly one bare `?` left in that loop, so the
+enumeration is one line long.
+
+The same rebase produced a quieter instance in the same PR: a red-proof transcript recorded at the site
+still says the extraction *"comes back `Err` and `after.txt` is never created"*. Re-run on the rebased
+tree it returns `Ok` with `after.txt` present — the test still reds, correctly, but on a different
+assert. **Pre-rebase evidence presented as re-taken.** And the comment justifying that fix still argues
+it on the grounds of a `return Err` the base deleted. **A rebase invalidates transcripts as surely as it
+invalidates code, and nothing recomputes them.**
