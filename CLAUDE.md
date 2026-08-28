@@ -210,21 +210,36 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      recorded as provenance and never independently re-run — treat it as history, not as a measurement
      you can reproduce). A whole-line-comment filter is *not* enough — a **trailing** comment walks
      straight through it, which is how CPE-1933's first draft reintroduced the hole it was closing.
-     Three JS-specific rules learned the hard way: decide regex-vs-division on the previous **token**,
+     Five JS-specific rules learned the hard way: decide regex-vs-division on the previous **token**,
      never the previous character (every keyword ends in a word char, so `return /[//]/;` reads as
      division and the `/` opens a comment that eats the line); decide a **`)`** by what its `(`
      opened, never by the `)` itself (round 3 fixed the keyword prefix, then *documented* `)` as a gap
      that "fails toward keeping source" — and `if (s.length) /[/*]/.test(s);` is valid JavaScript that
      the same mechanism deleted 144 characters of, one round later, with a green test beside the false
-     claim); and **point a JS scanner at JS only** — `sessionChipColours` tokenized a whole HTML
-     document, where one apostrophe in prose shifted the strip by 11,872 characters (a round-2 figure,
-     **no longer reproducible**: round 3 made an unterminated string stop at the newline, so the same
-     injection now shifts the strip by 0 — the rule stands on the mechanism, not the size).
-     **The general lesson, which is the expensive one:** a *declared* gap is a claim like any other,
-     and "all of which fail toward keeping" was asserted over a list rather than derived per entry.
-     Split a gap list by direction, pin the deleting shapes as their own cases, and derive the
-     property that makes each survivable — `jsSource.test.ts` asserts with `vm.Script` that no
-     deleting gap accepts input that parsed, instead of writing it down.
+     claim); **a token-kind state must SURVIVE to the token that consumes it** — round 5's
+     `for await (const x of y) /[//]/…` deleted 14 characters because `await` is the one word the
+     grammar allows between a control word and its `(`, and it is also a regex-prefix keyword, so it
+     overwrote the `"control"` state that the `)` was going to read; **account for every character a
+     branch CONSUMES, not just the ones it emits** — a mis-read regex literal swallows the source's own
+     parens (`{} / f(1 / 2)` scans as `/ f(1 /`), and a swallowed `(` that never reached the stack
+     leaves the matching `)` popping the frame beneath it, another 14 characters (a real regex balances
+     its parens, so pushing/popping the ones the literal eats is a no-op for the honest case and a fix
+     for the dishonest one); and **point a JS scanner at JS only** — `sessionChipColours` tokenized a
+     whole HTML document, where one apostrophe in prose shifted the strip by 11,872 characters (a
+     round-2 figure, **no longer reproducible**: round 3 made an unterminated string stop at the
+     newline, so the same injection now shifts the strip by 0 — the rule stands on the mechanism, not
+     the size).
+     **The general lesson, which is the expensive one, and it cost two rounds because the fix looked
+     like the lesson:** a *declared* gap is a claim like any other. Round 3 asserted "all of which fail
+     toward keeping" over a list rather than deriving it per entry; round 4 split the list by
+     direction, derived it per entry with `vm.Script` — and then wrote **"neither is reachable from
+     valid JavaScript"** over the same list, which is the same defect one level up. A filter over a
+     case table proves a fact about **the table**; it cannot prove a fact about the language, and next
+     to a green run the generalisation reads as though it did. So: split a gap list by direction, pin
+     the deleting shapes as their own cases, derive the property per entry — and then **state the
+     assertion at the scope it was measured at.** `jsSource.test.ts` now says "no entry in this table
+     parses before stripping", not "no valid JavaScript reaches this". The only leg that speaks for the
+     shapes nobody enumerated is compiling the RESULT (`stripScriptBodiesChecked`).
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
      never actually re-reads its source is the same defect with extra steps. Write the red-proof's
      **result at the site**, not only in the PR body — a code comment that merely asserts, next to a

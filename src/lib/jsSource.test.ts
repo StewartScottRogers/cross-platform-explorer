@@ -114,6 +114,93 @@ const FALSE_STRIP_PAREN: Case[] = [
 ];
 
 /**
+ * FALSE-STRIP, round 5a — `for await`, the ONE token the grammar lets sit between a control word and
+ * its `(`.
+ *
+ * Round 4 decided a `)` by what its `(` opened, and tracked that with a `prevKind` of `"control"` set
+ * by the control word. Comments between `for` and `(` are transparent (their branches write neither
+ * `prevKind` nor `prevPunct`) — but `await` is a WORD, and it is also in `REGEX_AFTER`, so the word
+ * branch overwrote `"control"` with `"keyword"` and pushed `false`. The `)` then resolved to a value,
+ * the `/` after it read as division, and the character class hid a comment opener.
+ *
+ * Measured against round 4 (`ca25be56`) before the fix: `-14` on the `//` form, `-50` on the `/*` one,
+ * parseable in and unparseable out in both. Fixed by letting `"control"` survive `await`.
+ */
+const FALSE_STRIP_AWAIT: Case[] = [
+  {
+    name: "`for await (…)` + a `//` class — was -14 characters, parseable in, unparseable out",
+    input: "async function f(y){ for await (const x of y) /[//]/.test(x); }",
+    want: "async function f(y){ for await (const x of y) /[//]/.test(x); }",
+  },
+  {
+    name: "`for await (…)` + a `/*` class — was -50, eating the two statements after the function",
+    input:
+      "async function f(y){ for await (const x of y) /[/*]/.test(x); }\nconst survivor = 1;\nconst also = 2;",
+    want:
+      "async function f(y){ for await (const x of y) /[/*]/.test(x); }\nconst survivor = 1;\nconst also = 2;",
+  },
+  {
+    name: "comments on either side of `await` are transparent, and the condition still reads as one",
+    input: "async function f(y){ for /* c */ await /* c */ (const x of y) /[//]/.test(x); }",
+    want: "async function f(y){ for   await   (const x of y) /[//]/.test(x); }",
+  },
+  {
+    name: "the same inside a `${…}` — the frame's own paren stack resolves it",
+    input: "async function f(y){ `${ (async () => { for await (const x of y) /[//]/.test(x); })() }`; }",
+    want: "async function f(y){ `${ (async () => { for await (const x of y) /[//]/.test(x); })() }`; }",
+  },
+  // Blast radius: `await` must NOT become a control word in general, and the benign `/re/` form of
+  // `for await` must be untouched either way.
+  {
+    name: "BLAST RADIUS: `await` NOT after a control word is still a plain regex prefix, not a condition",
+    input: "async function f(s){ await /[//]/.test(s); }",
+    want: "async function f(s){ await /[//]/.test(s); }",
+  },
+  {
+    name: "BLAST RADIUS: `for await (…)` followed by an ordinary regex",
+    input: "async function f(y){ for await (const x of y) /re/.test(x); }",
+    want: "async function f(y){ for await (const x of y) /re/.test(x); }",
+  },
+];
+
+/**
+ * FALSE-STRIP, round 5b — a MIS-READ regex swallowing the source's own parens.
+ *
+ * New-shaped rather than newly-broken: round 4 introduced the paren stack that can desynchronise.
+ * `}` is a punctuator, so `{} / f(1 / 2)` scans as a regex literal `/ f(1 /`; the `(` inside it was
+ * consumed by the regex branch and never pushed, so the condition's own `)` popped nothing and the
+ * OUTER `)` took the `true` meant for it.
+ *
+ * Fixed by accounting for every paren the regex branch consumes, whichever branch consumes it. It is a
+ * no-op for a real regex literal — its unescaped, out-of-class parens are balanced, and an unbalanced
+ * one is a SyntaxError — and it is exactly right for a mis-read division, which really did eat those
+ * parens. Measured against round 4 before the fix: `-14`, parseable in, unparseable out, in both the
+ * swallowed-`(` and swallowed-`)` directions.
+ */
+const FALSE_STRIP_EATEN_PAREN: Case[] = [
+  {
+    name: "a mis-read regex that swallows an unmatched `(` — was -14, the outer `)` stole the condition",
+    input: "function f(x){return x} if ({} / f(1 / 2)) /[//]/.test('a');",
+    want: "function f(x){return x} if ({} / f(1 / 2)) /[//]/.test('a');",
+  },
+  {
+    name: "and one that swallows an unmatched `)` — the other direction, also -14",
+    input: "function g(a){return a} if (g({} / a) / 2) /[//]/.test('b');",
+    want: "function g(a){return a} if (g({} / a) / 2) /[//]/.test('b');",
+  },
+  {
+    name: "BLAST RADIUS: a REAL regex's balanced parens leave the condition stack untouched",
+    input: "if (/(a)/.test(s)) /[//]/.test(s);",
+    want: "if (/(a)/.test(s)) /[//]/.test(s);",
+  },
+  {
+    name: "BLAST RADIUS: a mis-read regex whose swallowed parens balance was already right",
+    input: "function f(x){return x} if ({} / f(1) / 2) /[//]/.test('a');",
+    want: "function f(x){return x} if ({} / f(1) / 2) /[//]/.test('a');",
+  },
+];
+
+/**
  * FALSE-KEEP — a comment left in place. Harmless to a parse, NOT harmless to `includes(claim)`:
  * round 1's whole defect was a provenance claim satisfied by a comment quoting the old value.
  */
@@ -215,12 +302,23 @@ const KNOWN_GAPS: Case[] = [
  * region is deleted, to end of line or to the next `*​/`. Round 3 fixed this for keyword prefixes and
  * round 4 for control-statement conditions; what is left is `]` and a call's `)`.
  *
- * These are not reachable from valid JavaScript, and that is DERIVED below rather than claimed —
- * `parsesBefore: false` is asserted with `vm.Script`, not written down. Real JS reads that `/` as
- * division too, so `a[0] / [//]/…` opens an array literal the `//` comments away, and the input was
- * already broken before the stripper saw it. That is a much weaker safety property than "fails
- * toward keeping", which is the point of listing them separately: the `vm.Script` oracle is blind
- * here by construction, because it only asks about inputs that parsed.
+ * **Say exactly what the test below derives, and no more: NO ENTRY IN THIS TABLE PARSES before
+ * stripping.** That is a statement about `DELETING_GAPS`, not about JavaScript. It is checked with
+ * `vm.Script` rather than written down, so an entry added later that *does* parse reds — but a
+ * deleting shape nobody has added here is not covered by it, and no green run in this file can be
+ * read as saying one does not exist.
+ *
+ * Round 5 is why that distinction is spelled out. Round 4 wrote "neither is reachable from valid
+ * JavaScript" over this list, next to this green filter, and two parseable inputs still deleted:
+ * `for await (const x of y) /[//]/…` (-14) and `if ({} / f(1 / 2)) /[//]/…` (-14). Both are fixed
+ * above. Generalising a per-entry derivation into a property of the whole mechanism is round 3's
+ * defect one level up, and the module header names that failure shape.
+ *
+ * What IS true of each entry here, individually and by inspection: real JS reads that `/` as division
+ * too, so `a[0] / [//]/…` opens an array literal the `//` comments away, and the input was already
+ * broken before the stripper saw it. That is a much weaker safety property than "fails toward
+ * keeping", which is the point of listing them separately: the `vm.Script` oracle is blind here by
+ * construction, because it only asks about inputs that parsed.
  */
 const DELETING_GAPS: Case[] = [
   {
@@ -266,6 +364,22 @@ describe("stripJsComments — the `)` shapes that used to DELETE code (CPE-1966 
   });
 });
 
+describe("stripJsComments — `for await`, the token that used to break the condition (CPE-1966 round 5)", () => {
+  for (const c of FALSE_STRIP_AWAIT) {
+    it(c.name, () => {
+      expect(stripJsComments(c.input)).toBe(c.want);
+    });
+  }
+});
+
+describe("stripJsComments — a mis-read regex desynchronising the paren stack (CPE-1966 round 5)", () => {
+  for (const c of FALSE_STRIP_EATEN_PAREN) {
+    it(c.name, () => {
+      expect(stripJsComments(c.input)).toBe(c.want);
+    });
+  }
+});
+
 describe("stripJsComments — the three shapes that used to KEEP a comment", () => {
   for (const c of FALSE_KEEP) {
     it(c.name, () => {
@@ -299,10 +413,11 @@ describe("stripJsComments — the declared gaps that DELETE, and why they stay d
     });
   }
 
-  it("NONE of them is reachable from parseable JavaScript — the safety property, derived", () => {
-    // This is the whole justification for shipping them as gaps rather than fixing them, and it is
-    // the claim round 4 refused to take on trust. If a future shape lands here that DOES parse
-    // before stripping, this reds — and it should, because that would be a live deletion bug.
+  it("no entry IN THIS TABLE parses before stripping — a property of the table, not of JavaScript", () => {
+    // The whole justification for shipping these as gaps rather than fixing them, stated at the scope
+    // it is actually measured at. If a shape lands in DELETING_GAPS that DOES parse before stripping,
+    // this reds — and it should, because that would be a live deletion bug. It says nothing about a
+    // deleting shape nobody has written down; round 5 found two of those with this leg green.
     const parseable = DELETING_GAPS.filter((c) => parses(c.input)).map((c) => c.name);
     expect(parseable, "a DELETING gap accepts valid JavaScript — that is a bug, not a gap").toEqual([]);
     expect(DELETING_GAPS.length, "the enumeration measured nothing").toBeGreaterThan(2);
@@ -310,7 +425,10 @@ describe("stripJsComments — the declared gaps that DELETE, and why they stay d
 });
 
 describe("stripJsComments — the oracle that does not depend on anyone writing the case", () => {
-  const all = [...FALSE_STRIP, ...FALSE_STRIP_PAREN, ...FALSE_KEEP, ...ALREADY_RIGHT, ...KNOWN_GAPS, ...DELETING_GAPS];
+  const all = [
+    ...FALSE_STRIP, ...FALSE_STRIP_PAREN, ...FALSE_STRIP_AWAIT, ...FALSE_STRIP_EATEN_PAREN,
+    ...FALSE_KEEP, ...ALREADY_RIGHT, ...KNOWN_GAPS, ...DELETING_GAPS,
+  ];
 
   it("every case that parses before stripping still parses after", () => {
     // A case table only contains what someone imagined. This leg is the one that catches the rest:

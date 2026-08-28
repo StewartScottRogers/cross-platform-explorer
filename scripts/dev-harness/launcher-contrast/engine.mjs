@@ -1019,14 +1019,15 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
         systemColours: { Canvas: base.canvas, CanvasText: base.canvasText, Field: base.field, ButtonFace: base.buttonFace },
         sites: all, matched: setup.matched, mounted: setup.mounted, forced, animations: animMeta.count, pixels,
         // ── WORK DONE, per leg, per scheme (round-3 blocker 1) ─────────────────────────────────
-        // `run.mjs` floors SIX of these per scheme. Three — `baseReadings`, `stateReadings`,
+        // `run.mjs` checks SIX of these per scheme — five floors and one ceiling (`stateSkips`, which
+        // reds when it is ABOVE zero). Three — `baseReadings`, `stateReadings`,
         // `animReadings` — are counted OUT OF `all`, the one array the report is actually built
         // from, rather than from each leg's own bookkeeping. That choice is the round-3 lesson
         // repeated: a count taken where the work is *intended* still reads as work. The Reviewer's
         // base-leg sabotage was `const all = []`, which leaves the base probe's own `sites.length`
         // at 422 and would sail straight through a floor on it, while the report saw nothing.
         // Deriving those three from `all` means every sabotage that empties it reds all three at
-        // once. The other three floors — `forced.length`, `stateSkips`, `animFrames` — are
+        // once. The other three — `forced.length`, `stateSkips`, `animFrames` — are
         // leg-local by necessity (a skip is by definition not a reading) and are safe because every
         // leg also carries an `all`-derived floor; see run.mjs's `legsThatDidNotRun` header.
         // `animations` (the page's metadata) and `animFrames` (frames actually stepped) are BOTH
@@ -1115,13 +1116,64 @@ export function pseudoRulesFromCss() {
  * as does a pass that verified nothing: a screenshot leg that measures zero grounds prints "0
  * verified, 0 disagreeing", which reads as success and is the repo's "did not run ≠ found nothing"
  * rule, so it is a floor rather than a shrug.
+ *
+ * ROUND 5 added a third fatal condition, and the reason is worth reading before touching the sampler:
+ * **a reading that is not well-determined is not a reading.** The mode over 45 interior samples was
+ * being compared to the prediction with no check that the mode meant anything, and with glyphs painted
+ * it frequently did not — see the glyph-suppression note in the body. `run.mjs` now reds unless every
+ * ground samples a SINGLE colour across all 45 points. That is the strongest form of the condition
+ * rather than a tuned one: measured 118/118 grounds unanimous, both schemes, so there is no margin
+ * being spent. If a future site is genuinely not flat, the model's one-ground-colour premise does not
+ * hold for it and the right answer is to fix the model, not to widen this.
+ *
+ * The residual 1/255 that `delta > 1` tolerates is now identifiable rather than folklore: with the
+ * sample unanimous, ten light and sixteen dark grounds differ from the prediction by exactly one, all
+ * in the same direction (`#eaeaea` -> `#e9e9e9`, `#1a1a1a` -> `#191919`, `#262626` -> `#252525`,
+ * `#242424` -> `#232323`, `#191919` -> `#181818`). That is a rounding-direction difference between
+ * this file's alpha compositing and Chrome's, systematic and platform-independent — which is exactly
+ * what CPE-1921's Reviewer set the 1/255 window for.
+ *
+ * RED-PROOFED both ways (CPE-1933 rule 3), results recorded here rather than only in the PR:
+ *   A. The leg still catches a WRONG MODEL. Perturbing the predicted ground by +9 in the red channel
+ *      (`ground: hx([g.inside[0] + 9, ...])`) gives **exit 1, 47 of 59 grounds disagreeing**, each
+ *      logged `[mode 45/45, 1 distinct]` — which is the point of the change: a disagreement is now
+ *      unambiguously the model, where before it could have been the sampler.
+ *   B. The flatness condition really fires. Replacing the injected stylesheet with an inert comment —
+ *      i.e. reinstating the pre-round-5 behaviour — gives **exit 1, 112 of 118 grounds flagged**, the
+ *      weakest mode at **24%** of its samples. That is what CI was silently deciding a verdict from.
  */
+/** The screenshot-only glyph suppressor's element id, so the same string inserts and removes it. */
+const GLYPHS_OFF_ID = "__cpe1966-pixel-probe-glyphs-off";
+
 async function verifyAgainstPixels(client, textSites) {
   // The boot overlay is `position: fixed; inset: 0; z-index: 9999; background: Canvas` and covers the
   // whole page until `endBoot()` fades it. It has to come out of the way for a screenshot to show the
   // launcher at all — but ONLY for the screenshot: it stays in place for the computed-style pass so
   // `.boot-label`'s animation keeps running and its trough (CPE-1966 site 3) is still sampled.
-  await client.evaluate(`(function(){var b=document.getElementById("boot-overlay"); if(b) b.style.display="none";})()`);
+  //
+  // GLYPHS COME OUT TOO, and this is the round-5 fix rather than a convenience. What this leg
+  // cross-checks is the GROUND — the composited background behind a text site — and it read that
+  // ground as the modal colour of a grid of interior samples, on the stated assumption that "glyphs
+  // are a minority of an element's interior pixels". **Measured on this page, that assumption is
+  // false for small text.** With glyphs painted, `div.tab > span.tab-usage` (25x14) sampled **28
+  // distinct colours in 45 points** and its mode won with **13**; six sites had the predicted colour
+  // appear ZERO times and passed only because the winning antialiased blend happened to land within
+  // 1/255. Which blend wins is decided by font rasterisation, so the answer is platform-dependent:
+  // Windows 59 grounds / 0 disagreeing, ubuntu-latest 60 grounds / 3 disagreeing (`#161616` read as
+  // `#222222`, `#121212` as `#121937`) on the SAME commit. That was not a compositing error, a device
+  // scale factor, or a boot-overlay race — it was a mode taken over a sample the text dominated.
+  //
+  // `-webkit-text-fill-color` is deliberate and narrower than `color`: it changes the glyph fill ONLY,
+  // leaving `currentColor` — and therefore every border, outline and shadow that resolves to it —
+  // exactly where it was, so no BACKGROUND anywhere on the page moves. Nothing this leg measures is
+  // hidden by it; the thing being measured becomes readable for the first time.
+  await client.evaluate(`(function(){
+    var b=document.getElementById("boot-overlay"); if(b) b.style.display="none";
+    var st=document.createElement("style"); st.id=${JSON.stringify(GLYPHS_OFF_ID)};
+    st.textContent="*,*::before,*::after{-webkit-text-fill-color:transparent!important;" +
+      "text-decoration-color:transparent!important;text-shadow:none!important;caret-color:transparent!important}";
+    document.head.appendChild(st);
+  })()`);
   const shot = await client.send("Page.captureScreenshot", { format: "png" });
   const png = decodePng(Buffer.from(shot.data, "base64"));
   const rects = JSON.parse(await client.evaluate(`
@@ -1136,9 +1188,14 @@ async function verifyAgainstPixels(client, textSites) {
     if (!r || r.w < 10 || r.h < 10) continue;
     // The MODE of a grid of interior samples, not one corner pixel. A corner lands on the border, on
     // a border-radius arc, or outside a pill entirely - measured: sampling (x+2, y+2) reported a
-    // badge's #3a9d4a fill as #d2e5d5, which is the antialiased edge, not the ground. Glyphs are a
-    // minority of an element's interior pixels, so the most common interior colour IS the painted
-    // background - and the ground is the half of the ratio that moves when an ancestor changes.
+    // badge's #3a9d4a fill as #d2e5d5, which is the antialiased edge, not the ground. The ground is
+    // the half of the ratio that moves when an ancestor changes, so it is the half worth verifying.
+    //
+    // This used to say "glyphs are a minority of an element's interior pixels, so the most common
+    // interior colour IS the painted background". Round 5 measured that and it was FALSE for small
+    // text - the sentence was the defect, not the sampling. With glyph fill suppressed for the
+    // screenshot (see above) it is true by construction instead of by hope, and `run.mjs` reds if any
+    // ground fails to come back unanimous rather than trusting a mode that won a plurality.
     const counts = new Map();
     const inset = 4;
     for (let gx = 0; gx < 9; gx++) {
@@ -1151,11 +1208,25 @@ async function verifyAgainstPixels(client, textSites) {
       }
     }
     if (!counts.size) continue;
-    const got = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const got = ranked[0][0];
+    const total = [...counts.values()].reduce((a, b) => a + b, 0);
     const want = s.ground;
     const delta = Math.max(...[0, 1, 2].map((i) => Math.abs(parseInt(got.slice(1 + i * 2, 3 + i * 2), 16) - parseInt(want.slice(1 + i * 2, 3 + i * 2), 16))));
-    rows.push({ path: s.path, predicted: want, painted: got, delta });
+    rows.push({
+      path: s.path, predicted: want, painted: got, delta,
+      // How WELL-DETERMINED the mode is, carried so a disagreement can be diagnosed instead of
+      // guessed at. `share` is the modal colour's count out of `total` sampled points, and
+      // `predictedShare` is how many of those points were the predicted colour — a disagreement at
+      // share 3/45 with the prediction at 2/45 is a coin-flip between antialiased glyph pixels, not
+      // a compositing error, and the two read completely differently in a CI log.
+      share: ranked[0][1], total, predictedShare: counts.get(want) ?? 0, distinct: counts.size,
+      rect: { w: Math.round(r.w), h: Math.round(r.h) },
+    });
   }
-  await client.evaluate(`(function(){var b=document.getElementById("boot-overlay"); if(b) b.style.display="";})()`);
+  await client.evaluate(`(function(){
+    var b=document.getElementById("boot-overlay"); if(b) b.style.display="";
+    var st=document.getElementById(${JSON.stringify(GLYPHS_OFF_ID)}); if(st) st.remove();
+  })()`);
   return rows;
 }

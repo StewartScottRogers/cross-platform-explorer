@@ -35,8 +35,17 @@
  * claim like any other.** "All of which fail toward KEEPING source" was asserted over a LIST rather
  * than derived per entry, its `)` case in the test table happened to be the benign form, and the
  * oracle iterating that benign case read as coverage for the whole claim. Gaps that delete are now
- * their own group, and what makes them survivable — that no valid JavaScript reaches them — is
- * asserted with `vm.Script` rather than written down.
+ * their own group, and the property that makes each one survivable is asserted with `vm.Script`
+ * rather than written down.
+ *
+ * Round 5's lesson is the same defect one level up, so read this one carefully before writing the
+ * next sentence about this module: round 4 replaced "all of which fail toward keeping" with
+ * **"neither is reachable from valid JavaScript"**, over the same list, next to the same green
+ * filter — and two parseable inputs still deleted (`for await (…)`, and a mis-read regex swallowing
+ * an unmatched `(`; both fixed, both pinned). **A per-entry derivation over a table is a fact about
+ * the table.** Generalising it to the mechanism turns a green test into a vouch for a claim it never
+ * measured. State the scope the assertion actually has, and let `stripScriptBodiesChecked`'s compile
+ * be the only thing that speaks for the shapes nobody enumerated.
  */
 
 /**
@@ -73,11 +82,26 @@ const REGEX_AFTER = new Set([
  * `switch` and `catch` are deliberately absent — their `)` is followed by `{`, never by a regex, so
  * adding them would only widen the regex reading with no shape to justify it.
  *
- * RED-PROOF (CPE-1933 rule 3), run at round 4 and recorded here rather than only in the PR: emptying
- * this set to `new Set([])` reds **6** of `jsSource.test.ts`'s 48 — the four `FALSE_STRIP_PAREN`
- * cases, the explicit `-144 -> 0` measurement, and, decisively, the `vm.Script` oracle itself with
- * four cases newly unparseable. The oracle catching it is the part that was missing before: round 3's
- * gap entry for `)` was the benign `/re/` form, so the oracle iterated a shape that could not fail.
+ * **The set is not the whole rule — REACHING the `(` intact is the other half (round 5).** Only
+ * whitespace, comments and `await` may sit between a control word and its `(`. Comments already pass
+ * through (their branches write neither `prevKind` nor `prevPunct`), but `await` is a WORD and is also
+ * in `REGEX_AFTER`, so the word branch below demoted `"control"` to `"keyword"` and
+ * `for await (const x of y) /[//]/…` deleted 14 characters of valid JavaScript. Membership in this set
+ * only matters if the state it sets survives to the `(`.
+ *
+ * RED-PROOFS (CPE-1933 rule 3), all three re-run at round 5 and recorded here rather than only in the
+ * PR. Each isolates ONE mechanism, because a single sabotage that reds everything cannot tell you
+ * which part was load-bearing:
+ *   - Emptying this set to `new Set([])` reds **14** of `jsSource.test.ts`'s 58 — the four
+ *     `FALSE_STRIP_PAREN` cases, the `-144 -> 0` measurement, the four `FALSE_STRIP_AWAIT` cases
+ *     (which reach their `(` through `for`), the four `FALSE_STRIP_EATEN_PAREN` cases, and,
+ *     decisively, the `vm.Script` oracle itself. The oracle catching it is the part that was missing
+ *     before: round 3's gap entry for `)` was the benign `/re/` form, so the oracle iterated a shape
+ *     that could not fail.
+ *   - Disabling only the `await` clause in the word branch (`false && …`) reds **5** — the four
+ *     `for await` cases and the oracle. That is the round-5 `for await` bug, on its own.
+ *   - Disabling only the eaten-paren accounting in the regex branch (`for (const p of [])`) reds
+ *     **3** — the two mis-read-regex cases and the oracle. That is the stack desync, on its own.
  */
 const CONTROL_PAREN = new Set(["if", "for", "while", "with"]);
 
@@ -124,10 +148,19 @@ const WORD = /[A-Za-z0-9_$]/;
  *      deletes to end of line, `f(x) /[/*]/…` deletes to the next `*​/`, possibly pages away. The
  *      emitted `/` and `[` are ordinary characters, so the next `/` reaches the comment branches.
  *
- *    Both deleting sub-cases are pinned by test. Neither is reachable from valid JavaScript: real JS
- *    reads that `/` as division too, so `a[0] / [//]/…` opens an array literal that the `//` comments
- *    away — the input does not parse *before* stripping either. That is why they are listed as gaps
- *    rather than as bugs, and it is a much weaker claim than "fails toward keeping".
+ *    Both deleting sub-cases are pinned by test, and what `jsSource.test.ts` derives about them is
+ *    exactly this: **no entry in its `DELETING_GAPS` table parses before stripping** — a statement
+ *    about that table, checked with `vm.Script`, not a statement about JavaScript. For each entry
+ *    individually the reason holds by inspection: real JS reads that `/` as division too, so
+ *    `a[0] / [//]/…` opens an array literal that the `//` comments away, and the input does not parse
+ *    *before* stripping either. That is why they are listed as gaps rather than as bugs, and it is a
+ *    much weaker claim than "fails toward keeping".
+ *
+ *    **Do not read it as "no valid JavaScript reaches this mechanism."** Round 4 wrote that sentence
+ *    over this list and round 5 measured two parseable inputs that still deleted — `for await (…)`
+ *    and a mis-read regex swallowing an unmatched `(`, both -14 characters, both now fixed above.
+ *    A green table says the shapes in the table are safe; it cannot say a shape nobody wrote down
+ *    does not exist. The only leg that speaks to that is `stripScriptBodiesChecked`'s compile.
  * 2. **No ASI awareness.** `a = b` newline `/re/.test(c)` is division, with exactly the same two
  *    sub-cases and the same reason they are unreachable from parseable input.
  * 3. **Unterminated literals** (a lone `"` or a `/` starting nothing) are emitted as themselves and
@@ -259,15 +292,36 @@ export function stripJsComments(src) {
       let j = i + 1;
       let inClass = false;
       let terminated = false;
+      /**
+       * Unescaped, out-of-class parens this literal SWALLOWS, applied to the frame only if it really
+       * turns out to be a literal. See the accounting note below for why they cannot just be ignored.
+       * @type {string[]}
+       */
+      const eaten = [];
       while (j < src.length) {
         if (src[j] === "\\") { j += 2; continue; }
         if (src[j] === "\n") break;                       // unterminated: treat the `/` as itself
         if (src[j] === "[") inClass = true;
         else if (src[j] === "]") inClass = false;
         else if (src[j] === "/" && !inClass) { terminated = true; break; }
+        else if (!inClass && (src[j] === "(" || src[j] === ")")) eaten.push(src[j]);
         j++;
       }
       if (terminated) {
+        // ACCOUNT FOR EVERY PAREN CONSUMED, whichever branch consumed it. The `(`/`)` branches above
+        // are not the only code that can eat a paren: this one eats every paren between the two `/`s.
+        // For a real regex literal that is a no-op — its parens are balanced, and an unbalanced one is
+        // a SyntaxError in JS — but a MIS-READ division swallows the *source's own* parens, and a
+        // swallowed `(` that never reached the stack leaves the matching `)` popping the frame beneath
+        // it. Measured: `if ({} / f(1 / 2)) /[//]/…` scanned `/ f(1 /` as a regex, the condition's `)`
+        // popped nothing, the outer `)` took the `true` meant for it, and 14 characters were deleted.
+        // This restores balance; it does NOT recover the KINDS inside the swallowed text (every eaten
+        // `(` is recorded as a value-opening one), which only matters on input that already failed to
+        // parse — see the gap list.
+        for (const p of eaten) {
+          if (p === "(") top.parens.push(false);
+          else top.parens.pop();
+        }
         out += src.slice(i, j + 1);
         i = j + 1;
         prevKind = "value";
@@ -287,11 +341,18 @@ export function stripJsComments(src) {
       out += word;
       // `obj.return` and `obj.if` are properties, not keywords — the `/` after them is a division.
       const keyword = prevPunct !== ".";
-      prevKind = keyword && CONTROL_PAREN.has(word)
+      prevKind = prevKind === "control" && keyword && word === "await"
+        // `for await (…)` — `await` is the ONE token the grammar lets sit between a control word and
+        // its `(`, and it is also in REGEX_AFTER, so without this it overwrote `"control"` with
+        // `"keyword"`, the `)` resolved to a value, and `for await (const x of y) /[//]/…` deleted to
+        // end of line. Comments may sit there too and already pass through untouched (their branches
+        // write neither `prevKind` nor `prevPunct`).
         ? "control"
-        : keyword && REGEX_AFTER.has(word)
-          ? "keyword"
-          : "value";
+        : keyword && CONTROL_PAREN.has(word)
+          ? "control"
+          : keyword && REGEX_AFTER.has(word)
+            ? "keyword"
+            : "value";
       prevPunct = "";
       i = j;
       continue;

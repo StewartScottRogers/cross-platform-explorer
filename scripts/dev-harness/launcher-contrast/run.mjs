@@ -117,9 +117,9 @@ function signature(s) {
  *     `npm run harness:launcher-contrast`. `--verify-pixels` caught it, but only incidentally (the
  *     pixel leg is fed from `all`), and the no-flag invocation is the documented local one.
  *
- * ── What the floors below actually are (corrected in round 4) ────────────────────────────────────
+ * ── What the checks below actually are (corrected in round 4, polarity named in round 5) ─────────
  *
- * There are **SIX** floors per scheme, not three, and they do not all come from the same place. Say
+ * There are **SIX** checks per scheme, not three, and they do not all come from the same place. Say
  * this precisely, because "the floors are taken out of `all`" was the round-3 wording and it was
  * wrong by half:
  *
@@ -129,6 +129,10 @@ function signature(s) {
  *   - THREE read LEG-LOCAL state — `forced.length` (pseudo-states actually forced), `stateSkips`
  *     (a skip counter, which is correctly local: it counts rules that produced no reading, so it
  *     could not be derived from readings), and `animFrames` (frames actually stepped).
+ *
+ * FIVE of the six are floors; **`stateSkips` is a CEILING** and reds when it is ABOVE zero, because
+ * the thing it counts is rules that produced no reading. Calling all six "floors" is loose — the
+ * surrounding text says what each one counts, but the polarity is worth naming rather than inferring.
  *
  * The property still holds, and it is the property rather than the provenance that matters: **every
  * leg has at least one `all`-derived floor**, so no leg can measure nothing and pass. `animFrames`
@@ -200,21 +204,41 @@ function analyse(res) {
   const declared = new Set(res.unreachable.map(([c]) => c));
   const unmatched = res.classNames.filter((c) => !res.schemes.light.matched[c] && !declared.has(c));
 
-  // The pixel leg's two failure modes. `pixelBad` is a real disagreement between the two paths;
+  // The pixel leg's THREE failure modes. `pixelBad` is a real disagreement between the two paths;
   // `pixelEmpty` is a leg that ran and measured nothing, which prints as "0 verified, 0 disagreeing"
   // and reads exactly like success.
+  //
+  // `pixelNotFlat` is round 5's, and it is a TIGHTENING rather than a tolerance. The screenshot read
+  // a ground as the MODE of 45 interior samples, on the premise that the mode is the background. With
+  // glyphs painted that premise was false for small text — one 25x14 site sampled 28 distinct colours
+  // and its mode won with 13 — so which antialiased blend won was decided by font rasterisation, and
+  // the same commit gave 0 disagreements on Windows and 3 on ubuntu-latest. `verifyAgainstPixels` now
+  // suppresses glyph fill for the screenshot, and with that done EVERY ground on this page reads as a
+  // single colour across all 45 samples: measured 118/118 grounds at `distinct === 1`, share exactly
+  // 1.000, in both schemes and both platforms. So the condition asserted here is the strongest
+  // available form — the sample must be UNANIMOUS — not a threshold chosen to clear today's noise. A
+  // site whose interior is genuinely not flat breaks the model's "one ground colour" premise, and that
+  // is worth a red rather than a mode taken over a tie.
   let pixelBad = 0;
   const pixelEmpty = [];
+  const pixelNotFlat = [];
   for (const scheme of ["light", "dark"]) {
     const d = res.schemes[scheme];
     if (!d.pixels) continue;
     pixelBad += d.pixels.filter((p) => p.delta > 1).length;
     if (d.pixels.length === 0) pixelEmpty.push(scheme);
+    for (const p of d.pixels.filter((p) => p.share < p.total)) {
+      pixelNotFlat.push(
+        `${scheme}: ${p.path} sampled ${p.distinct} colour(s) in ${p.total} interior points ` +
+          `(mode ${p.painted} won ${p.share}) — the ground is not flat, so the mode is a guess`,
+      );
+    }
   }
 
   const legsDown = legsThatDidNotRun(res);
-  const clean = !failures.length && !unmatched.length && !pixelBad && !pixelEmpty.length && !legsDown.length;
-  return { measured, sites, checked, failures, unmatched, pixelBad, pixelEmpty, legsDown, clean };
+  const clean = !failures.length && !unmatched.length && !pixelBad && !pixelEmpty.length
+    && !pixelNotFlat.length && !legsDown.length;
+  return { measured, sites, checked, failures, unmatched, pixelBad, pixelEmpty, pixelNotFlat, legsDown, clean };
 }
 
 function main() {
@@ -234,6 +258,7 @@ function main() {
           unmatchedClasses: a.unmatched,
           pixelDisagreements: a.pixelBad,
           pixelLegEmpty: a.pixelEmpty,
+          pixelGroundsNotFlat: a.pixelNotFlat,
           legsThatDidNotRun: a.legsDown,
         },
       }, null, 2));
@@ -266,7 +291,7 @@ function main() {
     }
     console.log("");
 
-    const { measured, sites, checked, failures, unmatched, pixelBad, pixelEmpty, legsDown } = a;
+    const { measured, sites, checked, failures, unmatched, pixelBad, pixelEmpty, pixelNotFlat, legsDown } = a;
 
     const wanted = opt("--site");
     const listed = flag("--all") ? sites : wanted ? sites.filter((s) => key(s).toLowerCase().includes(wanted.toLowerCase())) : [];
@@ -303,8 +328,14 @@ function main() {
       );
       if (d.pixels) {
         const bad = d.pixels.filter((p) => p.delta > 1);
+        // How well-determined the reading was, printed every run rather than only on a failure: a
+        // mode that wins 13 of 45 and one that wins 45 of 45 print the same verdict otherwise, and the
+        // difference between them is the whole of round 5's cross-platform failure.
+        const worstShare = Math.min(...d.pixels.map((p) => p.share / p.total), 1);
+        const flat = d.pixels.filter((p) => p.share === p.total).length;
         console.log(`  ${scheme}: pixel cross-check — ${d.pixels.length} grounds screenshot-verified, ${bad.length} disagreeing by more than 1/255`);
-        for (const p of bad.slice(0, 8)) console.log(`      predicted ${p.predicted} painted ${p.painted} (delta ${p.delta})  ${p.path}`);
+        console.log(`      ${flat}/${d.pixels.length} grounds sampled a single flat colour; weakest mode ${(worstShare * 100).toFixed(0)}% of its samples`);
+        for (const p of bad.slice(0, 8)) console.log(`      predicted ${p.predicted} painted ${p.painted} (delta ${p.delta})  ${p.path}  [mode ${p.share}/${p.total}, ${p.distinct} distinct]`);
         if (bad.length > 8) console.log(`      ... and ${bad.length - 8} more`);
       }
     }
@@ -435,6 +466,18 @@ function main() {
           "predict (listed above). Either the compositing model is wrong or the screenshot is of a\n" +
           "different page than the one measured; every ratio in this report rests on the model being right.",
       );
+    }
+    if (pixelNotFlat.length) {
+      console.log("");
+      console.log(
+        `PIXEL CROSS-CHECK IS NOT WELL-DETERMINED — ${pixelNotFlat.length} ground(s) did not sample a single flat\n` +
+          "colour, so the mode that was compared against the prediction was a vote rather than a reading.\n" +
+          "Glyph fill is suppressed for the screenshot precisely so every ground reads flat (measured:\n" +
+          "118/118 unanimous); a site that is not flat either has a painter the model does not know about\n" +
+          "or is small enough that the sample grid straddles its edge. Both are the model being wrong.",
+      );
+      for (const l of pixelNotFlat.slice(0, 8)) console.log(`      ${l}`);
+      if (pixelNotFlat.length > 8) console.log(`      ... and ${pixelNotFlat.length - 8} more`);
     }
     if (pixelEmpty.length) {
       console.log("");
