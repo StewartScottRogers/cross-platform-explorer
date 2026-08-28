@@ -1050,7 +1050,12 @@ struct EntryProbe {
     links: HardLinks,
     /// A directory (never followed through — this is the no-follow answer).
     is_dir: bool,
-    /// A symlink, junction or other reparse point.
+    /// **A name that stands in for another name** — a symlink or a junction — and deliberately *not*
+    /// "carries any reparse tag" (CPE-1957). Windows asks
+    /// [`crate::batch_media::reparse_name_surrogate`]; Unix asks `file_type().is_symlink()`, which is
+    /// already that same narrow question, so both platforms now answer alike. A cloud placeholder, a
+    /// dedup'd or WOF-compressed file is `false` here, because it is an ordinary file that must be
+    /// overwritten like any other rather than skipped.
     is_link: bool,
 }
 
@@ -1110,18 +1115,21 @@ fn probe_no_follow(path: &Path) -> EntryProbe {
 /// never assumed safe.
 #[cfg(windows)]
 fn probe_no_follow(path: &Path) -> EntryProbe {
+    use std::os::windows::io::FromRawHandle;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     let wide = crate::batch_media::verbatim_wide(path);
     // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. This is an
     // attributes-only open of an already-existing object (`OPEN_EXISTING`, full sharing) — no create, no
-    // write, no truncate, no data access — and the handle is closed on every path before returning.
+    // write, no truncate, no data access. Ownership of the handle is handed to a `File` immediately
+    // after the open, so every path below — including the early return — closes it exactly once, on
+    // drop, rather than through a `CloseHandle` each new early return has to remember.
     unsafe {
         let handle = match CreateFileW(
             PCWSTR(wide.as_ptr()),
@@ -1135,10 +1143,9 @@ fn probe_no_follow(path: &Path) -> EntryProbe {
             Ok(h) => h,
             Err(_) => return EntryProbe::unreadable("it could not be opened to read its link count"),
         };
+        let file = std::fs::File::from_raw_handle(handle.0 as *mut std::ffi::c_void);
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-        let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
-        let _ = CloseHandle(handle);
-        if !ok {
+        if GetFileInformationByHandle(handle, &mut info).is_err() {
             return EntryProbe::unreadable("the filesystem did not report its link count");
         }
         EntryProbe {
@@ -1152,7 +1159,30 @@ fn probe_no_follow(path: &Path) -> EntryProbe {
                 n => HardLinks::Many(u64::from(n)),
             },
             is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
-            is_link: info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
+            // **The narrow question, not the broad one (CPE-1957).** This used to read the bare
+            // `FILE_ATTRIBUTE_REPARSE_POINT` bit off `info.dwFileAttributes`, which is true of a great
+            // deal that is not a link — a OneDrive Files-On-Demand placeholder, NTFS dedup, WOF/WIM
+            // compression, ProjFS. Every one of those is an ordinary file that is still itself, and the
+            // sole reader of `is_link` on the wipe's file path (`shred_dir_pinned`) `continue`s on it,
+            // so a WOF-compressed or dedup'd file in a session directory was dropped from the file list
+            // and **never overwritten** — then unlinked by `remove_dir_all`, leaving its plaintext
+            // extents on the volume after a lock the user asked for precisely to remove them. That is
+            // CPE-1896's rule (a decorated file is a file) applied to the half of this module that was
+            // still asking the 2019 question.
+            //
+            // `reparse_name_surrogate` is the crate's single owner of the tag rule and of
+            // `IO_REPARSE_TAG_NAME_SURROGATE`; calling it rather than re-spelling the bit test is what
+            // keeps this from drifting away from `fsutil`'s two callers (CPE-1933 — the rule is shared
+            // by being called, not by a comment claiming it matches).
+            //
+            // `unwrap_or(true)` — "the description could not be read" is not a licence to walk into an
+            // object that may stand in for another name, and writing shred passes through a symlink
+            // destroys whatever it points at, which is strictly worse than the plaintext-retention harm
+            // above. Same default as `fsutil::copy_file_onto_destination_handle` and
+            // `open_beneath::sys::name_surrogate_at`, for the same reason, and — per
+            // `reparse_name_surrogate`'s own doc — untestable by construction on this handle, since
+            // nothing can make `GetFileInformationByHandleEx` fail on a handle just opened successfully.
+            is_link: crate::batch_media::reparse_name_surrogate(&file).unwrap_or(true),
         }
     }
 }
@@ -1822,8 +1852,18 @@ fn shred_dir_pinned(
         let path = entry.path();
         let probe = probe_no_follow(&path);
         if probe.is_link {
-            // A reparse point the directory entry did not report as a symlink (a Windows junction reads
+            // A name-surrogate the directory entry did not report as a symlink (a Windows junction reads
             // as a plain directory through some APIs). Same treatment: never followed.
+            //
+            // **This is the check that decides, and until CPE-1957 it asked the wrong question.**
+            // `probe.is_link` was the bare `FILE_ATTRIBUTE_REPARSE_POINT` bit, so this `continue`
+            // silently dropped every cloud placeholder, dedup'd and WOF-compressed file out of the wipe
+            // — `remove_dir_all` then unlinked the name and left the plaintext extents behind. It now
+            // asks `reparse_name_surrogate` (see `EntryProbe::is_link`), so those are enumerated as the
+            // ordinary files they are and overwritten. The handle-side refusal in `overwrite_pinned_file`
+            // asks the same narrow question a second time, against the object rather than the name; it
+            // is a backstop for a swap in the window between here and that open, and the sabotage
+            // numbers proving it cannot fire from a test are recorded at that site.
             continue;
         }
         if probe.is_dir {
@@ -1875,6 +1915,21 @@ fn same_object_or_refuse(
         // Deliberately does NOT claim the link "was swapped in" — this same call guards the very first
         // look at the wipe's root, where the link may have been there all along. It says only what is
         // certainly true: there is a link here, and this module does not overwrite through one.
+        //
+        // **Measured, not assumed: this is NOT a shadowed guard, and CPE-1957 expected it to be.**
+        // That ticket filed it as a probable duplicate of `shred_dir_pinned`'s `probe.is_link`, worth
+        // only an "unreachable backstop" note. The two sabotages say otherwise, on Windows 11
+        // (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored):
+        // disabling it (`if false && now.is_link`) is **2,458 passed / 2 failed** —
+        // `a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against` and
+        // `shred_tree_refuses_a_root_that_is_itself_a_link` — and forcing the predicate to lie
+        // (`if true || now.is_link`) is **2,433 passed / 27 failed**. Both legs red, so it has live
+        // coverage and no note claiming otherwise belongs here. The reason the duplicate reading was
+        // wrong is in the sentence above: the *root* call reaches this before any enumeration has
+        // happened, so there is no earlier by-path check in front of it to shadow it. Separately, with
+        // both of `shred_dir_pinned`'s by-path checks disabled, this is also what catches a planted
+        // directory link on the descent route (**2,459 / 1**) — the handle check in
+        // `overwrite_pinned_file` never sees that shape, because a junction is a directory.
         return Err(VaultError::Format(format!(
             "refusing to wipe {}: a symbolic link or junction is at this {what}, not the real one a wipe \
              walks — following it would overwrite whatever it points at",
@@ -1939,7 +1994,30 @@ fn overwrite_pinned_file(
             return shred_through(&mut file, path, scheme);
         }
     };
-    if facts.is_reparse_point || facts.is_dir {
+    // **Narrowed from `facts.is_reparse_point` to the surrogate question, and the two halves had to move
+    // together — CPE-1957.** The broad bit refused *any* reparse point, so a cloud placeholder, a dedup'd
+    // or WOF-compressed file reaching this point failed the whole lock mid-wipe. It never actually
+    // reached it, because `shred_dir_pinned`'s by-path `probe.is_link` asked the same broad question one
+    // step earlier and `continue`d — which is what made the defect invisible. Fixing either alone makes
+    // things worse: narrowing only the path check turns a silent skip into a mid-wipe refusal, and
+    // narrowing only this one changes nothing at all, since control never arrives.
+    //
+    // **Shadowed-guard measurement, run by hand on Windows 11 (`cargo test --lib`, `crates/server`),
+    // baseline 2,460 passed / 0 failed / 14 ignored.** Disabling this refusal (`if false && (..)`):
+    // **2,460 / 0** — identical, so nothing in the suite makes its predicate true. Forcing the predicate
+    // to lie (`if true || ..`): **2,434 passed / 26 failed** — which proves only that the *line* is on
+    // the hot path of every ordinary file, not that the *refusal* is reachable, and is why the second
+    // sabotage is uninformative for a guard sitting where this one sits. The measurement that does
+    // answer it: disabling both by-path checks in `shred_dir_pinned` (`ft.is_symlink()` and
+    // `probe.is_link`) gives **2,459 / 1**, and the one failure is refused by
+    // `same_object_or_refuse`'s link check on the *directory* route — not here. So on Windows a
+    // surrogate at a **file** name cannot reach this guard at all: `entry.file_type().is_symlink()`
+    // already catches the symlink spelling, and a junction is a directory. This is therefore kept as a
+    // **deliberate backstop against a swap between the enumeration probe and the open above**, which is
+    // the one shape no by-path check can see — and it is untestable from outside, because staging that
+    // race needs the swap to land inside a window this process does not expose. Do not be alarmed that
+    // sabotaging it leaves the suite green; that is the expected result, not a missing test.
+    if crate::batch_media::reparse_name_surrogate(&file).unwrap_or(true) || facts.is_dir {
         return Err(VaultError::Format(format!(
             "refusing to wipe {}: the handle opened at this name is a link or a directory, not the \
              ordinary file the wipe enumerated",
@@ -4813,6 +4891,124 @@ mod tests {
 
         assert!(!session.exists(), "the session tree must still be removed");
         assert_precious_intact(&victim, "after a wipe of a tree containing a link into it");
+    }
+
+    /// CPE-1957: a reparse point that does **not** stand in for another name — a OneDrive
+    /// Files-On-Demand placeholder, an NTFS dedup'd file, a WOF/WIM-compressed file — is an ordinary
+    /// file holding the user's plaintext, and a session wipe must **overwrite** it.
+    ///
+    /// **The bug this pins is a silent one, which is why it asserts on bytes and not on a `Result`.**
+    /// Both of this module's link questions used to read the bare `FILE_ATTRIBUTE_REPARSE_POINT` bit:
+    /// `shred_dir_pinned`'s `probe.is_link`, which `continue`s, and `overwrite_pinned_file`'s handle
+    /// check, which refuses. The by-path one ran first, so such a file was dropped from the file list
+    /// and never overwritten, `remove_dir_all` then unlinked the name, and the wipe reported success
+    /// with the plaintext extents still on the volume. `shred_dir_pinned` is called directly rather
+    /// than through `wipe_session_dir` for exactly that reason — the public entry point removes the
+    /// tree, so there would be nothing left to read back, and "the call returned `Ok`" is satisfied
+    /// just as well by the skip as by the fix.
+    ///
+    /// The two halves differ in exactly one bit (`0x2000_1957` is `0x0000_1957` with
+    /// `IO_REPARSE_TAG_NAME_SURROGATE` set), which is what lets this claim the **tag** is what decides
+    /// rather than the attribute. `make_guid_reparse_point` needs no privilege and no filter driver.
+    /// Windows-only by construction: Unix has no reparse points and its `is_link` is already
+    /// `file_type().is_symlink()`.
+    ///
+    /// **Red-proofed, both halves, on Windows 11 (`cargo test --lib`, `crates/server`).** Un-narrowing
+    /// `EntryProbe::is_link` back to the bare bit gives **2,460 passed / 1 failed**, failing here on
+    /// the non-surrogate half with the secret still readable — that is the live bug, reproduced. And
+    /// with `probe.is_link` narrowed but `overwrite_pinned_file`'s handle check left on the bare bit,
+    /// the same run gives **2,460 / 1** failing on this test's `expect` instead, with a mid-wipe
+    /// refusal — which is the measurement behind the claim at both sites that narrowing either one
+    /// alone makes matters worse.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1957_a_non_surrogate_reparse_point_in_the_session_tree_is_overwritten_not_skipped() {
+        use std::io::Read as _;
+
+        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1957;
+        const SURROGATE_FILE_TAG: u32 = 0x2000_1957;
+        const SECRET: &[u8] = b"the user's plaintext, which a lock exists to destroy";
+
+        let dir = worktree_tempdir();
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+
+        let placeholder = session.join("placeholder.txt");
+        std::fs::write(&placeholder, SECRET).unwrap();
+        if !crate::fsutil::make_guid_reparse_point(&placeholder, NON_SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPED cpe_1957_a_non_surrogate_reparse_point_in_the_session_tree_is_overwritten_not_skipped: \
+                 could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                 vault wipe's treatment of a cloud placeholder."
+            );
+            return;
+        }
+        // Liveness: without the attribute this is a test that an ordinary file gets overwritten.
+        assert!(
+            std::os::windows::fs::MetadataExt::file_attributes(
+                &std::fs::symlink_metadata(&placeholder).unwrap()
+            ) & 0x400
+                != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder"
+        );
+        // The control that makes this mean anything: `shred_dir_pinned`'s FIRST check is
+        // `entry.file_type().is_symlink()`, which would `continue` for free and prove nothing about
+        // the narrowed question.
+        assert!(
+            !std::fs::symlink_metadata(&placeholder).unwrap().file_type().is_symlink(),
+            "fixture is shadowed: std calls the non-surrogate placeholder a symlink"
+        );
+
+        let expected = probe_no_follow(&session).id;
+        assert!(expected.is_some(), "fixture is unusable: the session dir has no provable identity");
+        shred_dir_pinned(&session, expected, ShredScheme::Zero, AliasPolicy::ShredEveryFile).expect(
+            "a reparse point that does not stand in for another name is an ordinary file, and \
+             refusing it fails the whole lock mid-wipe on a vault the user is trying to close",
+        );
+
+        // Read back through a no-follow open: an unrecognised reparse tag makes an ordinary open fail.
+        let mut after = Vec::new();
+        crate::batch_media::open_existing_no_follow_read(&placeholder)
+            .expect("the placeholder must still be there to read back")
+            .read_to_end(&mut after)
+            .unwrap();
+        assert_ne!(
+            after.as_slice(),
+            SECRET,
+            "HARM: the wipe left the user's plaintext on the volume — a file carrying a non-surrogate \
+             reparse tag was skipped by the wipe and would have been unlinked by `remove_dir_all` with \
+             its extents intact, while the lock reported success"
+        );
+        assert!(
+            after.iter().all(|&b| b == 0),
+            "the zero scheme must have written zeros over the whole file, not merely changed it"
+        );
+
+        // The surrogate half, differing in exactly one bit: still skipped, never followed.
+        let surrogate = session.join("surrogate.txt");
+        std::fs::write(&surrogate, SECRET).unwrap();
+        if !crate::fsutil::make_guid_reparse_point(&surrogate, SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPED the surrogate half of \
+                 cpe_1957_a_non_surrogate_reparse_point_in_the_session_tree_is_overwritten_not_skipped: \
+                 could not plant a surrogate GUID reparse point on this volume."
+            );
+            return;
+        }
+        let expected = probe_no_follow(&session).id;
+        shred_dir_pinned(&session, expected, ShredScheme::Zero, AliasPolicy::ShredEveryFile)
+            .expect("a name-surrogate is skipped, not refused — the wipe walks past it");
+        let mut after = Vec::new();
+        crate::batch_media::open_existing_no_follow_read(&surrogate)
+            .expect("the surrogate must still be there to read back")
+            .read_to_end(&mut after)
+            .unwrap();
+        assert_eq!(
+            after.as_slice(),
+            SECRET,
+            "a name-surrogate must never be written THROUGH — the wipe leaves the name for \
+             `remove_dir_all` to unlink rather than overwriting whatever it stands for"
+        );
     }
 
     // ---- CPE-1669 / CPE-1670: create_vault writes the blob the way the re-seal does -----------------

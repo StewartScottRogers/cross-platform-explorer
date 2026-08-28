@@ -2162,6 +2162,18 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // argument and the evidence that would settle it. Deliberately not CPE-1958: that one is the
     // `links > 1` TOCTOU race at a neighbouring guard — a different problem — and a worker arriving
     // there would be working the race and might never read this.
+    //
+    // **A third site has since taken a position, which CPE-1959 asked for and should weigh (CPE-1957).**
+    // `vault_manager`'s session wipe now narrows to `reparse_name_surrogate` at **both** of its checks —
+    // the by-path `probe.is_link` in `shred_dir_pinned` and the handle check in `overwrite_pinned_file`
+    // — so it lands with `fsutil` and against this site. Its reason does not generalise to here, and
+    // that is the useful part: over-refusing at a *wipe* is not a skip, it is plaintext left on the
+    // volume after a lock the user asked for, so a vault's asymmetry runs the opposite way to the
+    // batch's. That leaves the choice at this site resting on the batch-specific argument above rather
+    // than on "the crate refuses these", which is no longer true. No count of narrowing-vs-refusing
+    // sites is asserted here: CPE-1959 owns that enumeration and PR #1066 already listed the
+    // `handle_facts` call sites to derive it from, and a number written here would be a second,
+    // unguarded copy of it (CPE-1932).
     let facts = match handle_facts(&verified.file) {
         Some(f) if !f.id.is_degenerate() => f,
         _ => {

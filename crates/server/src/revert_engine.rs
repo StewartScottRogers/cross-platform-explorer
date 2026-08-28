@@ -1088,6 +1088,24 @@ fn apply_write(
     // resolves the directories above the final component by path and the open is by path too, so a
     // directory link swapped into an interior component in between still redirects the write. `std`
     // exposes no `openat`-relative resolution to close it with.
+    // **CPE-1957 filed this as shadowing `claim_destination_handle`'s link refusal for `Create` ops, and
+    // asked for a note or a reorder. The measurement says: note, and emphatically not a reorder.** On
+    // Windows 11 (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored),
+    // disabling this check (`if false && ..`) is **2,457 passed / 3 failed**, and the three do not fail
+    // by landing on some downstream refusal with different wording — they fail with `HARM:` assertions
+    // showing the revert *destroyed the user's file* (`RestoreReport { applied: 1, skipped: [] }`,
+    // attacker bytes on disk). Forcing the predicate to lie (`op == Create || symlink_metadata(..)`) is
+    // **2,440 passed / 20 failed**. Both legs red: nothing shadows this, and it is the only thing
+    // holding that line.
+    //
+    // What *is* true is the narrower claim, and it runs the other way: for a `Create` whose destination
+    // is a link, this refuses first, so the link refusal downstream can never be the decider for that
+    // one op. Reordering to put the link question first would be a straight downgrade — it would trade
+    // a permanent, correctly-worded refusal that names the real problem (something already answers to
+    // this name, and the plan said nothing does) for a link-specific message covering a strict subset of
+    // the same inputs, while leaving every non-link occupant to fall through to a guard that does not
+    // ask about occupancy at all. The two checks state different properties on purpose; the earlier one
+    // is the stronger, and the ordering is the point rather than an accident.
     if action.op == RestoreOp::Create && fs::symlink_metadata(&target).is_ok() {
         // **Permanent** (review round 2). The shape that reaches this is a case fold or another alias —
         // `A.txt` against a live `a.txt` on a case-insensitive volume — and the volume does not stop
