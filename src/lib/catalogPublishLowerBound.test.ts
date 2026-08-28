@@ -1243,52 +1243,130 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 //     `dropSingleQuoted`-first ordering alone for the unclosed `$(catalog_lb_log_safe` in prose.
 //     Neither fix is redundant, which is not what it looked like before the pair was run.
 //
-// ── ROUND 7: EVERY FUNCTION IN THIS FILE THAT SCANS A SHELL LINE, and the same three questions ──
+// ── EVERY FUNCTION IN THIS FILE THAT SCANS SHELL TEXT, and the same three questions ─────────────
 //
 // Three rounds running, the SAME defect landed in a SIBLING of the thing that round fixed: round 5
 // widened `ASSIGN` for two names on a line and left `FILLED` taking one; round 5 extracted
 // `flagPrintf` and left its consuming loop unguarded; round 6 applied `dropSingleQuoted` inside
 // `flagPrintf` and not inside `taintedVars` one function away, where its absence was a live
 // fail-OPEN. Each fix was correct. None PROPAGATED. So the enumeration is written down rather than
-// re-derived from memory next round — every function here that reads a shell line, against the
-// three questions the three defects were instances of. Derived by reading the file, not recalled:
-// these are the functions taking shell text and answering something about the shell in it.
+// re-derived from memory next round.
 //
-//   fn               | 1. strips single-quoted prose first?  | 2. every name/word its construct binds?
-//   -----------------|---------------------------------------|----------------------------------------------
-//   commandWords     | YES, since round 4 —                  | n/a: it reports command WORDS, not bindings.
-//                    | `dropSingleQuoted(line)` at the head  | The analogous widening is its `NAME=value` /
-//                    | of its own loop                       | `PREFIXES` / `$( )`-splitting walk.
-//   taintedVars      | YES as of round 7 — round 6's gap,    | YES as of round 7 — `filledTargets` walks
-//                    | and it was fail-OPEN, not merely      | bash's documented option grammar; the four
-//                    | noisy                                 | shapes it used to mis-bind are rows below.
-//   flagPrintf       | YES, since round 5, and its ordering  | n/a: it matches names against an
-//   (+ scanLogSites) | vs `blankSanitiserCalls` is asserted   | already-derived taint set.
+// THE MEMBERSHIP RULE, because round 7 answered a COUNT instead. Round 7's table had three rows and
+// closed with "adding a fourth line-scanning function means adding a fourth row" — and two functions
+// that qualified, `collapseExpansions` and `blankSanitiserCalls`, were already in the file and in
+// neither the rows nor the excused pair. A count cannot notice what was never counted. The rule is a
+// predicate, and it is APPLIED rather than remembered:
 //
-//   fn               | 3. its CONSUMER covered by a test that would red?
-//   -----------------|--------------------------------------------------------------------------------
-//   commandWords     | PARTLY, and by ACCIDENT, until round 7 — measured, not reasoned: its only
-//                    | caller was the real script, where every command found is already legal.
-//                    | Dropping its `dropSingleQuoted` DOES red there (this script's prose is wordy
-//                    | enough to produce ~30 phantom "commands"), but disabling the prefix strip
-//                    | reds NOTHING — the caller just loses `read`, which `SHELL_WORDS` excuses.
-//                    | `…that command scan reads code, not the prose…` below closes that.
-//   taintedVars      | YES — `…the taint pass follows the ordinary shell shapes…` below, fourteen
-//                    | rows, each a `printf … >&2` carrying remote bytes that was classified clean.
-//   flagPrintf       | YES — `…that scan can actually SEE…` drives `flagPrintf` AND `scanLogSites`
-//   (+ scanLogSites) | with six synthetic lines; round 5 covered only the former and the mutant moved.
+//     a row is owed by every function DECLARED IN THIS FILE that takes shell TEXT — one logical
+//     line, a list of them, or the script's source — and answers a question about the shell in it.
 //
-// `dropSingleQuoted` / `endsInsideSingleQuote` are not rows: they are the stripper itself and its
-// self-check, so question 1 is what they ARE. Adding a fourth line-scanning function means adding a
-// fourth row and answering all three, and a "no" in column 3 is the shape that has now bitten twice.
-// Note what column 3 cost to answer honestly: the first draft of this table wrote a flat YES for
-// `commandWords` and a red-proof that had not been run. Running it produced a DIFFERENT number
-// (2 tests, not 1) and a different conclusion. Answer these three by sabotage, never by reading.
+//         grep -nE '^[ ]*function [A-Za-z]' src/lib/catalogPublishLowerBound.test.ts
 //
-// ROUND 7's red-proofs, same machine, jq 1.7.1 on PATH, baseline **84 passed / 0 skipped** (round
-// 6's 83 plus the new `commandWords` test). All of them run, numbers as the runner printed them:
+// `…every shell scanner in this file is a row in the table above…` below runs that grep against the
+// file's own source and reds unless every name it finds is either a row or named in `NOT_SHELL_TEXT`
+// with the reason it is not one — so a fourteenth scanner fails the day it lands rather than the
+// round after, and calling something "not a scanner" costs a reviewable diff. Excused, with reasons:
+//   * `dropSingleQuoted` / `endsInsideSingleQuote` — the stripper itself and its self-check, so
+//     question 1 is what they ARE rather than something they do.
+//   * `guardLogicalLines` — the SOURCE of the shell text (a file read plus imported `logicalLines`),
+//     not a scanner of it; a narrowing here is caught by the parser self-checks its callers carry.
+//   * `commandLines` — scans the runner's OUTPUT for `::…` workflow commands, not shell.
+//   * `enumerate` — RUNS a slice of the script under bash; it answers nothing by reading.
+//   * the harness and fixture drivers (`parseWorkflow`, `runGuard`, `git`, `derive`, …), which take
+//     YAML, Rust, argv or a temp path.
+//
+//   fn                  | 1. strips single-quoted prose first?   | 2. every name/word its construct binds?
+//   --------------------|----------------------------------------|-------------------------------------------
+//   collapseExpansions  | n/a — it runs INSIDE `commandWords`,   | n/a: it collapses `${…}`/`$((…))` so the
+//                       | after that function's strip            | split does not read them as commands.
+//   commandWords        | YES, since round 4 —                   | n/a: it reports command WORDS, not
+//                       | `dropSingleQuoted(line)` at the head   | bindings. The analogous widening is its
+//                       | of its own loop                        | `NAME=value` / `PREFIXES` / `$( )` walk.
+//   shellTokens         | n/a — it runs INSIDE `filledTargets`,  | n/a: it reports WORDS. Its own widening
+//                       | after `taintedVars`' strip             | is the metacharacter token (round 8).
+//   filledTargets       | n/a — same, it is handed already-      | NO, and stated as rows rather than as a
+//                       | stripped text                          | universal — see below.
+//   taintedVars         | YES as of round 7 — round 6's gap,     | NO. Round 7 wrote "YES … every name/word
+//                       | and it was fail-OPEN, not merely       | its construct binds" here, in the round
+//                       | noisy                                  | whose own framing is that a universal
+//                       |                                        | written at this pass gets falsified by an
+//                       |                                        | ordinary shape within a day — and it was,
+//                       |                                        | by six of them, the same day. The honest
+//                       |                                        | answer: `filledTargets` walks bash's
+//                       |                                        | documented option grammar for `read` /
+//                       |                                        | `mapfile` / `printf -v` and NOTHING else,
+//                       |                                        | it is scored against the table of shapes
+//                       |                                        | below in BOTH directions, and its own
+//                       |                                        | docblock lists what it over- and
+//                       |                                        | under-reports. `local -n`, `getopts` and
+//                       |                                        | `eval` are not bound at all.
+//   blankSanitiserCalls | NO, and correctly — its CALLER         | n/a: it blanks sanitiser calls, it binds
+//                       | `flagPrintf` strips first, and that    | nothing. Its widening was round 4's
+//                       | ORDERING is itself asserted (case 5)   | anchor fix, red-proofed at its docblock.
+//   flagPrintf          | YES, since round 5, and its ordering   | n/a: it matches names against an
+//   (+ scanLogSites)    | vs `blankSanitiserCalls` is asserted   | already-derived taint set.
+//   enumerationLines    | NO — it filters on `$(`/backtick and   | n/a: it slices the script's own
+//                       | never strips. Fail-open in the         | enumeration loop out to run it.
+//                       | direction its own docblock states.     |
+//
+//   fn                  | 3. its CONSUMER covered by a test that would red?
+//   --------------------|-----------------------------------------------------------------------------
+//   collapseExpansions  | PARTLY, and by ACCIDENT — the same answer round 7 gave `commandWords` and
+//                       | did not record for this one. Measured, not reasoned: `if (s) return s;`
+//                       | reds **1 failed / 84 passed**, and the red is the REAL-SCRIPT caller only,
+//                       | `unchecked: i, line, missing, out, repo, sep, t`. The synthetic
+//                       | `…reads code, not the prose…` test does not exercise it at all — none of
+//                       | its four lines carries a `${…}` next to a split character.
+//   commandWords        | PARTLY, and by ACCIDENT, until round 7 — measured, not reasoned: its only
+//                       | caller was the real script, where every command found is already legal.
+//                       | Dropping its `dropSingleQuoted` DOES red there (this script's prose is wordy
+//                       | enough to produce ~30 phantom "commands"), but disabling the prefix strip
+//                       | reds NOTHING — the caller just loses `read`, which `SHELL_WORDS` excuses.
+//                       | `…that command scan reads code, not the prose…` below closes that.
+//   shellTokens         | YES — five metacharacter rows of the ordinary-shapes table. Disabling the
+//                       | metacharacter token reds THREE of them (measured; the other two survive on
+//                       | `bound` lifting the leading identifier off a whole operand), and reverting
+//                       | `filledTargets` to round 7 entire reds all five plus `read -ar arr`.
+//   filledTargets       | YES — nine rows of that same table, and each clause has its own.
+//   taintedVars         | YES — `…the taint pass follows the ordinary shell shapes…` below, now
+//                       | twenty-two rows, each a `printf … >&2` that was classified wrongly.
+//   blankSanitiserCalls | YES — `…that scan can actually SEE…`, synthetic cases (3)/(4)/(5), each
+//                       | fix reverted one at a time.
+//   flagPrintf          | YES — `…that scan can actually SEE…` drives `flagPrintf` AND `scanLogSites`
+//   (+ scanLogSites)    | with six synthetic lines; round 5 covered only the former and the mutant moved.
+//   enumerationLines    | PARTLY, and its docblock says which half: the executed leg catches a
+//                       | transformation that breaks the enumeration (33 failed / 50 passed), the
+//                       | pure-bash probe does not.
+//
+// A "no" in column 3 is the shape that has bitten twice; a "no" in column 2 is what round 7 wrote as
+// a "yes". Note what column 3 costs to answer honestly: round 7's first draft wrote a flat YES for
+// `commandWords` and a red-proof that had not been run, and running it produced a different number
+// and a different conclusion; round 8's `collapseExpansions` answer came out the same way. Answer
+// these three by sabotage, never by reading.
+//
+// ROUND 8's red-proofs, same machine, jq 1.7.1 on PATH, baseline **85 passed / 0 skipped** (round
+// 7's 84 plus the new membership test). All of them run, numbers as the runner printed them:
+//   * `filledTargets` reverted BODILY to round 7's — whole-word regex, `cut` operand, no `array`
+//     flag -> **1 failed / 84 passed**, the ordinary-shapes test naming exactly SIX rows: the five
+//     metacharacter-adjacent ones and `read -ar arr`. That is the round-7 trade, priced.
+//   * `else if (false && SHELL_META.test(ch))` in `shellTokens`, everything else left alone ->
+//     **1 failed / 84 passed**, and **three** rows, not five — see `filledTargets`' docblock for
+//     which two survive it and why. The first draft of this line said five, reasoned off the row
+//     labels; running it said three.
+//   * the `array` flag never set (`array = false` where the `-a` clause sets it) -> **1 failed /
+//     84 passed**, only the `read -ar arr` row, `["r","arr"]` against `["r"]`.
+//   * `collapseExpansions` neutered (`if (s) return s;`) -> **1 failed / 84 passed**, and the red is
+//     the REAL-SCRIPT command scan (`i, line, missing, out, repo, sep, t` arrive as `unchecked`
+//     commands), not the synthetic one. That is the table's column 3 for it, run rather than read.
+//   * `NOT_SHELL_TEXT` shortened by one entry -> the membership test reds with
+//     `unclassified: ['posixPath']`. Renaming a TABLE row instead reds with both `unclassified` and
+//     `stale` populated, so the table and the lists cannot drift apart in either direction.
+//
+// ROUND 7's red-proofs, re-quoted because they are still the coverage for those clauses, against
+// its own **84 passed** baseline:
 //   * remove `dropSingleQuoted` from `taintedVars`' loop (`const line = raw`) -> **1 failed /
-//     83 passed**, the ordinary-shapes test naming the two new rows and NOTHING else:
+//     83 passed**, the ordinary-shapes test naming the two round-7 prose rows and NOTHING else:
 //     `"a remedy MESSAGE naming the sanitiser marks a tainted name clean": []` (want `["safe"]`)
 //     and `"prose inside a single-quoted printf is not a `read`": ["release"]` (want `[]`).
 //   * revert `filledTargets` to round 6's `FILLED` regex, `dropSingleQuoted` left in place so this
@@ -1302,8 +1380,8 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 //     ~30 English words in `unchecked` — so that stripper was already covered, accidentally, by this
 //     script's prose being wordy. Disabling the `NAME=value` / `PREFIXES` strip instead reds **only
 //     the new test**, **1 failed / 83 passed**: the real caller merely loses `read` from `invoked`,
-//     `read` is in `SHELL_WORDS`, and nothing notices. The SECOND is the boundary this test actually
-//     closes. The draft of this note claimed the first sabotage was green before round 7; it is not,
+//     `read` is in `SHELL_WORDS`, and nothing notices. The SECOND is the boundary that test actually
+//     closes. The draft of that note claimed the first sabotage was green before round 7; it is not,
 //     and it was corrected by running it rather than by rereading it.
 
 /** Every line that a runner would read as a workflow command, i.e. `::…` after leading blanks. */
@@ -1358,6 +1436,15 @@ function guardLogicalLines(): string[] {
  * variable `sanitised` — and fail-closed noise in the other, four English words out of one message
  * standing in the live taint set), and `read`/`mapfile` option parsing, now bash's documented
  * grammar in `filledTargets` rather than a regex that mis-bound four shapes bash accepts.
+ * Closed in round 8, and it is the FOURTH instance of the same shape, this time INSIDE round 7's own
+ * fix: replacing that regex with a word walk also dropped the regex's anchor, so the six shapes that
+ * put the builtin hard against a shell metacharacter (`…|read -r x`, `read -r a;read -r b`,
+ * `(read …)`, `jq f|mapfile -t a`, `{ read …; }`) went from bound to `[]` in the diff that fixed
+ * four others. A widening is a TRADE until both directions are scored; `shellTokens` scores both and
+ * the table below carries the losing side as rows. The live taint set is 12 either way — re-measured,
+ * not assumed: `IFS, api_out, asset_name, assets, bound, count, curl_err, gh_err, http, line, out,
+ * tag`, identical to round 7's, because this script never writes those shapes today. That is a
+ * LATENT regression, not a shipped fail-open, and saying which is part of the report.
  *
  * ### READ THE FORM OF THIS SECTION BEFORE ADDING TO IT
  *
@@ -1389,11 +1476,30 @@ function guardLogicalLines(): string[] {
  * Every name one logical shell line BINDS without an `=` — `read`, `mapfile`/`readarray`,
  * `printf -v` — per bash's documented option grammar rather than a regex approximation of it.
  *
- * WHY A WORD WALK. Round 6's regex allowed `-x` and `-x arg` option runs and then took the trailing
- * run of identifiers. That is not the grammar: WHICH short options consume the following word is a
- * fixed, documented, per-builtin list, and without it four shapes bash accepts came out wrong while
- * the comment at the regex said "EVERY name after the options, not the first … UNCONDITIONALLY".
- * Measured at round 6's head, and each is now a row in the ordinary-shapes table below:
+ * A WIDENING IS A TRADE UNTIL BOTH DIRECTIONS ARE SCORED, and round 7 scored one. It replaced round
+ * 6's regex with a word walk, verified the four shapes the regex mis-bound, and never ran the
+ * regex's OWN cases back through the walk. Round 6 anchored on `(?:^|[\s!(){};|])`, so it saw the
+ * builtin after a metacharacter with no space; round 7 took whole whitespace-delimited words, so it
+ * did not, and six shapes bash binds went from caught to `[]` in the same diff that fixed four —
+ * measured by the round-8 reviewer, reproduced here, and each is now a row in the table below:
+ *     printf … "$(jq …)"|read -r leaked   -> []      (bash: leaked=TT)  -- pipe, no space
+ *     read -r a;read -r b < <(jq …)        -> ["a"]   (bash: a and b)    -- `;`, no space
+ *     (read -r x < <(jq -r .n f))          -> []      (bash: x=NN)       -- subshell parens
+ *     jq -r .n f|mapfile -t arr2           -> []      (bash: arr2=(NN))  -- pipe into mapfile
+ *     { read -r p;read -r q; }             -> ["p"]   (bash: p and q)    -- brace group
+ *     v=$(read -r x)                       -> []      (bash binds x only inside the substitution's
+ *                                                      own subshell, so `x` is UNSET after — this
+ *                                                      one is caught fail-CLOSED, not needed)
+ * `shellTokens` is the answer to BOTH directions at once and neither anchor alone was: metacharacters
+ * are their own tokens (round 6's property) while a double-quoted span stays whole (round 7's). The
+ * rule this round leaves behind: when you replace a matcher, run the PREVIOUS matcher's cases
+ * through the new one and say what moved, in both directions. This harness answered it in one run.
+ *
+ * WHY A WORD WALK AND NOT A REGEX. Round 6's regex allowed `-x` and `-x arg` option runs and then
+ * took the trailing run of identifiers. That is not the grammar: WHICH short options consume the
+ * following word is a fixed, documented, per-builtin list, and without it four shapes bash accepts
+ * came out wrong while the comment at the regex said "EVERY name after the options … UNCONDITIONALLY".
+ * Measured at round 6's head, and each is also a row in the ordinary-shapes table below:
  *     read -- name                -> []        (bash: name=hello)   -- end-of-options unhandled
  *     read -p "Enter: " x         -> []        (bash: x=hello)      -- the option argument has a
  *                                                                      space, so `\S+` stopped
@@ -1411,37 +1517,106 @@ function guardLogicalLines(): string[] {
  * them, and the command ends at the first shell metacharacter so `read -r a b; then` binds `a` and
  * `b` rather than `then`, and `mapfile -t lines < <(jq . f)` does not bind `f`.
  *
- * AT LEAST these are still not bound, and the list is split by whether a wider walk could catch it
- * (CLAUDE.md's round-9 rule: never a count, and say which half each shape is in):
- *   * NOT CAUGHT TODAY, catchable — an array subscript target (`read -r 'arr[$i]'` binds `arr`;
- *     the operand is taken whole, so `arr[$i]` is reported verbatim and matches no `$arr` use);
- *     `local`/`declare`/`typeset -n` nameref binding; `getopts optstring name`.
+ * AT LEAST these, and the list is split by whether a wider walk could catch it (CLAUDE.md's round-9
+ * rule: never a count, and say which half each shape is in). Every entry below was RUN through the
+ * live path before being written down — round 7's version of this list asserted a mechanism for the
+ * array-subscript entry that running it falsified, in both of its halves:
+ *   * OVER-reported, i.e. fail-CLOSED noise. `read -ar arr` is `-a` with the inline argument `r`,
+ *     so bash binds `r` and IGNORES `arr` (measured); the `array` flag is that fix and the
+ *     `` `read -ar` `` row is its red-proof. `read -- -x` is an ERROR in bash (`-x': not a valid
+ *     identifier`, status 1) binding nothing, and is still reported as `["REPLY"]` — kept rather
+ *     than fixed, because the direction is fail-closed and the row below says so out loud.
+ *   * CAUGHT, contrary to round 7's note here. `read -r arr[0]` reports `arr`, because the `bound`
+ *     mapping below takes the leading identifier of each operand. Round 7 wrote that the operand
+ *     "is taken whole, so `arr[$i]` is reported verbatim and matches no `$arr` use"; both halves are
+ *     wrong. Written single-quoted as `read -r 'arr[$i]'` — the only spelling that survives an
+ *     unset `$i` — `taintedVars` has already run `dropSingleQuoted`, so the operand arrives as `''`
+ *     and the walk reports the `REPLY` fallback, not `arr[$i]`.
+ *   * NOT CAUGHT TODAY, catchable — `local`/`declare`/`typeset -n` nameref binding; `getopts
+ *     optstring name`.
  *   * CANNOT be caught by any walk of this line — the builtin reached through a variable or an
  *     alias (`$RD -r x`), `eval "read $names"`, and a name computed at run time. Those are the
- *     executed leg's job, not this one's.
- * Red-proofed at the site, both run rather than reasoned: `if (false && cmd === "read" && w[k] ===
- * "a" …)` takes `read -r -a arr` from `["arr"]` to `[]` and reds ONLY the `read -a` row
- * (1 failed / 83 passed); putting round 6's `FILLED` regex back in place of this walk reds ONLY the
- * four mis-bound shapes, including the bare-`read`/`REPLY` one (1 failed / 83 passed). The `-a`
- * clause and the `REPLY`/`MAPFILE` fallback are therefore each load-bearing on their own.
+ *     executed leg's job, not this one's. A `read` inside a double-quoted `"$( … )"` is not caught
+ *     either and does not need to be: a substitution runs in its own subshell, so it binds nothing
+ *     the enclosing shell can log (measured: `v=$(read -r x)` leaves `x` UNSET).
+ * Red-proofed at the site, all run rather than reasoned, numbers as the runner printed them against
+ * a **85 passed / 0 skipped** baseline (jq 1.7.1 on PATH):
+ *   * reverting this function BODILY to round 7's — the whole-word regex, the `cut` operand, no
+ *     `array` flag -> **1 failed / 84 passed**, reding exactly SIX rows: the five
+ *     metacharacter-adjacent ones and `` `read -ar arr` ``. That is the trade round 7 made, priced.
+ *   * the metacharacter token alone (`else if (false && SHELL_META.test(ch))`, everything else this
+ *     round left in place) -> **1 failed / 84 passed**, and it reds **three** rows, not five: the
+ *     pipe-`read`, the subshell and the pipe-`mapfile`. The `;` and `{` rows survive it, and the
+ *     reason is worth keeping — without the token the operand `a;read` is taken whole and `bound`
+ *     still lifts `a` off the front, so the walk carries on and reaches `b`. It was round 7's `cut`,
+ *     not its word regex, that lost those two. Written down because the first draft of this note
+ *     said "five", reasoned from the row labels, and running it said three.
+ *   * `if (false && cmd === "read" && w[k] === "a" …)` -> **1 failed / 84 passed**, exactly the two
+ *     `-a` rows: `read -r -a arr` goes `["arr"]` -> `[]` and `read -ar arr` goes `["r"]` -> `["arr"]`.
+ *   * `array = false` where the `-a` clause sets it -> **1 failed / 84 passed**, only the
+ *     `` `read -ar arr` `` row, `["r","arr"]` against `["r"]`.
+ *   * round 6's `FILLED` regex in place of this walk (round 7's measurement, re-quoted) -> **1 failed
+ *     / 83 passed** at that baseline, ONLY the four shapes the regex mis-bound.
  */
+/**
+ * One shell metacharacter. It both ENDS the command before it and BEGINS the one after it, with or
+ * without a space on either side, which is the whole reason `shellTokens` emits it as its own token.
+ */
+const SHELL_META = /^[;|&(){}<>`]$/;
+/**
+ * One logical line's words, with two properties `filledTargets` needs and which no single regex gave
+ * it at once:
+ *   * a double-quoted span is held TOGETHER, so `-p "Enter: "` is ONE option argument and a `read`
+ *     inside a double-quoted message is not a word at all (round 7's gain, kept);
+ *   * every shell metacharacter is emitted as its OWN token, so `jq f|mapfile -t a` is two commands
+ *     with no space between them, and the operand walk stops at one instead of pattern-matching for
+ *     it inside a word (round 6's anchor, recovered).
+ */
+function shellTokens(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  const flush = () => {
+    if (cur !== "") out.push(cur);
+    cur = "";
+  };
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      let j = i + 1;
+      for (; j < line.length; j += 1) {
+        if (line[j] === "\\") j += 1;
+        else if (line[j] === '"') break;
+      }
+      cur += line.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (/\s/.test(ch)) flush();
+    else if (SHELL_META.test(ch)) {
+      flush();
+      out.push(ch);
+    } else cur += ch;
+  }
+  flush();
+  return out;
+}
 function filledTargets(line: string): string[] {
   const out: string[] = [];
   // `printf -v var` binds exactly one name — bash's `printf` has no other name-binding option, so
   // this branch is single-capture on purpose rather than by omission.
   for (const m of line.matchAll(/(?:^|[\s!(){};|&])printf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)/g)) out.push(m[1]);
-  // Words, with a double-quoted span held together so `-p "Enter: "` is ONE option argument and a
-  // `read` inside a double-quoted message is not a word at all.
-  const words = line.match(/(?:"(?:\\.|[^"])*"|[^\s"])+/g) ?? [];
+  const words = shellTokens(line);
   for (let i = 0; i < words.length; i += 1) {
     const cmd = words[i] === "readarray" ? "mapfile" : words[i];
     if (cmd !== "read" && cmd !== "mapfile") continue;
     const takesArg = cmd === "read" ? "adinNptu" : "dnOsuCc";
     const names: string[] = [];
     let operands = false; // set by `--`
+    let array = false; // set by `-a aname`, after which bash IGNORES every trailing name
     let j = i + 1;
     for (; j < words.length; j += 1) {
       const w = words[j];
+      if (SHELL_META.test(w)) break; // the command ends at a metacharacter
       if (!operands && w === "--") {
         operands = true;
         continue;
@@ -1453,15 +1628,17 @@ function filledTargets(line: string): string[] {
           const inline = w.slice(k + 1);
           const arg = inline !== "" ? inline : words[(j += 1)];
           // `read -a aname` is the one option argument that IS the target.
-          if (cmd === "read" && w[k] === "a" && arg) names.push(arg);
+          if (cmd === "read" && w[k] === "a" && arg) {
+            names.push(arg);
+            array = true;
+          }
           break;
         }
         continue;
       }
-      // An operand, ending at the first shell metacharacter — which also ends the command.
-      const cut = (/^[^\s;|&<>)}]*/.exec(w) as RegExpExecArray)[0];
-      if (cut !== "") names.push(cut);
-      if (cut !== w) break;
+      // An operand. `shellTokens` has already cut it at the metacharacter that ends the command.
+      if (array) break; // `read -ar arr` binds `r` and IGNORES `arr` — measured against bash 5.3.15
+      names.push(w);
       if (cmd === "mapfile") break; // mapfile binds ONE array name
     }
     const bound = names
@@ -2011,6 +2188,10 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     // regex bound wrongly or not at all. They are rows and not a widened sentence on purpose —
     // three rounds running, a universal written at this pass was falsified by an ordinary shape
     // within a day, so the next widening gets scored against a table rather than asserted in prose.
+    // Which is exactly what happened to round 7: the last seven rows are round 8's, and five of them
+    // are shapes round SIX bound and round 7 lost while widening — the trade nobody scored, found by
+    // running the old matcher's cases through the new one. Every row's `want` was checked against
+    // real bash (5.3.15) before it was written down, over-reports included and labelled as such.
     const cases: { label: string; lines: string[]; want: string[] }[] = [
       {
         label: "two assignments on one line, second one ignored",
@@ -2124,6 +2305,62 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
         lines: ['read -r -a arr <<< "$(jq -r .n x)"', "printf '%s\\n' \"${arr[0]}\" >&2"],
         want: ["arr"],
       },
+      // ── Round 8: the OTHER direction of round 7's widening. Round 6 anchored `FILLED` on
+      // `(?:^|[\s!(){};|])`, so it saw the builtin after a metacharacter with no space; round 7's
+      // whole-word walk did not, and these five went from caught to `[]` in the diff that fixed the
+      // four above. Every one BINDS in bash 5.3.15 (measured, not read off the man page), and each
+      // is a `printf … >&2` on the name it binds. They are rows because a widening is a trade until
+      // both directions are scored, and this half went unscored for a round.
+      {
+        label: "a `read` on the far side of a PIPE, no space",
+        lines: ["printf '%s\\n' \"$(jq -r .t x)\"|read -r leaked", "printf '%s\\n' \"$leaked\" >&2"],
+        want: ["leaked"],
+      },
+      {
+        label: "the SECOND `read` of two on one line, separated by `;` with no space",
+        lines: ["read -r a;read -r b < <(jq -r .n x)", "printf '%s\\n' \"$b\" >&2"],
+        want: ["b"],
+      },
+      {
+        label: "a `read` opening a SUBSHELL, `(` hard against it",
+        lines: ["(read -r x < <(jq -r .n f))", "printf '%s\\n' \"$x\" >&2"],
+        want: ["x"],
+      },
+      {
+        label: "`mapfile` on the far side of a pipe, no space",
+        lines: ["jq -r .n f|mapfile -t arr2", "printf '%s\\n' \"${arr2[0]}\" >&2"],
+        want: ["arr2"],
+      },
+      {
+        label: "two `read`s in a BRACE GROUP, `{` and `;` hard against them",
+        lines: ["{ read -r p;read -r q; }", "printf '%s\\n' \"$q\" >&2"],
+        want: ["q"],
+      },
+      // ── Round 8, the two over-reports the round-7 `-a` clause introduced or left. Both are
+      // fail-CLOSED, so they are recorded rather than tolerated silently: the first is FIXED here
+      // and this row is that fix's red-proof, the second is deliberately kept.
+      {
+        // `-ar` is `-a` with the INLINE argument `r`, so bash binds the array `r` and ignores the
+        // trailing `arr` entirely (measured: `r=<a>`, `arr=UNSET`). Round 7 answered `["r","arr"]`.
+        // Both names are logged, and only `r` may come back.
+        label: "`read -ar arr` binds `r`, and `arr` is NOT a second target",
+        lines: [
+          'read -ar arr <<< "$(jq -r .n x)"',
+          "printf '%s\\n' \"${r[0]}\" >&2",
+          "printf '%s\\n' \"${arr[0]}\" >&2",
+        ],
+        want: ["r"],
+      },
+      {
+        // bash refuses this outright — `read: `-x': not a valid identifier`, status 1, nothing
+        // bound — and the walk still reports the `REPLY` fallback. Kept, because over-reporting a
+        // name that cannot carry remote bytes costs a false positive at worst, while teaching this
+        // walk bash's identifier validation costs a second grammar. The row pins the direction so
+        // the next reader does not mistake it for a claim that bash accepts the line.
+        label: "a `read` bash REJECTS still reports REPLY — fail-closed, on purpose",
+        lines: ["read -- -x < <(jq -r .n f)", "printf '%s\\n' \"$REPLY\" >&2"],
+        want: ["REPLY"],
+      },
     ];
     const got = cases.map(({ lines }) => {
       const parsed = logicalLines(lines.join("\n"));
@@ -2174,6 +2411,82 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     expect(stripped).toContain(">&2");
     // Sanity: a REAL inline substitution in a double-quoted argument is not stripped.
     expect(dropSingleQuoted(`printf ${q}%s${q} "$(cat f)" >&2`)).toContain("$(cat f)");
+  });
+
+  it("...and every shell scanner in this file is a row in the table above", () => {
+    // Round 8, MINOR 4, and the reviewer's own note that the ask was half the defect: round 7 was
+    // asked for three rows and filled in three, while `collapseExpansions` and `blankSanitiserCalls`
+    // were already in the file and already qualified. **A count cannot notice what was never
+    // counted**, so the table's admission rule is a PREDICATE applied here — by the same grep the
+    // table names, against this file's own source — rather than a closing sentence promising that
+    // the next person will remember. Both halves are derived: the rows come out of the table's own
+    // text, the candidates out of the file's own `function` declarations, and neither is restated.
+    const self = readFileSync(join(__dirname, "catalogPublishLowerBound.test.ts"), "utf8");
+
+    // The table's first column, read out of the table (CLAUDE.md: derive provenance, don't claim
+    // it). `(+ scanLogSites)` is a continuation row and counts as its own name.
+    const from = /^\/\/ {3}fn +\| 1\. strips/m.exec(self);
+    const to = /^\/\/ {3}fn +\| 3\. its CONSUMER/m.exec(self);
+    expect(from && to, "the scanner table's two headers are gone or were reworded").toBeTruthy();
+    const tableText = self.slice((from as RegExpExecArray).index, (to as RegExpExecArray).index);
+    const rows = [...tableText.matchAll(/^\/\/ {3}(?:\(\+ )?([A-Za-z][A-Za-z0-9]*)\)? +\|/gm)]
+      .map((m) => m[1])
+      .filter((n) => n !== "fn");
+    expect(rows.length, `the table parsed to ${rows.length} rows — the parse, not the table, is broken`).toBeGreaterThan(6);
+
+    // The two functions question 1 is ABOUT rather than asked of.
+    const STRIPPER: Record<string, string> = {
+      dropSingleQuoted: "the stripper itself — question 1 is what it IS",
+      endsInsideSingleQuote: "the stripper's self-check, over the same walk",
+    };
+    // Everything else this file declares, each with the reason it owes no row. An entry here is the
+    // reviewable diff that says "this one does not read shell"; leaving a new function out of BOTH
+    // lists reds below rather than passing quietly.
+    const NOT_SHELL_TEXT: Record<string, string> = {
+      parseWorkflow: "parses a workflow file — YAML",
+      catalogSteps: "selects steps out of parsed YAML",
+      stepIndexRunning:
+        "locates a workflow STEP by a substring of its `run:`; the shell question is delegated whole " +
+        "to the shared `logicalLines`, and it decides nothing about the shell's grammar itself",
+      clientCatalogIndexUrlFromRust: "reads Rust source via the shared `rustSource` helpers",
+      requireBash: "probes the environment for bash",
+      toolAvailable: "probes the environment for a tool",
+      itJq: "a test registrar",
+      scratch: "makes a temp directory",
+      posixPath: "converts a path spelling",
+      runGuard: "EXECUTES the script; it reads no source",
+      runGuardWithoutJq: "EXECUTES the script with jq removed from PATH",
+      commandLines: "scans the RUNNER'S OUTPUT for `::…` workflow commands, not shell",
+      guardLogicalLines:
+        "the SOURCE of the shell text — a file read plus the imported `logicalLines`; a narrowing " +
+        "here is caught by the parser self-checks its callers carry, not by a row",
+      enumerate: "RUNS a slice of the script under bash; it answers nothing by reading",
+      git: "drives a git fixture",
+      commitTag: "drives a git fixture",
+      derive: "EXECUTES catalog-version.sh",
+    };
+
+    const declared = [...self.matchAll(/^[ ]*function ([A-Za-z][A-Za-z0-9_]*)\s*\(/gm)].map((m) => m[1]);
+    expect(
+      declared.length,
+      `only ${declared.length} function declarations found — the grep, not the file, is broken`,
+    ).toBeGreaterThan(20);
+    const known = new Set([...rows, ...Object.keys(STRIPPER), ...Object.keys(NOT_SHELL_TEXT)]);
+    const unclassified = declared.filter((n) => !known.has(n)).sort();
+    const stale = [...Object.keys(STRIPPER), ...Object.keys(NOT_SHELL_TEXT), ...rows]
+      .filter((n) => !declared.includes(n))
+      .sort();
+    expect(
+      { unclassified, stale },
+      "`unclassified` are functions declared in this file that the scanner table above neither has a " +
+        "row for nor excuses. Decide which: if it takes shell TEXT — one logical line, a list of " +
+        "them, or the script's source — and answers a question about the shell in it, it owes a row " +
+        "and all THREE columns, answered by sabotage rather than by reading. If it does not, add it " +
+        "to NOT_SHELL_TEXT with the reason. Round 7 closed this table with a COUNT (\"a fourth " +
+        "line-scanning function means a fourth row\") and two qualifying functions were already " +
+        "sitting in the file uncounted. `stale` are names in the table or the two lists that this " +
+        `file no longer declares. All ${declared.length} declarations found: ${declared.join(", ")}`,
+    ).toEqual({ unclassified: [], stale: [] });
   });
 
   it("exit 1 is a shell predicate's boolean, never a code this script returns", () => {
