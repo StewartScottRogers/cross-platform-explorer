@@ -3,7 +3,7 @@ id: CPE-1969
 title: two workflow-scan enumeration gaps — `lockfileLockedGuard` hard-codes five files, and **no consumer scans `.github/workflows/scripts/*.sh` at all**
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -298,3 +298,64 @@ all six files (no whole-file CRLF rewrite).
 **Tooling notes heeded.** Every repo-file write went through the `Edit` tool — no `sed -i`, no
 PowerShell — and `--numstat` was checked afterwards to confirm no whole-file re-encode. The worktree's
 `node_modules` is a **junction**, left in place rather than `rm -rf`'d.
+
+## Closed 2026-08-28 — what the gauntlet actually proved
+
+Merged as PR #1085, **fully green (25/25)**, after two rounds.
+
+**Both lists are now derived at run time with a near-empty guard** — `lockfileLockedGuard.test.ts` had
+hard-coded **5 of 8** workflow files, and **nothing scanned `.github/workflows/scripts/*.sh` at all**.
+
+**Gap 2 was the interesting one, and its lesson is not "someone forgot a list."** Extracting shell from
+a `run:` block into a script file is **ordinary, good refactoring** — and here it silently removed that
+shell from **every** guard. Nobody did anything wrong; the guards' scope just never followed the code.
+Same defect one level up from CPE-1936: the parser now reads its input correctly, and the input still
+was not everything.
+
+**No live CI defect, established before anything changed.** Each guard's own predicates were run over
+the newly-included files first: **0** cargo invocations at all in the six unscanned files, **0** new
+`tauri-action` anchors, **0** unhardened `apt` (`gui-smoke.yml`'s four sites carry `HARDENING_FLAGS`
+verbatim), **0** unbounded retrying `curl`, and only the two known `--expect-channel` sites. Its
+Reviewer re-ran all five independently and matched. **So nothing was folded into an enumeration fix and
+allowed to merge as housekeeping.**
+
+**The one real finding was in a guard, not in CI.** Widening the apt scan to `gui-smoke.yml` exposed a
+**false positive in the shared `APT_COMMAND_WORD`**: `echo "waiting for background apt/dpkg lock …"`
+matched, because **CPE-1916 excluded `/` from the lookbehind but not the lookahead**. The widened scan
+**would have false-failed on its first run**.
+
+**Round 2 then found the mirror-image hole on the half nobody had touched** — and the Foreman folded it
+in rather than ticketing it: **`sudo /usr/bin/apt-get update` matched NEITHER the old nor the new
+regex**, because that same lookbehind exclusion swallows an absolute-path invocation. **One pattern,
+failed once each way.** Fixed with a 26-shape sweep across old / current / new — disagreements
+**7 → 5 → 0**, all 13 real invocation forms matching throughout — plus a repo cross-check over all 29
+files (**52 lines match current, 52 match new, 0 match new-only**: no live behaviour change; the fix is
+about what a future line can hide).
+
+**And its own sweep caught its own over-correction:** with only the lookbehind dropped,
+`cat /etc/apt/apt.conf.d/99custom` matched on `apt.conf` — so `.` joined `/` in the lookahead. Both
+halves pinned as tests. The undecidable residue (a path **tail**: `/usr/bin/apt` vs `/etc/apt`) is
+resolved **towards matching** on purpose, with the instruction to exclude at the **call site** and never
+restore `/` to the lookbehind.
+
+**A judgement call worth keeping — refuse, not recurse.** The new `scripts/` walk was flat, so a script
+in a subdirectory would have been **silently invisible**: gap 2 recreated inside the fix for gap 2.
+Round 2 chose to **refuse** an unclassified subdirectory rather than recurse, because a `helpers/`
+fragment is **`source`d into another script, not separately executed** — so the module's one-file-one-unit
+premise is *false* there — and because recursion is **three policies wearing one coat** (`helpers/`
+scanned but attributed to its caller; a `fixtures/` tree of deliberately-broken shell that must **not**
+be; a vendored tree that must not either) with recursion silently picking one. Closed in **both** walks,
+with the exclusion *sliced off* the constant rather than typed twice.
+
+**"A step" for a standalone `.sh` is the whole file**, argued from `logicalLines` being a **cross-line
+state machine**: a finer split would cut heredoc and continuation state mid-flight and **manufacture the
+exact blind window CPE-1936 measured**. Two assertions correctly stay on the calling YAML step, and both
+are **enforced with pinned counts**, not described.
+
+**The two Rust consumers are deliberate scope, not a remembered list:** they read **one named
+invocation's argv** and then **execute the real binary** with it, so deriving a file list there would
+only find files with no argv to read. The half that *was* a remembered list — *"and nothing else invokes
+the verifier"* — is now derived on the TS side, where the parser already lives.
+
+**The near-empty guard fails closed on the shape that matters:** empty directory, missing `.github`,
+**and a partial 7-of-8 / 2-of-3 enumeration** — the seventeen-Cargo.lock-became-two shape — all throw.
