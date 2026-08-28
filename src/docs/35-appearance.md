@@ -54,6 +54,15 @@ every background it's painted on, in every Theme and Contrast combination. In th
 string values used to sit at 3.2:1 against the preview pane — visibly dim — and now measure 5.0:1
 or better. Buttons and focus rings are unchanged.
 
+## Log-viewer WARN rows in High contrast
+
+The log viewer tints WARN rows and badges amber. Until now the High contrast palettes never chose
+their own amber, so both of them silently borrowed the one calibrated for the ordinary Light theme's
+white background. On High contrast + Dark that put the WARN badge at 3.3:1 against the pane it is
+painted on — below the 4.5:1 readable-text bar, in the very setting chosen for legibility. Both High
+contrast palettes now use their own amber (13.0:1 on High contrast + Dark, 7.8:1 on High contrast +
+Light). The Light and Dark themes are unchanged.
+
 ## What's next
 
 Theme and Contrast are the first slices of the broader appearance program. Native accent colour and
