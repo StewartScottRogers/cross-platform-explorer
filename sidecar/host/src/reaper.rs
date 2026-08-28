@@ -54,11 +54,104 @@ fn norm(p: &Path) -> String {
     }
 }
 
-/// The well-known session-daemon port file. Mirrors `ai-console`'s
-/// `session_supervisor::default_port_file()` — the host can't depend on the sidecar crate
-/// (one-way dependency rule), so the path is duplicated here with this note. Keep them in sync.
+/// The rendezvous directory's name, and the port file inside it.
+///
+/// These are a **duplicate** of `ai_console::console_temp_dir::{CONSOLE_DIR_NAME, PORT_FILE_NAME}`.
+/// The duplication is forced: ADR 0001's one-way rule means the host may not depend on a sidecar
+/// crate, and CI fails the build if it tries.
+///
+/// It used to carry a bare "Keep them in sync" comment, which is the untested provenance claim
+/// CLAUDE.md warns about — worse than no comment, because the green suite beside it reads as
+/// vouching for it. It is now **derived**: `src/lib/consoleTempDirPath.test.ts` reads these two
+/// literals and the sidecar's out of the two Rust sources (comments stripped first) and fails
+/// naming both values if they drift. Red-proofed by changing this literal — see that file.
+pub const CONSOLE_DIR_NAME: &str = "cpe-ai-console";
+/// See [`CONSOLE_DIR_NAME`]. Same duplication, same derivation.
+pub const PORT_FILE_NAME: &str = "session-daemon.port";
+
+/// The well-known session-daemon port file: `<temp>/cpe-ai-console/session-daemon.port`.
 pub fn default_session_daemon_port_file() -> PathBuf {
-    std::env::temp_dir().join("cpe-ai-console").join("session-daemon.port")
+    std::env::temp_dir().join(CONSOLE_DIR_NAME).join(PORT_FILE_NAME)
+}
+
+/// Delete the stale daemon port file — refusing to act **through** a planted link (CPE-1975).
+///
+/// This is the third of the ticket's three sites. It never created the directory, so it had no
+/// `create_dir_all` to fix; what it had was `port_file.exists()` followed by `std::fs::remove_file`,
+/// and both of those resolve the whole path. A junction (Windows) or symlink (Unix) planted at
+/// `<temp>/cpe-ai-console` therefore turned the host's startup sweep into an unlink of
+/// `<attacker's directory>/session-daemon.port`. Measured before the fix on real ext4:
+/// `exists()` through the link returned `True` and `unlink` removed the target's file (see
+/// `ai_console::console_temp_dir`'s module header for the full transcript).
+///
+/// Two refusals, and they answer **different** questions — which is why both are here and neither is
+/// shadowed by the other:
+///
+/// * the **parent** must be a plain directory. Path resolution always follows intermediate
+///   components, so a junction at `cpe-ai-console` makes the port file inside it look like a perfectly
+///   ordinary regular file to the second check. This is the one that stops the escape;
+/// * the **port file itself** must be a plain regular file. This is the one that stops a symlink
+///   planted at `session-daemon.port` inside a directory that really is ours.
+///
+/// Every failure returns `false` — "did not remove" — never a delete. An unreadable entry is a skip
+/// (CPE-1972: an absence of information must never license a delete), and `ReapReport` reports it as
+/// "no port file removed", which is the truth.
+///
+/// There is no `exists()` pre-check: `symlink_metadata` answers existence and kind in one call, and
+/// adding `exists()` in front of it would be a shadowed guard.
+///
+/// ## CPE-1929 sabotage pairs, both refusals, measured 2026-08-28 on **Windows**
+///
+/// `cargo test --locked --no-fail-fast` in `sidecar/host` (`--no-fail-fast` because otherwise cargo
+/// stops after the first failing binary and the totals are not comparable), with the `Compiling
+/// sidecar-host` line confirmed present in every sabotage run so none is a stale-binary pass.
+/// Baseline: **153 passed / 0 failed**.
+///
+/// * **parent-directory refusal disabled** (`if false && !parent_is_real_dir(port_file)`) → **RED**,
+///   152 passed / **1 failed**: `the_reaper_does_not_delete_through_a_planted_directory_link`.
+/// * **parent-directory predicate made to lie** (`std::fs::metadata` — the following stat — instead
+///   of `symlink_metadata`, so a junction reports `is_dir() == true`) → **RED**, 152 passed /
+///   **1 failed**, the same test.
+/// * **port-file refusal disabled** (`Ok(_meta) => true` in place of the `is_file()` test) → **RED**,
+///   152 passed / **1 failed**: `the_reaper_does_not_delete_through_a_link_at_the_port_file_name`.
+/// * **port-file predicate made to lie** (`std::fs::metadata` instead of `symlink_metadata`, so a
+///   symlink to a regular file reports `is_file() == true`) → **RED**, 152 passed / **1 failed**,
+///   the same test.
+///
+/// Four reds, and each pair reds a **different** test ⇒ both refusals are live and neither shadows
+/// the other. That was the outcome to watch for — CPE-1964's third pair is the cautionary case, an
+/// `is_symlink()` arm written, measured and deleted because `!is_dir()` had already answered the same
+/// fact. Here the two ask different questions (is the *directory* real / is the *leaf* real) and each
+/// has a test that reaches only it. **Windows-measured only**: this
+/// shift had no C linker available under WSL, so the Linux/macOS legs of these pairs were not run,
+/// and this shift's own notes record a pair that came out green on one platform and red on the
+/// other. The tests themselves are ordinary `#[test]`s and do run on all three OSes in the `sidecar`
+/// CI job, but that is the *tests* running green, not the *sabotages* having been run there.
+///
+/// The last two entries depend on a Windows **file** symlink, which needs Developer Mode; it was
+/// plantable on the measuring machine — the leg's "NOT VERIFIED" notice appeared in none of the runs,
+/// and it could not have reddened otherwise. On a runner without it that leg reports and returns, and
+/// the directory leg (the escape that matters) still runs.
+fn remove_stale_port_file(port_file: &Path) -> bool {
+    if !parent_is_real_dir(port_file) {
+        return false;
+    }
+    let is_regular_file = match std::fs::symlink_metadata(port_file) {
+        Ok(meta) => meta.file_type().is_file(),
+        Err(_) => false,
+    };
+    if !is_regular_file {
+        return false;
+    }
+    std::fs::remove_file(port_file).is_ok()
+}
+
+/// Is `path`'s parent directory a plain directory rather than a link? See [`remove_stale_port_file`].
+fn parent_is_real_dir(path: &Path) -> bool {
+    match path.parent() {
+        Some(dir) => std::fs::symlink_metadata(dir).map(|m| m.is_dir()).unwrap_or(false),
+        None => false,
+    }
 }
 
 /// Terminate every orphan `--session-daemon` process spawned from one of `our_exes`, and delete a
@@ -75,9 +168,12 @@ pub fn reap_orphan_session_daemons(our_exes: &[PathBuf], port_file: Option<&Path
         }
     }
 
+    // CPE-1975: was `Some(pf) if pf.exists() => std::fs::remove_file(pf).is_ok()`, which followed a
+    // junction/symlink planted at `<temp>/cpe-ai-console` and deleted inside the attacker's
+    // directory. See [`remove_stale_port_file`].
     let port_file_removed = match port_file {
-        Some(pf) if pf.exists() => std::fs::remove_file(pf).is_ok(),
-        _ => false,
+        Some(pf) => remove_stale_port_file(pf),
+        None => false,
     };
 
     ReapReport { killed_pids, port_file_removed }

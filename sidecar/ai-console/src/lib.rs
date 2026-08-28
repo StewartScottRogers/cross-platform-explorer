@@ -46,6 +46,9 @@ pub mod throughput;
 pub mod cost;
 pub mod session_metrics;
 pub mod console;
+/// CPE-1975: the `<temp>/cpe-ai-console` rendezvous directory and the one primitive that opens it,
+/// so the trace log and the daemon port file cannot be written through a planted junction/symlink.
+pub mod console_temp_dir;
 pub mod guardrail;
 pub mod gate_ignore;
 pub mod gate_scope;

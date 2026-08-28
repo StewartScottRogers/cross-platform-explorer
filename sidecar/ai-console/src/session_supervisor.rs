@@ -50,6 +50,20 @@ impl SessionDaemonHandle {
     /// one if none answers there, recording the live port in `port_file` for the next restart to find
     /// (CPE-309 S4). The daemon is spawned **detached** so it survives this console process exiting;
     /// on a discovered daemon we do NOT own the child, so dropping this handle leaves it running.
+    ///
+    /// **Not wired up yet, and that is load-bearing for CPE-1975.** This is the only reader and the
+    /// only writer of the port file, and it has zero callers — in this crate, in `sidecar/host`, in
+    /// `src-tauri`, and in every test. Production reaches the daemon a different way entirely: the
+    /// host spawns it as its own child, reads `PORT <n>` off that child's stdout pipe, and passes the
+    /// address in `CPE_AICONSOLE_SESSION_DAEMON_ADDR`, which `main.rs` feeds to
+    /// [`SessionDaemonHandle::external`]. That is why the ticket's headline consequence — the console
+    /// connecting to an attacker's daemon — is not reachable today.
+    ///
+    /// **When it is wired, hardening the port file's directory will not be enough.** `daemon_answers`
+    /// below is the only thing standing between a port number and a `SessionClient`, and all it
+    /// checks is that *something* replies to `{"op":"list"}` on loopback. It authenticates nothing.
+    /// A shared token, minted by the daemon and printed beside `PORT <n>`, is the shape that would;
+    /// see `console_temp_dir`'s module header for why it was not written here.
     pub fn discover_or_spawn(exe: &Path, port_file: &Path) -> Result<SessionDaemonHandle, String> {
         if let Some(port) = read_port_file(port_file) {
             if daemon_answers(port) {
@@ -124,6 +138,10 @@ impl Drop for SessionDaemonHandle {
 }
 
 /// A daemon answers if a `list` over its socket returns promptly.
+///
+/// **This is a liveness probe, not an authentication check (CPE-1975).** Any loopback listener that
+/// writes one byte back passes it. It is safe today only because the port it is handed comes from a
+/// caller with no callers; see [`SessionDaemonHandle::discover_or_spawn`].
 fn daemon_answers(port: u16) -> bool {
     let Ok(mut sock) = TcpStream::connect(("127.0.0.1", port)) else { return false };
     let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
@@ -135,20 +153,50 @@ fn daemon_answers(port: u16) -> bool {
     matches!(std::io::Read::read(&mut sock, &mut buf), Ok(n) if n > 0)
 }
 
+/// Read the daemon's port out of the port file, refusing a redirected path (CPE-1975).
+///
+/// `read_to_string` follows every link on the way, so without the two checks a junction planted at
+/// `<temp>/cpe-ai-console` — or a symlink at the port file's own name inside it — lets an attacker
+/// choose the port this console then connects to. See `console_temp_dir`'s header for why that is
+/// currently unreachable (nothing calls [`SessionDaemonHandle::discover_or_spawn`]) and why the
+/// check is here anyway.
 fn read_port_file(path: &Path) -> Option<u16> {
+    let dir = path.parent()?;
+    if crate::console_temp_dir::ensure_console_dir_at(dir).is_err() {
+        return None;
+    }
+    if !crate::console_temp_dir::regular_file_or_absent(path) {
+        return None;
+    }
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
+/// Record the daemon's port, refusing a redirected path (CPE-1975).
+///
+/// Was `let _ = std::fs::create_dir_all(dir);` followed by an unconditional write — the second of the
+/// two `create_dir_all` sites the ticket names. The error is now **propagated** rather than dropped:
+/// the caller already returns `io::Result`, and a port file that could not be written safely must not
+/// look like one that was.
 fn write_port_file(path: &Path, port: u16) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "port file path has no parent directory")
+    })?;
+    crate::console_temp_dir::ensure_console_dir_at(dir)?;
+    if !crate::console_temp_dir::regular_file_or_absent(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} is not a plain file, so the daemon port will not be written through it (CPE-1975)", path.display()),
+        ));
     }
     std::fs::write(path, port.to_string())
 }
 
 /// The standard place to record the running daemon's port, so a restarted console rediscovers it.
+///
+/// Both path components come from `console_temp_dir` (CPE-1975); they used to be spelled inline here,
+/// which is how three sites ended up with three hand-written copies of one path.
 pub fn default_port_file() -> PathBuf {
-    std::env::temp_dir().join("cpe-ai-console").join("session-daemon.port")
+    crate::console_temp_dir::console_temp_dir().join(crate::console_temp_dir::PORT_FILE_NAME)
 }
 
 /// Detach the spawned daemon from the parent's process group/job so it outlives the console.

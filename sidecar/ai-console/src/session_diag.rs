@@ -29,8 +29,12 @@ pub fn enabled() -> bool {
 }
 
 /// The trace log file: `<temp>/cpe-ai-console/session-diag.log`.
+///
+/// Both components come from `console_temp_dir` (CPE-1975) rather than being spelled here — this was
+/// one of the three sites that each built the same fixed path by hand, and the reason two of them got
+/// hardened and one did not was that nobody had them in one place.
 pub fn log_path() -> PathBuf {
-    std::env::temp_dir().join("cpe-ai-console").join("session-diag.log")
+    crate::console_temp_dir::console_temp_dir().join(crate::console_temp_dir::DIAG_LOG_NAME)
 }
 
 fn now_ms() -> u128 {
@@ -48,8 +52,22 @@ pub fn trace(component: &str, msg: &str) {
     let line = format!("{} pid={} {}: {}", now_ms(), std::process::id(), component, msg);
     eprintln!("[cpe-diag] {line}");
     let path = log_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    // CPE-1975. This used to be `let _ = std::fs::create_dir_all(dir);` — which walks a junction or
+    // symlink planted at `<temp>/cpe-ai-console` and then appends this log, which carries session
+    // ids, pids and byte counts, into whatever directory the attacker chose.
+    //
+    // The failure must be an EARLY RETURN, not the old `let _ =`. Ignoring the error and falling
+    // through to the open would defeat the whole change: `OpenOptions::create(true)` resolves the
+    // path itself, so it writes through the link with or without our `create_dir`. The two refusals
+    // below are what stop the write; the stderr echo above has already happened, so a refused trace
+    // is not a silent one.
+    let Some(dir) = path.parent() else { return };
+    if crate::console_temp_dir::ensure_console_dir_at(dir).is_err() {
+        return;
+    }
+    // And the log file itself must not be a link inside an otherwise-genuine directory.
+    if !crate::console_temp_dir::regular_file_or_absent(&path) {
+        return;
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");

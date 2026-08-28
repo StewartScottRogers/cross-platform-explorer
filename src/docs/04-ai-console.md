@@ -209,3 +209,12 @@ You want an agent to add tests to one module while you keep browsing the rest of
 - **Swarms share the Agent Deck's trust model.** A swarm agent only gets the working folder and
   credentials you granted the launch — there's no separate, wider permission surface for a swarm than a
   single launch has.
+- **The Agent Deck keeps one small folder in your system temp directory** — `cpe-ai-console`. It holds
+  the session-daemon's diagnostic log (and, on the reattach path, the note of which port that daemon is
+  listening on), so a restarted console can find work that's still running. It's deliberately at a fixed
+  name, because being findable by name is the whole point of it.
+  Since the name is fixed, it's also predictable, so the app now **refuses to use it if it isn't a plain
+  folder**. If something has replaced `cpe-ai-console` with a shortcut, junction or symbolic link
+  pointing somewhere else, the Agent Deck stops writing there rather than following it — agents keep
+  running, only the diagnostic log goes quiet. The app never deletes what it finds there: if you hit
+  this, look at that entry yourself and remove it by hand (**CPE-1975**).
