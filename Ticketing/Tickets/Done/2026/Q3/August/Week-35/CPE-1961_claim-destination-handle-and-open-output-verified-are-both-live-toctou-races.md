@@ -3,7 +3,7 @@ id: CPE-1961
 title: `claim_destination_handle` and `open_output_verified` are both **live** hard-link TOCTOU races — and `batch_media` is shielded on Windows, not safe
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: L
 created: 2026-08-27
@@ -1184,3 +1184,57 @@ attack, where the raw call *is* the measurement, and a teardown of two names the
 `policy` fork adds no test (its `policy: false` half is pinned by the existing round-4 test, per the
 CPE-1929 pair above). Frontend totals are unchanged from round 4 at 5,266 / 2: this round touched two
 user-facing markdown pages that no test parses.
+
+## Closing record — merged as PR #1089 (`17e2f078`), 2026-08-29
+
+**Seven rounds, six independent reviews. The primitive was right from round 1; every round after it was
+the machinery and the sentences around it.**
+
+**What the gauntlet proved.** Both live sites stop writing through the handle they checked, and the
+handle-relative commit **resolves no path** — established twice over, mechanically (216 added
+non-comment lines, exactly one accounted-for hit) and behaviourally (**0 of 3,000 destinations aliased
+on Windows against 11,666 successful attacker relinks**). Three separate harnesses, written independently,
+reproduced the zeros with hot controls on both platforms. `renameat` lands in `open_beneath`, unblocking
+**CPE-1963** and `copilot::apply_op`.
+
+**The Unix residual is stated, not implied.** The `Beneath` commit remains aliasable on Unix — measured
+at 92.8%, not assumed — and `landed_inside` detects it on **one of five legs**. The PR says so at the
+site instead of claiming a cross-platform property it does not have, and CPE-1963 owns closing it.
+
+**Four defects the reviews caught that no test would have.**
+
+The rebase **reintroduced the run-abort #1090 had merged an hour earlier to remove** — not through a bad
+resolution, but because this PR *adds* a new per-entry failure point and gave it a bare `?`. Measured
+against `main`: a file held open without delete-sharing gave `Ok(done: 3)` there and an aborted run here.
+**#1090's test for exactly this defect passes with the bad code restored**, because nothing in the tree
+drives a commit failure. And the enumeration that followed found **a second instance on a leg not in the
+diff.**
+
+Inheriting a helper inherited its refusals: a **>8 MiB alternate data stream on one pre-existing name
+aborted an entire archive extraction**, reachable by anyone with write access to one file. The archive
+leg then **disagreed with its own claim-time arm** about the same link refusal — failed with unworkable
+retry advice, ten lines below an arm calling it a skip.
+
+A widened cleanup sweep was defended as bounded by a stamp validator and an age floor. **Those establish
+"shaped like ours and stale", not "ours"** — and the ownership evidence was in the filename the code
+itself writes and parses and discards. A stalled bulk write could have had its **own live staging file**
+unlinked, on Windows as well as Unix.
+
+**The CI failure was this PR's doing, and a discriminator proved it in minutes where ~1,900 repetitions
+could not.** An env-gated sleep between the swapper's two syscalls: `main` 20/20 at every inducible gap,
+this branch **2/20 at 2 ms**. The fix retries inside the deadline the fixture already had, restoring
+`swaps == TRIALS` as a hard equality — **20/20 at every gap out to 200 ms**. The positive control had
+noticed its own premise expiring, which is the only part of a race test that can.
+
+**And a CPE-1929 sabotage pair turned out to be split across platforms** — A-disable green on Windows and
+**red on Linux**, B-lie the reverse, each fixture unconstructible on the other side. Both arms covered;
+neither column shows it. Round 5's "uncovered but reachable" read as careful and was wrong. **Run the
+pair on every `cfg`-gated platform and report the matrix.**
+
+**Filed rather than folded in: CPE-1980** — `transfer::download_tree` returns `Ok` for a file a planted
+link stopped it delivering. Verified byte-identical on a pre-branch revision, so the leg's contract is a
+decision of its own.
+
+Gates on the merge sha: **26 checks green**, `coverage=ok` from CPE-1970's new rung, `GUI smoke
+(windows-latest)` skipped by design. The PR body was rewritten before merging — it had carried round-2
+numbers and a claim round 5 retracted.
