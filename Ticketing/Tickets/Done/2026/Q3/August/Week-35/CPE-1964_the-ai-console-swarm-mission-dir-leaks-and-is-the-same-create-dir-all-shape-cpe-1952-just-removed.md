@@ -3,7 +3,7 @@ id: CPE-1964
 title: the AI Console's `cpe-swarm-<millis>` mission directory leaks — 55 on one machine — and is the same predictable-`create_dir_all` shape CPE-1952 just removed
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -267,3 +267,66 @@ stops at the top of the tree where condition 2 refuses and the delete never runs
 `cargo test --locked` (ai-console) **413 passed / 0 failed / 2 ignored** (round 1: 412 — +1 unit test
 for the torn delete); containment suite **5 passed** (round 1: 4 — +1 nested-link test);
 `cargo clippy --all-targets --locked -D warnings` clean.
+
+## Closed 2026-08-28 — what the gauntlet actually proved
+
+Merged as PR #1086, **fully green (25/25)**, after two rounds.
+
+**Two defects at one site, and CPE-1952's stronger answer was genuinely unavailable.** *Delete the
+directory rather than defend it* does not apply: the mission directory **is** the swarm's shared
+substrate — `write_mcp_config` writes it into each agent's args, the agent binary spawns
+`--swarm-mcp --dir` as a **separate process**, `swarm_mcp_server::run` coordinates through
+`members.json` / `mailbox.jsonl` / `memory/*.md`, and CPE-592's `/api/swarm/activity` reads it from a
+**third**. Its Reviewer traced that chain rather than accepting the claim.
+
+- **Escape** → `std::fs::create_dir`, not `create_dir_all`: one `mkdir(2)`/`CreateDirectoryW`,
+  `AlreadyExists` on **anything** at the path including a reparse point, **atomically with the create**,
+  so there is no check-then-use window. The name is **32 hex characters of OS entropy** instead of
+  `now_millis()`. **No `exists()` pre-check** — refused at the site as a shadowed guard, with the reason.
+- **Leak** → a 24h-retention sweep. An **RAII guard was designed first and rejected**, because CPE-592's
+  panel reads that directory and *"the moment you most want it is right after the mission ends."*
+
+**A shadowed guard was written, measured, and DELETED.** The sweep had an `is_symlink()` arm; forcing
+its predicate to lie left the suite **green**, because `!meta.is_dir()` on `symlink_metadata` answers
+the same fact **first**. Measured directly on both platforms rather than assumed: a Windows junction and
+a Linux ext4 symlink both give `symlink_metadata: is_dir=false is_symlink=true` / `metadata:
+is_dir=true`, so `is_symlink() ⇒ !is_dir()` holds by construction and **deleting the arm removed no
+coverage on either platform.** That is the CPE-1929 pair doing exactly what it is for.
+
+**Its Reviewer attacked all five sweep conditions and ran the pair on three the worker had not** — 17
+name shapes, a planted junction/symlink over a tree with a nested `secret.txt`, a `members.json` that
+was missing / a directory / a symlink, and a hostile **future** mtime. All refused; **all five live.**
+It also tested what the PR had not: a link nested **inside** a genuine mission directory, where every
+condition passes and `remove_dir_all` actually runs — **deriving** the module's claim that std will not
+recurse through a reparse point rather than trusting it. Round 2 then **committed that as a test**
+rather than citing a review nobody can re-run.
+
+**The corrected enumeration was still concealing something.** CPE-1952's recipe reported *naive 10 vs
+corrected 15*; this worker got **14** and corrected the ticket. Round 2 re-derived **both halves** and
+found **−4 is a net of two opposite errors**: the naive rule **misses five** real sites — including
+**both swarm sites, the ones this ticket existed for** — and **adds one spurious** doc-comment hit.
+*The recipe hid the defect and padded the count back up.* **A difference between two counts is not
+evidence about either.**
+
+**The torn-delete decision, argued rather than defaulted:** joining the sweep on shutdown only
+**narrows** the window — SIGKILL, `taskkill /f` and power loss still tear it, so the unsweepable-leftover
+class survives — and it would put an unbounded walk of a `%TEMP%` holding **2,127 reparse points** into
+the console's exit path. **Deleting the marker last closes it for every cause at zero cost.**
+
+**On the real machine:** 55 leaked directories, 0 reparse points, 54 carrying `members.json`, all older
+than 24h. The sweep removes **54** and leaves **1** — `console.rs`'s own unit-test leftover — on five
+conditions that **all fail closed** (CPE-1972's rule), with another user's directory under `/tmp`'s
+sticky bit **counted, not hidden**.
+
+**Two follow-ups filed from its sweep, both control channels rather than data:** **CPE-1975** (the
+session-daemon **port file** at a *fixed* `<temp>/cpe-ai-console/` path — redirect it and the console
+talks to the attacker's daemon; corrected in round 2 from three `create_dir_all` sites to **two**, with
+`reaper.rs` a reader/deleter of the same redirectable path) and **CPE-1976** (the swarm-activity **read**
+path unhardened — **exfiltration, not corruption**, and this PR widened the plantable id space
+digits→alnum).
+
+**Residual, stated honestly:** the directory still exists in a shared namespace — hardening, not
+*"the bytes never reach the disk at all"*. A same-user attacker who can `rmdir` the fresh directory
+between create and first write still has a much narrower race; closing it needs a handle-based design.
+The four `create_dir_all` sites that follow all run **after** `members.json` exists, so the window really
+is only create → `write_members`.
