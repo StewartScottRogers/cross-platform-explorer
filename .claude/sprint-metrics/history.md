@@ -3797,3 +3797,41 @@ complete. Six of seven sabotages now red; the seventh is named.
 **Nine rounds, eight narrow reviews, zero code defects, and the thing that finally moved was a rule about
 how to write a sentence.** That is worth remembering the next time a review round produces another
 precise correction to a precise claim: the correction was never the fix.
+
+## 2026-08-28 — "use the shape from the other leg" is not a safe mechanical transform
+
+I briefed #1089's abort fix as *"the same shape as the two lines above it — `report.fail(…)` + `continue`;
+`transfer.rs:738` already does exactly this."* The worker applied it to both legs. **On the download leg
+it created a silent success.**
+
+`record!` **forks on the refusal's `policy` flag**: `policy: false` records a failure and the transfer
+ends `Err`; **`policy: true` pushes to `skipped` and the function falls through to `Ok`.** Both the
+worker's comment and my brief assumed `commit()` only ever returns `failure`. Reading the callee refutes
+it — the `Beneath` arm renames through a handle-relative descent that calls `refuse_link` on a
+name-surrogate component, which is **`policy: true`**, plus two more structural `policy: true` arms of
+its own. The reviewer reproduced it by execution, planting a junction at an interior component.
+
+**So the exact threat this ticket exists to close — a directory component swapped for a junction during
+the write — now yields a file the user asked for, not delivered, and a transfer that reports success.**
+Round 3's version returned `Err`. And the archive leg buckets the identical refusal as a **failure** with
+retry advice that cannot work for a planted link. **Two legs, one refusal, opposite classifications,
+neither stated.**
+
+**The lesson is about the transform, not the bug.** "Convert this abort into a per-entry record, like the
+other leg does" reads as mechanical and is not: **it depends on how the recording macro classifies the
+refusal, and that is a property of the callee, not of the shape.** A per-entry record is only equivalent
+to an abort when every refusal it can receive lands in a bucket the caller reports. Before copying a
+recovery shape between legs, **enumerate what the failing call can return and check each against both
+legs' buckets.**
+
+**And I wrote the brief.** I named the pattern and the line number and did not check what `record!` does
+with a policy refusal — the same over-confident transfer of a mechanism that this shift has been logging
+in workers all day, from the Foreman's side. Recorded here rather than in a worker's log, because the
+instruction was mine and the worker followed it correctly.
+
+Two smaller ones from the same review, both the familiar shape. The helper introduced to stop by-path
+unlinks on an arm that has a root handle **left two by-path unlinks on that arm**, one of them reachable —
+the doc says there is no reason to keep them. And `snapshot_capture::restore`'s deliberate-abort
+justification cites a pre-flight pass that **cannot** pre-flight a commit failure; the real reason is
+three screens up and better. **Leaving the behaviour is right in both cases; the sentence explaining it
+is wrong in both.**
