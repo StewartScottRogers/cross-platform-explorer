@@ -136,6 +136,32 @@ export function archiveOutcomeNotice(
   return parts.join(" ");
 }
 
+/**
+ * **CPE-1935 — did this archive run deliver nothing at all?** True only when something actually failed
+ * *and* nothing was written and nothing refused, i.e. the single error line is the whole story: there is
+ * no pane to refresh and nothing for the user to go and look at.
+ *
+ * It exists because `transferred === 0 && skipped === 0` is **not** that question, and reading it as
+ * though it were re-introduces this ticket's own defect on a different input. `done` counts *files*:
+ * `// only files count toward "done"` in `extract_zip_archive_stream`, and `compress_to_zip_streamed`
+ * likewise counts only non-directory entries. So a perfectly successful run over an archive that holds
+ * nothing but folders returns `{ done: 0, failed: 0, skipped: 0, errors: [] }` — measured at the engine
+ * on both this branch and its merge base. Two real user actions hit it:
+ *
+ * - **Extract an archive of empty folders.** The folders are created; the round trip reported a failure
+ *   toast, skipped `onSuccess` and skipped the refresh, so the new folders never appeared in the pane.
+ * - **Right-click an empty folder → Compress.** The `.zip` is written correctly, `done` is 0, and the
+ *   user saw `notice.compressFailedTo` while the new archive never showed up.
+ *
+ * Both are the exact shape this ticket set out to remove — a report returning *before* `onSuccess` — so
+ * the predicate names the failure explicitly rather than inferring it from an empty delivery.
+ */
+export function archiveRunLandedNothing(
+  r: Pick<TransferReport, "transferred" | "skipped" | "failed">,
+): boolean {
+  return r.failed > 0 && r.transferred === 0 && r.skipped === 0;
+}
+
 /** Whole-batch completion percentage (0–100), by bytes; a finished transfer is always 100. */
 export function percent(t: TransferState): number {
   if (t.finished) return 100;

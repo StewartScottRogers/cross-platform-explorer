@@ -3808,11 +3808,17 @@ export type ArchiveExtractOutcome = { dest: string; report: ArchiveReport }
  * 
  * **That invariant was folklore until CPE-1935.** This paragraph named
  * `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` as its enforcement for two
- * tickets; **no test of that name has ever existed in this repo** (`grep` finds exactly two hits, this
- * sentence and its copy in `bindings.gen.ts`). It is now derived from the source rather than asserted
- * about it — `archive_report_counts_and_reasons_can_only_be_grown_together` reads this file, strips
- * comments, and fails if `skipped`/`failed` is incremented or `errors` pushed anywhere but inside these
- * two helpers. CPE-1933's rule, applied to the claim that was standing in for the check.
+ * tickets; **no commit in this repository has ever contained a test of that name** —
+ * `git log --all -S"fn skipped_count_matches_the_recorded_reasons"` returns nothing, which is the
+ * question worth asking (a `grep` of the working tree only says it is absent *today*, and every hit it
+ * does return is prose about the absence, this sentence included — the first draft of this paragraph
+ * quoted a hit count that was already wrong by the time it was reviewed).
+ * 
+ * It is now derived from the source rather than asserted about it —
+ * `archive_report_counts_and_reasons_can_only_be_grown_together` reads this file, masks comments and
+ * string literals, and fails if `skipped`/`failed` is incremented or `errors` pushed on **any**
+ * receiver anywhere but inside these two helpers. CPE-1933's rule, applied to the claim that was
+ * standing in for the check.
  * 
  * **CPE-1837: also the report the one-shot extractors return, not only the streamed ones.**
  * `Serialize`/`specta::Type` so it can cross the IPC boundary directly as an

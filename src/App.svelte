@@ -126,7 +126,7 @@
   import { initDropStack, addToDropStack, dropStackEntries, removeFromDropStack } from "./lib/dropStack";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
-  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, archiveOutcomeNotice, type TransferReport, type ConflictPolicy } from "./lib/transfers";
+  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, archiveOutcomeNotice, archiveRunLandedNothing, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import NearDuplicatesDialog from "./lib/components/NearDuplicatesDialog.svelte";
@@ -6286,7 +6286,12 @@
           // CPE-1935: `r.failed === 0` gated this. An extraction can now finish with SOME entries
           // failed and the rest on disk, and a run that wrote 23 of 27 files must still refresh the
           // pane — otherwise the fix stops at the engine and the user still cannot see what landed.
-          if (!r.cancelled && (r.transferred > 0 || r.skipped > 0)) {
+          //
+          // Round 2: the replacement was `(r.transferred > 0 || r.skipped > 0)`, which dropped the
+          // `done === 0` **success** — the empty-folder archive — along with its refresh, where the old
+          // `r.failed === 0` had kept it. `archiveRunLandedNothing` asks the question both these sites
+          // actually mean; see its doc for the two user actions that produce a clean zero.
+          if (!r.cancelled && !archiveRunLandedNothing(r)) {
             const ONE = r.op === "compress" ? "notice.archiveCompressedOne" : "notice.archiveExtractedOne";
             const MANY = r.op === "compress" ? "notice.archiveCompressedMany" : "notice.archiveExtractedMany";
             // CPE-1775: a refused entry has to reach the headline, not only the panel.
@@ -6309,7 +6314,13 @@
         // Nothing landed at all ⇒ there is nothing to reveal and the single error IS the whole story,
         // so it is still the headline — routed through `displaySafePath` now, because it can carry an
         // archive-controlled entry name and the panel has always escaped it while this toast did not.
-        if (r.transferred === 0 && r.skipped === 0) {
+        //
+        // Round 2: this read `r.transferred === 0 && r.skipped === 0`, which is not a test for failure.
+        // A successful run over an archive of empty folders reports a clean `done: 0` (directories never
+        // count toward `done`), so it took this branch: a failure toast, no `onSuccess`, no refresh, and
+        // the folders it had just created stayed invisible — this ticket's own defect, moved onto a
+        // different input. `archiveRunLandedNothing` requires `failed > 0`.
+        if (archiveRunLandedNothing(r)) {
           showNotice(r.errors[0] ? displaySafePath(r.errors[0]) : pending.failedNotice, true);
           return;
         }

@@ -198,6 +198,13 @@ Four independent protections apply automatically — you don't opt into any of t
   whose target is not in the archive. Nobody chose that, so it is counted as *failed* rather than
   skipped, and the two are always reported as different things.
 
+  **One exception, and it is worth knowing before you extract over files you care about: a read-only
+  file stops a ZIP or 7z entry, but a TAR entry replaces it.** TAR extraction is handled by a different
+  library, which removes whatever is at the name and writes the entry over it, so the read-only bit does
+  not protect the file there — the entry succeeds and the old contents are gone. Nothing else about the
+  rules differs between the formats; if you are extracting a `.tar`, `.tar.gz` or `.tgz` into a folder
+  that already holds files, extract into a new empty folder first and move what you want across.
+
   Either way the extraction keeps going and the finishing notice tells you both numbers — *"23 items
   extracted. 4 entries couldn't be written — the rest of the archive was extracted. Open the operations
   panel to see which."* Each line in the panel names the entry, says what went wrong, and says whether

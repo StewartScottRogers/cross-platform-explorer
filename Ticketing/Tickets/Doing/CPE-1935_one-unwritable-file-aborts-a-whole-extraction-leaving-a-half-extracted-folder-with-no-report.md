@@ -181,3 +181,99 @@ and fails if either count is grown outside `ArchiveReport::skip`/`fail`.
 run check` 0/0. `vitest` 5091 passed; the only failures are the four shell-script-executing files
 (`catalogPublish*`, `releaseVerifyWiringGuard`) that exit 127 in this Windows environment, untouched by
 this change. `bindings.gen.ts` regenerated. Ratchets: none raised.
+
+---
+
+### Review round 2 (PR #1090)
+
+The Reviewer accepted the rule and the engine work, independently reproduced all twelve before/after
+cells on Windows/NTFS, and confirmed the headline finding: `git log --all -S"fn
+skipped_count_matches_the_recorded_reasons"` returns nothing, so that test has never existed in any
+commit. **The replacement guard, however, had three defects and was red on CI.**
+
+**Blocker A — `archive_report_counts_and_reasons_can_only_be_grown_together`, rewritten.**
+
+| # | Defect | Now |
+|---|---|---|
+| A1 | Stripped only `//`, so its own pattern list — a string literal quoting the fragments it hunts — was scanned as code. **This is what reddened *Server crates (ubuntu-latest)* and *(macos-latest)*** at step "server — clippy + test": 1 offender, its own line, on any LF checkout. | Comments **and** string/char literals are masked by `mask_rust_comments_and_literals`. |
+| A2 | Ended each helper span at `"\n    }\n"` — **0 occurrences in a CRLF file** (the CRLF spelling occurs 230), so `unwrap_or(src.len())` widened both spans to EOF and every byte after `fn skip` (250,721 of 713,733) counted as "inside". All four extractors and the whole test module were exempt on Windows. | Spans are brace-matched over the mask, line-ending-agnostic. A span that cannot be located **panics**; there is no fallback. |
+| A3 | Matched `self.skipped +=` etc. with the receiver spelled out. Extractor legs hold a local `report`, so the stated red-proof described a mutation the code cannot express — the Reviewer planted `report.failed += 1;` and `report.errors.push(...)` in `extract_zip_archive_stream` and the test stayed **green**. | Receiver-agnostic (`.skipped +=`, `.failed +=`, `.errors.push(`, whitespace-tolerant). |
+
+Two new anti-vacuity legs, because a source scanner's real failure mode is passing by finding nothing:
+`the_rust_masker_hides_comments_and_literals_while_keeping_offsets` (8 template-checked cases, each a
+shape present in this file — it caught two genuine bugs in the first draft, including `'\''`, whose
+closing quote is the *second* `'` after the backslash), and an assertion that both helpers are still
+seen doing both halves of the record.
+
+**Red-proof, re-run after the rewrite, on both line endings.** The Reviewer's exact sabotage in
+`extract_zip_archive_stream` now fails naming both lines — `archive.rs:4143 .failed+=` /
+`archive.rs:4144 .errors.push(` on CRLF, `4200`/`4201` on LF. Unsabotaged: **2445/0 on CRLF and
+2445/0 on a genuine LF file**, the same suite both ways.
+
+**The 2422 Linux figure in the round-1 entry above was not taken from a tree that could produce it,
+and the "(real ext4)" annotation was false.** A genuine LF checkout reds on the round-1 guard — that
+is defect A1, and the Reviewer demonstrated it by converting `archive.rs` to LF and running a real
+`cargo test`. So no LF tree can have returned 2422/0 with that guard in it. The only tree available
+that *would* return green is the CRLF working tree at `/mnt/z`, where A2 blinded the guard over two
+thirds of the file; the Linux toolchain was real, the ext4 checkout was not. I cannot reconstruct the
+exact invocation and will not guess at one — the number was reported with a provenance it did not
+have, which is the same defect class as the phantom citation this ticket exists to remove. The
+standing rule (re-run the gate table after the final edit; a number that did not move across a code
+change was probably copied) is why this round's LF leg is a documented file swap with a before/after
+sha256 rather than an assertion.
+
+**Blocker B — a successful zero-file run showed a failure toast and never refreshed the pane.**
+`if (r.transferred === 0 && r.skipped === 0)` is not a test for failure. Directory entries never
+increment `done`, so **extracting an archive of empty folders** and **compressing an empty folder**
+both finish `{done: 0, failed: 0, skipped: 0, errors: []}` — took the failure branch, skipped
+`onSuccess` and `refreshBatchApplyTarget`, and the folders/archive just created never appeared. That
+is this ticket's own "returned before `onSuccess`" defect on a different input. Same root cause in the
+no-`pending` fallback, where `(r.transferred > 0 || r.skipped > 0)` dropped the `done === 0` success
+and its `loadPath` refresh that the old `r.failed === 0` had kept. Both now route through one shared
+`archiveRunLandedNothing(r)` = `failed > 0 && transferred === 0 && skipped === 0`, with a truth-table
+test and a derivation leg that re-reads `App.svelte` and asserts both branches use it and neither
+round-1 predicate has come back. Red-proofed: restoring the old predicate fails that leg with
+*"App.svelte's failure-toast branch no longer routes through archiveRunLandedNothing: expected +0 to
+be 1"*.
+
+**Blocker C — the module's canonical rule block, and a phantom citation planted inside it.** L466–475
+still said *"a REFUSAL skips; a FAILURE aborts … failures abort at every row"*, and cited
+`cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped` — **the name this PR
+renamed away**, a fresh phantom citation in the PR whose headline finding is a phantom citation.
+Rewritten to the rule that actually holds: *a refusal skips, a failure is recorded against its own
+entry, and only a run-scoped problem aborts.* Fixed at 14 further sites found by a case-insensitive
+sweep of every comment line mentioning "abort" (CPE-1933 rule 1): the `link_creation_outcome` /
+`tar_link_creation_outcome` / `materialise_entry_symlink` verdict docs, the `remove_file` paragraph,
+`hard_link_target_action`, `tar_unpack`, `extract_tar_stream`, the `EACCES` note, the
+`cpe_1913_…refuses_the_zip_entry` and `cpe1935_an_unreadable_slot…` headings, `entry_slot_action`'s
+UAT-finding-6 doc, and the hard-link test's own doc and case-table label.
+
+A second sweep — every backticked test-shaped identifier in a comment, checked against the `fn`s that
+exist — turned up **two more stale citations the review had not listed**:
+`rows_15_to_20_refuse_an_entry_addressed_through_a_symlinked_intermediate_directory` (the live test is
+`…refuse_a_file_entry_…`, wrong since before this ticket) and the renamed unreadable-slot test at a
+second site. Five other misses were clearly-labelled *history* ("renamed here from X", "the re-pointed
+X") and were left alone.
+
+**Nits.** (d) The "grep finds exactly two hits" count was false in the merged tree (five) — an
+unverified count inside the paragraph that exists to kill unverified claims; replaced with the
+`git log --all -S` question, which is the one worth asking, plus a note that a working-tree grep only
+speaks for today. (e) `RETRY_HELPS` was concatenated with a bare space onto reasons that do not end
+themselves, so the panel showed ``…\blocked.txt` The rest of the archive was extracted…`` and
+`…(os error 5) The rest…`; `join_failure_sentence` adds the stop only when the text has not already
+ended itself, with both real shapes as test cases. (f) `explorer-archives.md` listed a read-only file
+at the entry's name under **Failed** — true of zip and 7z, **false for tar**, which unlinks and
+replaces it. The one format that silently destroys the file was the one the docs promised would refuse
+to; the exception is now spelled out there and cross-referenced from the measurement table in the
+code. (g) The "translated in every locale" leg named four locales by hand and exercised only the
+*skipped* branch, so `notice.archiveFailed{One,Many}` — this ticket's two new keys — were never asked
+for in any language; it now enumerates `COMPLETE_LOCALES` (11 non-English) across four branches.
+
+**Verification, re-run after the final edit.** `cargo test --lib` **2445/0 on the CRLF working tree
+and 2445/0 on a genuine LF file** (swapped in and restored byte-exactly, sha256 `9f254cfd…` before and
+after). `cargo clippy --all-targets -D warnings` clean in both feature modes. `npm run check`
+**0 errors, 0 warnings**. `npm test` **5266 passed, 2 skipped, 358/358 files** — the four
+shell-executing files that exited 127 in round 1 now pass, so the whole suite is green here.
+`bindings.gen.ts` regenerated (the `ArchiveReport` doc edit is its only diff). `ratchet-baselines
+compare origin/main`: all 12 unchanged, none raised — `bidi-app-markup-offenders` needed its line
+numbers shifted +11 for App.svelte's added comments, same 31 entries.
