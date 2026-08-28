@@ -2585,3 +2585,72 @@ call the PR itself had measured as refusing this operation** — including the *
 primitive — while the implementation correctly used the NT form and carried a warning against
 "simplifying" it back. The reader most likely to attempt that simplification is the one reading the
 public doc, and it told them the wrapper was what's used.
+
+## 2026-08-28 — the evidence and the claim were about different code paths
+
+PR #1089's headline is a handle-relative rename that resolves no path. Its evidence is a race harness
+whose two arms go from live to **zero** on both platforms, reproduced by two independent gates. Both
+halves are true. **They are about different code.**
+
+The new primitive is reached only from one of two destination shapes. **Both racer arms take the other
+one**, which commits by path on both platforms — and the Security Auditor measured that shape still
+aliasable at **19 / 2,000 on Windows**, against a control of 0. So the PR's zeros are real zeros for a
+path its headline is not about, and the sentence *"fully closed on Windows"* is false for the two legs
+whose numbers it prints beside it.
+
+**Nobody misreported anything.** The site comment states the split correctly; the PR body and the
+ticket summary do not, and those are what get read. The zeros came from the arms that existed, which
+were written for the *previous* ticket — and the new primitive, the thing every future ticket in this
+family will build on, **ended up covered by no race arm at all.**
+
+**The check is one question, asked of the evidence rather than the code: which code path does this
+number exercise, and is it the one the headline names?** A harness inherited from the previous ticket
+answers the previous ticket's question. When a fix introduces a new path, the arm has to be added, or
+the claim has to shrink to what was actually measured.
+
+## 2026-08-28 — a hardening that handed an attacker a new denial primitive
+
+The same PR reused an existing carryover helper so the destination's ACL, attributes and alternate data
+streams survive an overwrite. Sound, and it fails the entry rather than silently downgrading. But the
+helper carries an 8 MiB budget for streams, and **writing an alternate data stream needs only write
+access to the file.**
+
+Before, five legs — backup, restore, extraction, download, revert — truncated and wrote, and never read
+streams at all. After, **any process that can write a file can permanently break every one of those
+operations on that name.** And the refusal is a *failure*, not a *policy* verdict, so the archive leg's
+match arm returns instead of skipping: **one planted stream on one pre-existing name aborts the entire
+extraction.**
+
+**The general shape: inheriting a helper inherits its refusals, and a refusal that was proportionate on
+the leg it was written for may not be on the legs you just gave it.** The original leg was a
+user-confirmed single-file overwrite where failing loudly is right. A bulk extraction is not that.
+Ask, for every leg newly reached: **who can trigger this refusal, and what does it cost them to do it?**
+Here the answer is "anyone with write access, once" and the cost is an entire archive.
+
+The tell was cheap to spot and nobody spotted it: the refusal's own message still said *"this
+**confirmed overwrite** will not copy across"* — on four legs that are not confirmed overwrites. **A
+message naming an operation the caller did not perform is a sign the code reached somewhere it was not
+written for.**
+
+## 2026-08-28 — "untestable by construction" is where shadowing hides
+
+CPE-1929's rule catches a guard that is unreachable because an earlier guard answers the same question.
+Its tell is a pair of green sabotages. #1089 carried a guard labelled **"untestable by construction"**
+with the pair recorded honestly beside it: disabling it left the suite green, forcing its predicate to
+lie changed nothing.
+
+The Security Auditor worked out why, and it is not untestability. **The only instrument that can make
+the guard fire is thread-global, so arming it trips the guard's own twin, three lines earlier in the
+same function, and that arm returns first.** It is shadowed — by itself. The recorded "79 tests red
+when the predicate lies" were all hitting the earlier copy.
+
+**"Untestable by construction" and "shadowed" produce identical evidence, and only one of them is a
+reason to stop looking.** The label is what did the damage: it explains the green pair, so the pair
+stops being a question. The rule should therefore read — *when you cannot test a guard, name the reason
+it cannot be reached, and check whether that reason is another guard.* Here the honest comment is
+"shadowed by the destination-handle check, deliberately kept as a fail-closed backstop", which sends the
+next reader to the shadowing check instead of leaving them to conclude the guard is inert.
+
+Keeping it is still right: it fails closed, and deleting it fails **open**. This is the fourth distinct
+answer the family has produced — redundant → delete; misordered → reorder; unreachable-by-test → build
+the seam; **shadowed but load-bearing → keep, and say what shadows it.**
