@@ -148,14 +148,27 @@ CATALOG_LB_U64_MAX='18446744073709551615'
 #   Prints <text> with every line that could be parsed as a GitHub Actions workflow command
 #   defanged, and CRs stripped.
 #
-#   Why: this script echoes REMOTE bytes back into the job log — the `gh api` body on exits 4/5,
-#   curl's and jq's stderr, the release tag on the exit-0 permissive path. Actions reads workflow
-#   commands out of a step's stdout/stderr, so a forged `tag_name` containing
-#   `\n::stop-commands::<token>` DISABLES workflow-command processing for the rest of the job —
-#   inside the job whose entire purpose (CPE-1953) is to be loud when it does not publish, and
-#   which relies on `::error::`/`::warning::` to be so. Reproduced on #1091 round 2 before this
-#   existed: a forged tag emitted `::error::FORGED-ANNOTATION` and `::stop-commands::deadbeef` as
-#   real annotations at exit 0.
+#   Why: this script echoes REMOTE bytes back into the job log. Actions reads workflow commands out
+#   of a step's stdout/stderr, so a forged `tag_name` containing `\n::stop-commands::<token>`
+#   DISABLES workflow-command processing for the rest of the job — inside the job whose entire
+#   purpose (CPE-1953) is to be loud when it does not publish, and which relies on
+#   `::error::`/`::warning::` to be so. Reproduced on #1091 round 2 before this existed: a forged
+#   tag emitted `::error::FORGED-ANNOTATION` and `::stop-commands::deadbeef` as real annotations at
+#   exit 0. Reproduced AGAIN on round 3 at exit 10, with only `gh` stubbed and the REAL curl hitting
+#   the REAL index URL — which 404s today (#1062) — so no control over curl is needed either.
+#
+#   THE SITES, and why this list is no longer what the guard rests on. Round 2 wrote three here —
+#   the `gh api` body on exits 4/5, curl's and jq's stderr, the release tag on the exit-0 permissive
+#   path — and the release tag on the **exit-10** path was the fourth, unsanitised, for a round. A
+#   universal claim ("nothing fetched becomes a workflow command") standing on a remembered list is
+#   how the fourth got through, and re-listing them here more carefully would only make the same
+#   mistake more neatly. So the sites today are: the `gh api` body (exits 4/5), curl's stderr (6/7/
+#   8/9), jq's stderr (14), the bound (17), and the release tag on the exit-0 permissive path AND on
+#   the exit-10 contradiction path — but what actually holds the property is
+#   src/lib/catalogPublishLowerBound.test.ts's 5c block, which derives the exit-code set from THIS
+#   FILE's own `return N` statements at run time and drives every one of them with forged `::` bytes
+#   on every remote-influenced input it has. A new exit code, or a new echo site on an existing one,
+#   reds there without anyone updating this paragraph.
 #
 #   Any line CONTAINING `::` is prefixed with `  |`, not merely indented: the runner trims leading
 #   whitespace before looking for the `::` prefix, so indentation alone is not a mitigation. `|` is
@@ -406,8 +419,13 @@ catalog_published_lower_bound() {
     200) ;;
     404)
       rm -f "$body"
+      # `$tag` through the sanitiser here for the same reason as the exit-0 line above, and this is
+      # the WORSE of the two to miss: exit 10 is a FAILURE path, so a forged `\n::stop-commands::`
+      # here silences annotations for the rest of a job whose entire purpose (CPE-1953) is to be
+      # loud when it does not publish. Missed until #1091 round 3 because the header note listed
+      # three echo sites and this was the fourth.
       printf 'catalog lower-bound check: %s returned HTTP 404, but the latest release (%s) DOES list catalog-index.json among its assets. That is a contradiction — an asset that is listed but not served — not an absence of a published catalog, and it is refused rather than read as "no lower bound" (CPE-1951).\n' \
-        "$url" "$tag" >&2
+        "$url" "$(catalog_lb_log_safe "$tag")" >&2
       return 10
       ;;
     5??)

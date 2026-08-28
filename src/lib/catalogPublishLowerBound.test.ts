@@ -291,6 +291,11 @@ for a in "\$@"; do
   prev="\$a"
 done
 echo "\$@" >> "\${CURL_ARGV_LOG:-/dev/null}"
+# Forged stderr, injectable on EVERY mode. #1091 round 3: the 5c block drives one case per exit
+# code, and the transport codes (6/7/8/9) echo curl's stderr — which quotes the host and, on some
+# failures, the server's own text. Without this the stub could only emit its own fixed strings, so
+# those paths would have been "covered" by a case that carried nothing forgeable.
+[ -n "\${CURL_ERR:-}" ] && printf '%s\\n' "\${CURL_ERR}" >&2
 case "\${CURL_MODE:-ok}" in
   timeout) echo "curl: (28) Operation timed out after 60000 milliseconds" >&2; printf '000'; exit 28 ;;
   unreachable) echo "curl: (6) Could not resolve host: github.com" >&2; printf '000'; exit 6 ;;
@@ -313,6 +318,8 @@ esac
 let stubBin = "";
 let stubBinPosix = "";
 let scratchRoot = "";
+/** bash's own absolute path, resolved once — see `runGuardWithoutJq`. */
+let bashPosix = "";
 
 /**
  * The path as the shell sees it. Load-bearing on Windows, and it cost an hour to find:
@@ -362,8 +369,30 @@ function runGuard(args: string[], env: Record<string, string> = {}): Run {
   return { status: r.status, stdout, stderr, all: `${stdout}\n${stderr}` };
 }
 
+/**
+ * The same run with PATH set to the stub dir and NOTHING else, so `jq` is genuinely absent and the
+ * missing-tool refusal (exit 16) is reachable from a test. The stub dir holds `gh` and `curl`, so
+ * this isolates exactly one tool. Everything the script does before that refusal is a bash builtin.
+ *
+ * The inner shell is invoked by ABSOLUTE path: with PATH stripped, `exec bash` cannot find bash
+ * itself and the run dies 127 before it ever reaches the tools check — measured while writing this.
+ */
+function runGuardWithoutJq(args: string[], env: Record<string, string> = {}): Run {
+  const r = spawnSync(
+    "bash",
+    ["-c", `PATH="${stubBinPosix}"; export PATH; exec "${bashPosix}" "$0" "$@"`, SCRIPT, ...args],
+    { encoding: "utf8", cwd: ROOT, env: { ...process.env, ...env } },
+  );
+  const stdout = r.stdout ?? "";
+  const stderr = r.stderr ?? "";
+  return { status: r.status, stdout, stderr, all: `${stdout}\n${stderr}` };
+}
+
 beforeAll(() => {
   requireBash();
+  const whichBash = spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf8" });
+  bashPosix = (whichBash.stdout ?? "").trim();
+  if (!bashPosix) throw new Error("could not resolve bash's own path; see runGuardWithoutJq");
   scratchRoot = scratch("cpe1951-");
   stubBin = join(scratchRoot, "stub-bin");
   mkdirSync(stubBin, { recursive: true });
@@ -889,8 +918,7 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 
 // ── 5c. Remote bytes reaching the Actions log cannot become Actions commands ────────────────────
 //
-// #1091 round 2, MEDIUM. This step echoes REMOTE bytes back into the job log — the API body on
-// exits 4 and 5, curl's and jq's stderr, and `$tag` on the exit-0 permissive path. Actions parses
+// #1091 round 2, MEDIUM. This step echoes REMOTE bytes back into the job log. Actions parses
 // workflow commands out of a step's stdout/stderr, and `::stop-commands::<token>` DISABLES that
 // parsing for the rest of the job — inside the job whose entire purpose (CPE-1953) is to be loud
 // when it does not publish. Reproduced before the fix, at exit 0:
@@ -900,48 +928,472 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 // A git refname forbids control characters, so this needs a forged API response — but the
 // mitigation is a prefix, so it is taken.
 //
-// RED-PROOFED 2026-08-28: dropping `catalog_lb_log_safe` from the `$tag` interpolation on that one
-// `::warning::` line (leaving every other call in place) reds exactly "a forged tag on the exit-0
-// permissive path emits no extra workflow command" — 1 failed / 3 passed in this block.
+// ### WHY THIS BLOCK WAS RESTRUCTURED IN ROUND 3 — read before adding a case to it
+//
+// Round 2 shipped this describe's title as a UNIVERSAL — "nothing fetched can become a workflow
+// command" — standing on THREE enumerated paths: the API body at exits 4/5, gh/curl/jq stderr, and
+// `$tag` on the exit-0 permissive path. The sanitiser was applied to exactly those three. The
+// FOURTH site, `$tag` on the exit-10 contradiction path, went out unsanitised and green. Round 3
+// reproduced it twice, the second time with only `gh` stubbed and the REAL curl hitting the REAL
+// index URL — which 404s today (#1062) — so it needs no control over curl at all:
+//     catalog lower-bound check: https://…/catalog-index.json returned HTTP 404, but the latest
+//     release (v0.57.69-sidecar
+//     ::error::FORGED-ANNOTATION
+//     ::stop-commands::deadbeef) DOES list catalog-index.json among its assets. …   exit=10
+// Both forged lines at column 0, and exit 10 is a FAILURE path — the worst of the four to miss,
+// because `::stop-commands::` there silences the annotations this job exists to emit.
+//
+// A universal claim standing on a remembered list is what let the fourth through, so the list is
+// gone. Two legs now, neither of which anyone has to remember to extend:
+//
+//   * STRUCTURAL — `taintedVars()` derives, from the script's own text, every variable assigned
+//     from a command substitution that runs `gh`/`curl`/`jq`/`cat` (and every variable sanitised at
+//     assignment), then requires each `printf … >&2` to route each tainted variable through
+//     `catalog_lb_log_safe`. This is the leg that catches a new echo site the DAY it is written,
+//     with no case to add. Its blind spot is stated rather than left implicit: it scopes to `>&2`,
+//     so the two stdout `printf`s are out of scope — which is safe only because the executed leg
+//     below scans stdout and stderr together.
+//   * EXECUTED — `EXIT_CODE_CASES` ranges over every exit code DERIVED from the script's own
+//     `return N` statements, not over a chosen subset, and the coverage assertion reds when the two
+//     sets differ. Add a `return 18` to the script and this file fails until a case drives it.
+//
+// RED-PROOFED 2026-08-28, three ways, jq 1.7.1, bash 5.3.15 cygwin — results here rather than only
+// in the PR body (CLAUDE.md rule 3):
+//   * restore the round-3 bug (drop `catalog_lb_log_safe` from the `$tag` interpolation on the
+//     exit-10 line ONLY, leaving all three other calls in place) -> **2 failed / 74 passed**. The
+//     structural leg reds with `undeclared: ['tag']`; the executed leg reds on the exit-10 case
+//     with `['::error::FORGED-404', '::stop-commands::deadbeef404']`. Both, independently.
+//   * append `catalog_lb_redproof_18() { return 18; }` to the script -> the coverage leg reds with
+//     `missing: [18]`, i.e. a new exit code cannot be added without a case that drives it.
+//   * add a `tag:` entry to `RAW_OK` while the site IS sanitised -> reds with `stale: ['tag']`, so
+//     an exemption cannot outlive the site it was written for.
+
+/** Every line that a runner would read as a workflow command, i.e. `::…` after leading blanks. */
+function commandLines(text: string): string[] {
+  return text.split("\n").filter((l) => /^\s*::/.test(l));
+}
+/** The workflow commands this step is ENTITLED to emit. Everything else is smuggled. */
+const OURS = /^::(error|warning|notice)::catalog /;
+
+/** Comment-stripped, continuation-joined logical shell lines of the guard script. `logicalLines`
+ *  rather than a hand-rolled stripper (CLAUDE.md: anchor on code, never on prose) — this file's own
+ *  script is dense with comments quoting the very strings these scans look for. */
+function guardLogicalLines(): string[] {
+  return logicalLines(readFileSync(SCRIPT, "utf8"));
+}
+
+/**
+ * The variables holding REMOTE bytes, derived rather than listed: a variable is tainted when it is
+ * assigned from a command substitution whose text invokes `gh`, `curl`, `jq` or `cat`. That covers
+ * `api_out`/`gh_err` (gh, cat), `tag`/`assets`/`count`/`bound` (jq), `http`/`curl_err` (curl, cat),
+ * and correctly leaves out `url` (built from a workflow input) and the four `mktemp` paths.
+ * `sanitised` is the subset re-assigned through `catalog_lb_log_safe`, which may then be
+ * interpolated bare.
+ */
+function taintedVars(lines: string[]): { tainted: Set<string>; sanitised: Set<string> } {
+  const tainted = new Set<string>();
+  const sanitised = new Set<string>();
+  for (const line of lines) {
+    const m = /(^|[\s!(){};])([A-Za-z_][A-Za-z0-9_]*)=\$\(/.exec(line);
+    if (!m) continue;
+    const name = m[2];
+    const rhs = line.slice(m.index + m[0].length);
+    if (/(^|[\s|(])catalog_lb_log_safe[\s)]/.test(rhs)) sanitised.add(name);
+    else if (/(^|[\s|(])(gh|curl|jq|cat)\s/.test(rhs)) tainted.add(name);
+  }
+  return { tainted, sanitised };
+}
+
+/** Blanks out every `$(catalog_lb_log_safe …)` call, matching parens, so what remains is the set of
+ *  interpolations that reach the log RAW. */
+function blankSanitiserCalls(s: string): string {
+  let out = s;
+  for (;;) {
+    const i = out.indexOf("catalog_lb_log_safe");
+    if (i < 0) return out;
+    const start = out.lastIndexOf("$(", i);
+    if (start < 0) return `${out.slice(0, i)}«safe»${out.slice(i + "catalog_lb_log_safe".length)}`;
+    let depth = 0;
+    let j = start + 1;
+    for (; j < out.length; j += 1) {
+      if (out[j] === "(") depth += 1;
+      else if (out[j] === ")") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    out = `${out.slice(0, start)}«safe»${out.slice(j + 1)}`;
+  }
+}
+
+/**
+ * Tainted variables that may legally reach the job log RAW, each with the reason it cannot carry
+ * `::`. Modelled on `app.css.accent-text-contrast.test.ts`'s `ICON_ROLES` (CLAUDE.md): the scan
+ * below reds on any raw interpolation NOT declared here — so a new echo site fails the day it
+ * lands, and claiming it is safe costs a reviewable diff with a reason — and equally on any entry
+ * here the scan no longer finds, so an excuse written for one site cannot be inherited by another.
+ *
+ * Two limitations, stated rather than left for the next reader to discover:
+ *   * The scan is flow-INSENSITIVE — an entry exempts the variable everywhere, not at one line.
+ *     That is why the executed leg exists: it drives all three of these variables' paths with
+ *     forged bytes in flight regardless of what is written here.
+ *   * This is an exemption list, so a diff COULD add a fourth entry alongside the raw site it
+ *     excuses. It is not registered as a ratchet (docs/design/RATCHETS.md) for the same reason
+ *     `ICON_ROLES` is not: the exact-match assertion means growth is never silent — it is a named
+ *     key with a prose reason in the diff, which is the reviewable artefact a ratchet row would be.
+ */
+const RAW_OK: Record<string, string> = {
+  bound: "printed only after `catalog_lb_plain_u64` accepted it: digits only, no leading zero, <= 2^64-1",
+  count: "clamped by `case \"$count\" in '' | *[!0-9]*) count='an unreportable number of'`",
+  http: "curl's own `-w '%{http_code}'` formatting, never response bytes",
+};
+
+describe("no remote-influenced variable reaches the job log unsanitised (CPE-1951)", () => {
+  it("every `printf … >&2` routes every tainted variable through catalog_lb_log_safe", () => {
+    const lines = guardLogicalLines();
+    // A parse that came back near-empty must fail loudly, not vacuously pass (CLAUDE.md:
+    // "enumerate, don't recall" — and fail on a near-empty enumeration).
+    expect(lines.length, "the guard script parsed to almost nothing").toBeGreaterThan(80);
+    const { tainted, sanitised } = taintedVars(lines);
+    // Parser self-check, NOT the property: if the taint derivation stops finding the variables the
+    // script visibly assigns from gh/curl/jq, every assertion below goes vacuous.
+    expect(
+      [...tainted].sort(),
+      "the taint derivation found no remote-assigned variables — the scan, not the script, is broken",
+    ).toEqual(expect.arrayContaining(["api_out", "assets", "bound", "gh_err", "tag"]));
+    expect([...sanitised]).toContain("curl_err");
+
+    // Only `>&2`. The two stdout `printf`s are out of scope and that is stated, not silent: one is
+    // `catalog_published_lower_bound`'s return VALUE (captured by its caller, never logged) and one
+    // is the success line, which interpolates only validated numbers. The executed leg below scans
+    // stdout and stderr TOGETHER, so nothing rides out on the channel this scan does not read.
+    const logPrintfs = lines.filter((l) => /^printf\b/.test(l) && />&2\s*$/.test(l));
+    expect(logPrintfs.length, "no `printf … >&2` found — the scan is broken").toBeGreaterThan(9);
+
+    const raw = new Map<string, string[]>();
+    for (const line of logPrintfs) {
+      const stripped = blankSanitiserCalls(line);
+      for (const v of tainted) {
+        if (sanitised.has(v)) continue;
+        if (!new RegExp(`\\$\\{?${v}\\b`).test(stripped)) continue;
+        if (!raw.has(v)) raw.set(v, []);
+        (raw.get(v) as string[]).push(line.slice(0, 100));
+      }
+    }
+    const undeclared = [...raw.keys()].filter((v) => !(v in RAW_OK)).sort();
+    const stale = Object.keys(RAW_OK)
+      .filter((v) => !raw.has(v))
+      .sort();
+    expect(
+      { undeclared, stale },
+      "`undeclared` interpolate REMOTE bytes straight into the job log, where a forged " +
+        "`\\n::stop-commands::` silences every annotation for the rest of the job — wrap each in " +
+        '`"$(catalog_lb_log_safe "$VAR")"`, or add it to RAW_OK with the reason it cannot carry ' +
+        "`::`. `stale` are RAW_OK entries the scan no longer finds: delete them, or the next raw " +
+        "site inherits an excuse written for a different one. Sites found:\n" +
+        [...raw].map(([v, ls]) => `  $${v}\n    ${ls.join("\n    ")}`).join("\n"),
+    ).toEqual({ undeclared: [], stale: [] });
+  });
+
+  it("exit 1 is a shell predicate's boolean, never a code this script returns", () => {
+    // Justifies the `N >= 2` cutoff the executed leg's derivation uses, instead of asserting it.
+    // A function's status escapes the script only through a propagating call (`f || return $?`);
+    // every function that can `return 1` is called exclusively in a CONDITION, so its 1 is consumed.
+    const lines = guardLogicalLines();
+    const fnsReturningOne = new Set<string>();
+    let current = "";
+    for (const line of lines) {
+      const open = /^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{/.exec(line);
+      if (open) current = open[1];
+      else if (line === "}") current = "";
+      // `return 1` ANYWHERE in the logical line, not anchored at its start: both instances live in
+      // `case` arms (`'' | *[!0-9]*) return 1 ;;`), and a start-anchored scan found neither —
+      // measured while writing this, which is why the size floor below is not decoration.
+      else if (current && /(^|[\s;)])return\s+1\s*(;|$)/.test(line)) fnsReturningOne.add(current);
+    }
+    expect(fnsReturningOne.size, "no `return 1` found — the function scan is broken").toBeGreaterThan(0);
+    const propagated = [...fnsReturningOne].filter((fn) =>
+      lines.some((l) => new RegExp(`\\b${fn}\\b[^|]*\\|\\|\\s*return`).test(l)),
+    );
+    expect(
+      propagated,
+      `these functions can return 1 AND have their status propagated out of the script, so exit 1 is ` +
+        `reachable and the executed leg's "N >= 2" derivation is wrong: ${propagated.join(", ")}`,
+    ).toEqual([]);
+  });
+});
 
 describe("nothing fetched can become a workflow command in the job log (CPE-1951)", () => {
-  /** Every line that a runner would read as a workflow command, i.e. `::…` after leading blanks. */
-  function commandLines(text: string): string[] {
-    return text.split("\n").filter((l) => /^\s*::/.test(l));
+  /** A forged payload per site, so a failure names WHICH input leaked. Embedded in JSON strings, so
+   *  `\\n` here is a real newline once jq parses it. */
+  const forged = (site: string) =>
+    `\\n::error::FORGED-${site}\\n::stop-commands::deadbeef${site.toLowerCase()}`;
+  /** The same bytes as plain text, for the stubs' own stderr (no JSON decoding in between). */
+  const forgedRaw = (site: string) =>
+    `\n::error::FORGED-${site}\n::stop-commands::deadbeef${site.toLowerCase()}`;
+
+  const tagWithIndex = (site: string) =>
+    `{"tag_name":"v9${forged(site)}","assets":[{"name":"catalog-index.json"},{"name":"app.msi"}]}`;
+  const tagNoIndex = (site: string) =>
+    `{"tag_name":"v9${forged(site)}","assets":[{"name":"other.txt"}]}`;
+  const PUBLISHED_IDX = '{"entries":[{"id":"claude","version":1787200000}]}';
+
+  interface Case {
+    code: number;
+    label: string;
+    run: () => Run;
+    /** A marker that must appear SOMEWHERE in the output — defanging is not hiding, and it also
+     *  proves the forged bytes actually travelled the path rather than being dropped upstream. */
+    shows?: string;
   }
-  /** The workflow commands this step is ENTITLED to emit. Everything else is smuggled. */
-  const OURS = /^::(error|warning|notice)::catalog /;
 
-  const FORGED_TAG =
-    '{"tag_name":"v1\\n::error::FORGED-ANNOTATION\\n::stop-commands::deadbeef",' +
-    '"assets":[{"name":"other.txt"}]}';
+  /**
+   * ONE CASE PER EXIT CODE, and the set is checked against the script's own `return N` statements
+   * below — so this is an enumeration of what the script can do, not of what someone remembered.
+   * Every case forges `::`-bearing bytes into every remote-influenced input that path reads.
+   */
+  const EXIT_CODE_CASES: Case[] = [
+    {
+      code: 0,
+      label: "exit 0, permissive `none` branch — forged tag in the ::warning::",
+      run: () => runGuard(["1787200000", "owner/repo"], { GH_MODE: "raw", GH_BODY: tagNoIndex("NONE") }),
+      shows: "FORGED-NONE",
+    },
+    {
+      code: 0,
+      label: "exit 0, strictly-newer branch — forged tag fetched but not echoed",
+      run: () =>
+        runGuard(["1787300000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("NEWER"),
+          CURL_MODE: "raw",
+          IDX_BODY: PUBLISHED_IDX,
+          CURL_ERR: forgedRaw("NEWERCURL"),
+        }),
+    },
+    {
+      code: 2,
+      label: "exit 2, invalid candidate — refused before any fetch is read",
+      // The candidate is a WORKFLOW input (`VERSION`), not a fetched byte, so it is passed plain;
+      // the forged fetchable inputs are supplied and must never be reached, let alone echoed.
+      run: () =>
+        runGuard(["not-a-number", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("PREFETCH"),
+          CURL_MODE: "raw",
+          IDX_BODY: PUBLISHED_IDX,
+        }),
+    },
+    {
+      code: 3,
+      label: "exit 3, NOT NEWER — the refusal's own ::error:: plus a forged tag on the same run",
+      run: () =>
+        runGuard(["1787100000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("NOTNEWER"),
+          CURL_MODE: "raw",
+          IDX_BODY: PUBLISHED_IDX,
+        }),
+    },
+    {
+      code: 4,
+      label: "exit 4, gh's own stderr echoed",
+      run: () => runGuard(["1787200000", "owner/repo"], { GH_MODE: "fail" }),
+      shows: "FORGED-VIA-GH-STDERR",
+    },
+    {
+      code: 5,
+      label: "exit 5, the whole API body echoed",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: `{"assets":[{"name":"x"}],"note":"${forged("BODY5")}"}`,
+        }),
+      shows: "FORGED-BODY5",
+    },
+    {
+      code: 6,
+      label: "exit 6, timeout — curl's stderr echoed",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T6"),
+          CURL_MODE: "timeout",
+          CURL_ERR: forgedRaw("CURL6"),
+        }),
+      shows: "FORGED-CURL6",
+    },
+    {
+      code: 7,
+      label: "exit 7, unreachable host — curl's stderr echoed",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T7"),
+          CURL_MODE: "unreachable",
+          CURL_ERR: forgedRaw("CURL7"),
+        }),
+      shows: "FORGED-CURL7",
+    },
+    {
+      code: 8,
+      label: "exit 8, truncated transfer — curl's stderr echoed",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T8"),
+          CURL_MODE: "partial",
+          CURL_ERR: forgedRaw("CURL8"),
+        }),
+      shows: "FORGED-CURL8",
+    },
+    {
+      code: 9,
+      label: "exit 9, other transport failure — curl's stderr echoed",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T9"),
+          CURL_MODE: "other",
+          CURL_ERR: forgedRaw("CURL9"),
+        }),
+      shows: "FORGED-CURL9",
+    },
+    {
+      code: 10,
+      // #1091 round 3's finding. The asset list says catalog-index.json is there and the fetch
+      // 404s, so the forged tag is echoed on a FAILURE path — where `::stop-commands::` silences
+      // the rest of the job's annotations.
+      label: "exit 10, listed-but-not-served contradiction — forged tag echoed on a FAILURE path",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("404"),
+          CURL_MODE: "http404",
+        }),
+      shows: "FORGED-404",
+    },
+    {
+      code: 11,
+      label: "exit 11, HTTP 5xx",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T11"),
+          CURL_MODE: "http500",
+          CURL_ERR: forgedRaw("CURL11"),
+        }),
+    },
+    {
+      code: 12,
+      label: "exit 12, unexpected HTTP status",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T12"),
+          CURL_MODE: "http418",
+          CURL_ERR: forgedRaw("CURL12"),
+        }),
+    },
+    {
+      code: 13,
+      label: "exit 13, HTTP 200 with an empty body",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T13"),
+          CURL_MODE: "empty",
+          CURL_ERR: forgedRaw("CURL13"),
+        }),
+    },
+    {
+      code: 14,
+      // jq 1.7.1's own parse/runtime messages were MEASURED here not to echo the body — they quote
+      // the temp-file path and a type name. So the sanitiser on `jq_err` is defence in depth, and
+      // what this case proves is that the exit-14 path stays clean while forged bytes are in flight
+      // on every other input, not that jq leaks today.
+      label: "exit 14, unparseable body — jq's stderr echoed",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T14"),
+          CURL_MODE: "raw",
+          IDX_BODY: `{"entries": ::error::FORGED-JQ14\n::stop-commands::beefjq }`,
+        }),
+    },
+    {
+      code: 15,
+      label: "exit 15, parsed but no usable entries[].version",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T15"),
+          CURL_MODE: "no_version",
+        }),
+    },
+    {
+      code: 16,
+      label: "exit 16, a required tool is missing",
+      run: () =>
+        runGuardWithoutJq(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T16"),
+        }),
+    },
+    {
+      code: 17,
+      label: "exit 17, bound outside the u64 a CatalogEntry.version can hold",
+      run: () =>
+        runGuard(["1787200000", "owner/repo"], {
+          GH_MODE: "raw",
+          GH_BODY: tagWithIndex("T17"),
+          CURL_MODE: "raw",
+          IDX_BODY: '{"entries":[{"version":18446744073709551616}]}',
+        }),
+    },
+  ];
 
-  itJq("a forged tag on the exit-0 permissive path emits no extra workflow command", () => {
-    const r = runGuard(["1787200000", "owner/repo"], { GH_MODE: "raw", GH_BODY: FORGED_TAG });
-    expect(r.status).toBe(0);
-    // The forged text is still SHOWN — defanging is not hiding — but no longer at line start.
-    expect(r.all).toContain("FORGED-ANNOTATION");
-    expect(r.all).toContain("stop-commands");
-    const smuggled = commandLines(r.all).filter((l) => !OURS.test(l));
-    expect(smuggled, `these lines would be parsed as workflow commands: ${smuggled.join(" | ")}`).toEqual([]);
+  it("the cases cover every exit code the script can produce, derived from its `return N`s", () => {
+    // THE point of round 3's restructure. Not a list of the paths someone thought of: the script's
+    // own `return` statements. `N >= 2` because 0 and 1 are the boolean protocol of the shell
+    // predicates in this file — 0 is covered explicitly below anyway, and the sibling describe
+    // proves 1 never escapes.
+    const lines = guardLogicalLines();
+    const derived = new Set<number>([0]);
+    for (const line of lines) {
+      // Unanchored, for the same reason as the `return 1` scan above: two of this script's returns
+      // sit inside `case` arms, and a start-anchored regex silently misses them.
+      for (const m of line.matchAll(/(?:^|[\s;)])return\s+(\d+)\s*(?:;|$)/g)) {
+        if (Number(m[1]) >= 2) derived.add(Number(m[1]));
+      }
+    }
+    expect(derived.size, "the `return N` scan came back near-empty").toBeGreaterThan(10);
+    const covered = new Set(EXIT_CODE_CASES.map((c) => c.code));
+    const missing = [...derived].filter((c) => !covered.has(c)).sort((a, b) => a - b);
+    const extra = [...covered].filter((c) => !derived.has(c)).sort((a, b) => a - b);
+    expect(
+      { missing, extra },
+      "EXIT_CODE_CASES must range over every exit code the guard can produce. A new `return N` in " +
+        "catalog-lower-bound.sh needs a case here that drives it with forged `::` bytes — that is " +
+        "what round 3's finding (the exit-10 site) cost when the block enumerated three chosen paths.",
+    ).toEqual({ missing: [], extra: [] });
   });
 
-  itJq("a forged API body echoed at exit 5 emits no workflow command", () => {
-    const r = runGuard(["1787200000", "owner/repo"], {
-      GH_MODE: "raw",
-      GH_BODY: '{"assets":[{"name":"x"}],"note":"\\n::error::FORGED-5\\n::stop-commands::beef"}',
+  for (const c of EXIT_CODE_CASES) {
+    itJq(`${c.label} (exit ${c.code}) emits no unowned workflow command`, () => {
+      const r = c.run();
+      expect(r.status, `wanted exit ${c.code}, got ${r.status}:\n${r.all}`).toBe(c.code);
+      if (c.shows) {
+        // Defanging is not hiding: the forged text must still be VISIBLE in the log.
+        expect(r.all, "the forged bytes never reached the log, so this case proves nothing").toContain(c.shows);
+      }
+      const smuggled = commandLines(r.all).filter((l) => !OURS.test(l));
+      expect(
+        smuggled,
+        `these lines would be parsed as workflow commands by the runner: ${smuggled.join(" | ")}`,
+      ).toEqual([]);
     });
-    expect(r.status).toBe(5);
-    expect(r.all).toContain("FORGED-5");
-    expect(commandLines(r.all).filter((l) => !OURS.test(l))).toEqual([]);
-  });
-
-  itJq("gh's own stderr echoed at exit 4 emits no workflow command", () => {
-    const r = runGuard(["1787200000", "owner/repo"], { GH_MODE: "fail" });
-    expect(r.status).toBe(4);
-    expect(r.all).toContain("FORGED-VIA-GH-STDERR");
-    expect(commandLines(r.all).filter((l) => !OURS.test(l))).toEqual([]);
-  });
+  }
 
   itJq("the asset count is the array's length, not a line count over the joined names", () => {
     // #1091 round 2, LOW. Round 1 derived `count` from the joined name string, so a release whose
