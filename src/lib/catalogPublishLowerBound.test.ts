@@ -1153,7 +1153,28 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 //     the same sabotage: **1 failed / 16 passed / 60 skipped**, `rawSubstitutions` naming the
 //     exit-14 line.
 // Both rules are satisfied by the script as it stands, so on the real source they look like nothing.
-// The synthetic-input test right after the scan is what keeps them from rotting into a vacuous pass.
+//
+// ### WHAT ROUND 5 FOUND, and it is the sentence that used to stand here
+//
+// Round 4 wrote: "The synthetic-input test right after the scan is what keeps them from rotting into
+// a vacuous pass." It did not. That test RE-IMPLEMENTED both predicates instead of calling the scan's,
+// so the two copies could disagree in silence. The reviewer ran the CPE-1929 pair:
+//   1. `if (false && (bare.includes("$(") || bare.includes("`")))` in the real scan, and
+//   2. the sanitiser dropped from the live exit-14 site: `"$url" "$(cat "$jq_err")" >&2`.
+// Result: structural leg **19 passed / 60 skipped**, whole file **79 passed / 0 failed** — a live
+// sanitiser deleted from a live remote-bytes log site, the rule that catches it disabled, and the
+// test that exists to prevent exactly that, green. Closed by extracting `flagPrintf`, which both the
+// real scan and the synthetic driver now call (CLAUDE.md, CPE-1950: remove the duplication rather
+// than derive it), and by asserting the two predicates SEPARATELY there instead of counting flags.
+// Re-measured with the reviewer's same pair applied: **1 failed / 22 passed / 60 skipped** — the
+// synthetic test reds on the substitution predicate. Note WHICH test reds and which does not: the
+// real scan stays silent, because `jq_err` comes from `mktemp` and is not tainted, so the deleted
+// sanitiser at the exit-14 site is visible to the shared predicate and to nothing else. That is
+// precisely why re-implementing the predicate in the synthetic test made the pair green.
+//
+// A claim that a rule "keeps another rule from rotting" is a provenance claim about code, so it is
+// subject to CLAUDE.md's rule 3 like any other: sabotage the rule and watch the guard red, or do not
+// write the sentence.
 //
 // RED-PROOFED 2026-08-28, five ways, bash 5.3.15 cygwin — results here rather than only in the PR
 // body (CLAUDE.md rule 3). The first three were run under jq 1.7.1 in round 3; the two round-4 ones
@@ -1168,6 +1189,28 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 //   * add a `tag:` entry to `RAW_OK` while the site IS sanitised -> reds with `stale: ['tag']`, so
 //     an exemption cannot outlive the site it was written for.
 //   * the two round-4 sabotages above, with their measured counts.
+//
+// ROUND 5's four, same machine, WITH real jq 1.7.1 on PATH unless noted — the un-run half is where
+// the last regression was, so the baseline is 83 passed / 0 skipped rather than a jq-less subset:
+//   * delete `assets="${assets//$'\r'/}"` from the script -> **46 failed / 37 passed**. One of those
+//     46 is the pure-bash `the asset enumeration matches on jq's real line endings` block, which
+//     reds `"CRLF, index first": "0"` with no jq involved at all, so it reds on LF-only Linux CI
+//     too; the other 45 are the executed leg discovering the same thing the expensive way.
+//   * the reviewer's CPE-1929 pair, both halves at once — `substitution: false && (…)` in
+//     `flagPrintf`, and the sanitiser dropped from the live exit-14 site — which at round-4 head
+//     left the whole file green at 79 passed. Now **1 failed / 22 passed / 60 skipped** (no jq),
+//     the synthetic-input test naming the predicate: `expected [false,false,false,false] to deeply
+//     equal [false,true,false,true]`. The real scan still says nothing, which is the point: `jq_err`
+//     comes from `mktemp`, so only the shared predicate can see that site.
+//   * revert the taint pass to first-match-only (`m = null`), drop `+=` from `ASSIGN`, and kill
+//     `FILLED` -> the ordinary-shapes test reds naming four of its six cases: `append`, `append onto
+//     a SANITISED name re-opens it`, `two assignments on one line`, and `` `read` with no `=` ``.
+//   * append a line with an unterminated `'` to the script -> the fail-OPEN-branch test reds,
+//     quoting the offending logical line back.
+//   * `blankSanitiserCalls`'s two fixes reverted ONE AT A TIME -> the synthetic-input test reds
+//     each time, on a different case: the anchor alone for the double-quoted mention, the
+//     `dropSingleQuoted`-first ordering alone for the unclosed `$(catalog_lb_log_safe` in prose.
+//     Neither fix is redundant, which is not what it looked like before the pair was run.
 
 /** Every line that a runner would read as a workflow command, i.e. `::…` after leading blanks. */
 function commandLines(text: string): string[] {
@@ -1205,25 +1248,37 @@ function guardLogicalLines(): string[] {
  * ### WHAT THIS DERIVATION STILL CANNOT SEE — stated, because a green sabotage on a guard has to be
  * ### expected rather than alarming (CLAUDE.md, CPE-1929)
  *
- * Closed in round 4, so NOT on this list any more: transitive assignment (rule 2 above), and an
- * inline `$(tool …)` with no variable at all — the scan below now refuses ANY surviving `$(`/
- * backtick in a `printf … >&2` line, which is what made deleting the sanitiser off
- * `"$(catalog_lb_log_safe "$(cat "$jq_err")")"` red. Before that it was 76 passed, fully green:
- * a live sanitiser call could be deleted with nothing noticing, because `jq_err` comes from
- * `mktemp` (so it is not tainted) and the loop iterates variables, never substitutions.
+ * Closed in round 4: transitive assignment (rule 2 above), and an inline `$(tool …)` with no
+ * variable at all — the scan below refuses ANY surviving `$(`/backtick in a `printf … >&2` line,
+ * which is what made deleting the sanitiser off `"$(catalog_lb_log_safe "$(cat "$jq_err")")"` red.
+ * Before that it was 76 passed, fully green: a live sanitiser call could be deleted with nothing
+ * noticing, because `jq_err` comes from `mktemp` (so it is not tainted) and the loop iterated
+ * variables, never substitutions. Closed in round 5: several assignments on one line, `+=`, a
+ * substitution running a non-tool command, and `read`/`printf -v`/`mapfile` targets — see the
+ * `ASSIGN` and `FILLED` comments in the body.
  *
- * Still blind, each with the sabotage that measures it, none of them present in the script today:
- *   * `read -r name` / `printf -v name` / `mapfile` — a variable that receives remote bytes without
- *     an `=` on its left. Sabotage: replace `tag=$(printf '%s' "$api_out" | jq -r …)` with
- *     `IFS= read -r tag < <(printf '%s' "$api_out" | jq -r …)`. This leg goes green; the executed
- *     leg still reds, because the forged bytes still reach the log.
+ * ### READ THE FORM OF THIS SECTION BEFORE ADDING TO IT
+ *
+ * Round 3 wrote "there is nothing to add"; round 4 replaced it with a three-item list ending "none
+ * of them present in the script today" — and `while IFS= read -r asset_name`, receiving remote
+ * asset names, was on the FIRST item of that list, added by round 4 itself, in the same diff. The
+ * defect is not which shapes got listed. It is that a closed list of what a scan misses is a claim
+ * of exactly the same kind as the claim it qualifies, and it is unowned in exactly the same way.
+ * So: the shapes below are AT LEAST these, never all of them; nothing here asserts what the script
+ * does or does not contain (that is measured, not recalled — the derivation is the measurement, and
+ * where a shape could be followed instead of listed it was, above); and the honest summary is that
+ * this scan reads assignments and `printf … >&2` lines, so anything that is neither is invisible to
+ * it and reaches the executed leg or nothing.
+ *
+ * At least these, each with the sabotage that measures it:
  *   * A wrapper FUNCTION that prints remote bytes itself, called bare rather than in `$( )` — e.g.
  *     `emit_tag() { printf '%s' "$tag"; }` invoked as a statement. There is no `printf … >&2` here
  *     for the scan to read, so it goes green.
  *   * Any channel that is not a `printf … >&2` at the end of a logical line: `echo … >&2`,
  *     `>&2 printf …`, a heredoc, a `{ …; } >&2` group, or stdout (out of scope by design — see the
  *     `logPrintfs` filter's own comment).
- * All three are caught by the EXECUTED leg instead, which reads the real process's stdout+stderr and
+ *   * Indirection that never names the variable: `printf … "${!ref}" >&2`, `eval`, `${arr[@]}`.
+ * These are caught by the EXECUTED leg instead, which reads the real process's stdout+stderr and
  * cannot be fooled by how the bytes got there — but only for a path some case already drives. That
  * asymmetry is the reason both legs exist.
  */
@@ -1231,18 +1286,52 @@ function taintedVars(lines: string[]): { tainted: Set<string>; sanitised: Set<st
   const tainted = new Set<string>();
   const sanitised = new Set<string>();
   const plain: { name: string; rhs: string }[] = [];
+  // EVERY assignment on the line, `g` and a loop — not `.exec` once. Round 4 took the first match
+  // and, on the `=$(` branch, `continue`d past the rest of the line entirely; three ordinary shell
+  // shapes walked through it, none of them exotic and none on its stated blind-spot list:
+  //     local a="$tag" b="$tag"      -> `b` never tainted, `printf … "$b" >&2` not flagged
+  //     local a="$tag" b=$(date)     -> `a` never seen at all (the `=$(` branch consumed the line)
+  //     msg+="$tag"                  -> `+=` matched no regex at all
+  // `\+?=` picks up append, and every match is classified from the text that FOLLOWS it, so a
+  // second assignment on the same line is judged on its own right-hand side.
+  const ASSIGN = /(?:^|[\s!(){};])([A-Za-z_][A-Za-z0-9_]*)(\+?)=/g;
+  // A variable filled WITHOUT an `=` on its left. Round 4 listed these as "still blind … none of
+  // them present in the script today" — and `while IFS= read -r asset_name` was added by that very
+  // round, one line from a live hole, receiving remote asset names. So they are followed rather
+  // than listed: the target of a `read`/`printf -v`/`mapfile` is tainted UNCONDITIONALLY, because
+  // unlike an `=` there is no right-hand side to judge and the fail-closed answer is the only one
+  // available. On this script that taints `asset_name` (remote, correct) and
+  // `catalog_lb_log_safe`'s own `line` (which never reaches a `printf … >&2`).
+  const FILLED = /(?:^|[\s!(){};|])(?:read|mapfile|readarray)\s+(?:-[A-Za-z]+\s+|-[A-Za-z]\s*\S+\s+)*([A-Za-z_][A-Za-z0-9_]*)\b|printf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)\b/g;
   for (const line of lines) {
-    const sub = /(^|[\s!(){};])([A-Za-z_][A-Za-z0-9_]*)=\$\(/.exec(line);
-    if (sub) {
-      const name = sub[2];
-      const rhs = line.slice(sub.index + sub[0].length);
-      if (/(^|[\s|(])catalog_lb_log_safe[\s)]/.test(rhs)) sanitised.add(name);
-      else if (/(^|[\s|(])(gh|curl|jq|cat)\s/.test(rhs)) tainted.add(name);
-      continue;
+    FILLED.lastIndex = 0;
+    for (let f = FILLED.exec(line); f; f = FILLED.exec(line)) tainted.add((f[1] ?? f[2]) as string);
+    ASSIGN.lastIndex = 0;
+    for (let m = ASSIGN.exec(line); m; m = ASSIGN.exec(line)) {
+      const name = m[1];
+      const append = m[2] === "+";
+      const rest = line.slice(m.index + m[0].length);
+      // `x+=` on a sanitised name re-opens it: appending unsanitised bytes to a sanitised string
+      // makes the whole string unsanitised, so the name loses its exemption rather than keeping it.
+      if (append) sanitised.delete(name);
+      if (rest.startsWith("$(")) {
+        const call = rest.slice(2);
+        if (/(^|[\s|(])catalog_lb_log_safe[\s)]/.test(call)) {
+          if (!append) sanitised.add(name);
+          continue;
+        }
+        if (/(^|[\s|(])(gh|curl|jq|cat)\s/.test(call)) {
+          tainted.add(name);
+          continue;
+        }
+        // A substitution running something else — `x=$(printf '%s' "$tag")`. Round 4 `continue`d
+        // here, so a tainted variable laundered through any other command came out clean; it falls
+        // through to the transitive pass instead.
+        plain.push({ name, rhs: call });
+        continue;
+      }
+      plain.push({ name, rhs: rest });
     }
-    // `name=<anything else>` — kept for the transitive pass below.
-    const asg = /(^|[\s!(){};])([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
-    if (asg) plain.push({ name: asg[2], rhs: asg[3] });
   }
   // Fixed point: `a="$tainted"` taints `a`, `b="$a"` then taints `b`, and so on.
   for (;;) {
@@ -1280,6 +1369,13 @@ function dropSingleQuoted(s: string): string {
   let out = "";
   let i = 0;
   let dq = false; // inside a double-quoted span, where `'` is an ordinary character
+  // `$(` opens a FRESH quoting context — bash re-lexes the substitution body from scratch, so a `'`
+  // inside `"$( … )"` starts a real single-quoted span even though the `"` is still open. Round 4's
+  // machine did not know that and read `"$(awk '{print}' f)"` as three literal characters, which
+  // fed `{print}` to `commandWords` as if it were a command name. Stack of enclosing `dq` states
+  // rather than a boolean, popped on the `)` that closes the substitution (and only while not
+  // inside a nested `"…"`, so a literal `)` in `$(printf "(%s)" x)` does not close it early).
+  const dqStack: boolean[] = [];
   while (i < s.length) {
     const ch = s[i];
     if (ch === "\\" && i + 1 < s.length) {
@@ -1293,11 +1389,31 @@ function dropSingleQuoted(s: string): string {
       i += 1;
       continue;
     }
+    if (ch === "$" && s[i + 1] === "(") {
+      dqStack.push(dq);
+      dq = false;
+      out += "$(";
+      i += 2;
+      continue;
+    }
+    if (ch === ")" && !dq && dqStack.length > 0) {
+      dq = dqStack.pop() as boolean;
+      out += ch;
+      i += 1;
+      continue;
+    }
     if (ch === "'" && !dq) {
       const end = s.indexOf("'", i + 1);
       out += "''";
-      // An unterminated span runs to end of line; consuming the rest is the fail-CLOSED direction
-      // for a stripper (it can only hide code, never invent it) and matches what the shell does.
+      // An unterminated span runs to end of line, which is what the shell does — but note the
+      // DIRECTION, because round 4's comment here had it exactly backwards and called it
+      // "fail-CLOSED … it can only hide code, never invent it". Hiding code is precisely
+      // fail-OPEN for the default-deny rule downstream: a `$(` swallowed by a phantom span is a
+      // substitution that never gets flagged. It is kept because it matches the shell, and the
+      // exposure is bounded by an assertion rather than by this sentence — `everyLogicalLine
+      // closes its single quotes` below re-lexes every logical line of the real script and reds if
+      // any of them ever reaches this branch, so on this source the fail-open path is unreachable
+      // rather than merely believed to be unused.
       i = end < 0 ? s.length : end + 1;
       continue;
     }
@@ -1307,15 +1423,76 @@ function dropSingleQuoted(s: string): string {
   return out;
 }
 
-/** Blanks out every `$(catalog_lb_log_safe …)` call, matching parens, so what remains is the set of
- *  interpolations that reach the log RAW. */
+/** True when `s` ends inside an unterminated single-quoted span — the one input on which
+ *  `dropSingleQuoted` hides text rather than merely blanking a quoted literal. Same walk, so it
+ *  cannot drift from the stripper it describes. */
+function endsInsideSingleQuote(s: string): boolean {
+  let i = 0;
+  let dq = false;
+  const dqStack: boolean[] = [];
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "\\" && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (ch === '"') {
+      dq = !dq;
+      i += 1;
+      continue;
+    }
+    if (ch === "$" && s[i + 1] === "(") {
+      dqStack.push(dq);
+      dq = false;
+      i += 2;
+      continue;
+    }
+    if (ch === ")" && !dq && dqStack.length > 0) {
+      dq = dqStack.pop() as boolean;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" && !dq) {
+      const end = s.indexOf("'", i + 1);
+      if (end < 0) return true;
+      i = end + 1;
+      continue;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+/**
+ * Blanks out every `$(catalog_lb_log_safe …)` call, matching parens, so what remains is the set of
+ * interpolations that reach the log RAW.
+ *
+ * ANCHORED ON `$(catalog_lb_log_safe`, not on the bare name, and that is a fix rather than a
+ * tidy-up. Round 4 searched for the name ANYWHERE in the line and then blanked backwards from
+ * `lastIndexOf("$(", i)`, so a message that merely NAMES the sanitiser in prose ate whatever
+ * substitution came before it:
+ *     printf '%s' "$(cat /etc/passwd)" 'per catalog_lb_log_safe policy' >&2
+ *       -> raw=[]  rawSubstitutions=[]      (green)
+ * A bypass of the headline default-deny rule achievable by REWORDING a log message, in a script
+ * whose messages are long prose. Two changes close it: the anchor above (a bare mention no longer
+ * names a span to blank, so nothing is removed and the line is judged on what it actually runs),
+ * and `flagPrintf` running `dropSingleQuoted` FIRST so single-quoted prose is gone before this
+ * ever looks.
+ *
+ * BOTH, and they are not redundant — measured, one at a time, against synthetic cases (3)/(4)/(5)
+ * in the test below. Reverting only the anchor reds case (4), a mention in a DOUBLE-quoted argument
+ * that `dropSingleQuoted` cannot reach. Reverting only the ordering reds case (5), a prose mention
+ * that opens `$(catalog_lb_log_safe` and never closes it, so the paren matcher runs off the end of
+ * the line and blanks the real substitution along with everything else. Case (3), the shape the
+ * reviewer found, is closed by either.
+ */
 function blankSanitiserCalls(s: string): string {
   let out = s;
+  const OPEN = /\$\(\s*catalog_lb_log_safe\b/;
   for (;;) {
-    const i = out.indexOf("catalog_lb_log_safe");
-    if (i < 0) return out;
-    const start = out.lastIndexOf("$(", i);
-    if (start < 0) return `${out.slice(0, i)}«safe»${out.slice(i + "catalog_lb_log_safe".length)}`;
+    const m = OPEN.exec(out);
+    if (!m) return out;
+    const start = m.index;
     let depth = 0;
     let j = start + 1;
     for (; j < out.length; j += 1) {
@@ -1327,6 +1504,33 @@ function blankSanitiserCalls(s: string): string {
     }
     out = `${out.slice(0, start)}«safe»${out.slice(j + 1)}`;
   }
+}
+
+/** How ONE `printf … >&2` logical line is classified: which tainted variables reach the log raw,
+ *  and whether any command substitution survives the sanitiser blanking.
+ *
+ *  ONE implementation, called by BOTH the scan over the real script and the synthetic-input test
+ *  below (CLAUDE.md, CPE-1950: where the duplication is removable, remove it). Round 4's synthetic
+ *  test COPIED this body instead, which is why the docblock claiming it "keeps them from rotting
+ *  into a vacuous pass" was false: the reviewer disabled the substitution predicate in the real
+ *  scan AND deleted a live sanitiser from the exit-14 remote-bytes log site, and the whole file
+ *  stayed green at 79 passed — the synthetic copy answered for a rule that was no longer wired up.
+ *  With the predicates shared, that same sabotage reds the synthetic test directly.
+ *
+ *  Order matters and is the fix for a second hole: `dropSingleQuoted` runs BEFORE
+ *  `blankSanitiserCalls`, so prose inside a single-quoted `printf` format string is gone before
+ *  anything searches it. Removing single-quoted spans cannot lose a real interpolation — the shell
+ *  performs no expansion of any kind inside `'…'` — so this direction is exact, not merely safer. */
+function flagPrintf(
+  line: string,
+  tainted: Set<string>,
+  sanitised: Set<string>,
+): { rawVars: string[]; substitution: boolean } {
+  const stripped = blankSanitiserCalls(dropSingleQuoted(line));
+  const rawVars = [...tainted]
+    .filter((v) => !sanitised.has(v) && new RegExp(`\\$\\{?${v}\\b`).test(stripped))
+    .sort();
+  return { rawVars, substitution: stripped.includes("$(") || stripped.includes("`") };
 }
 
 /**
@@ -1377,23 +1581,24 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     /** Inline substitutions surviving the sanitiser blanking — no variable to name, so no RAW_OK
      *  key either. Default-DENY: see `rawSubstitutions` below. */
     const subs: string[] = [];
+    // BOTH predicates live in `flagPrintf`, which the synthetic-input test below drives directly.
+    // Nothing is re-implemented here: round 4 had this loop and that test carrying two copies of the
+    // rule, so disabling the copy here left the copy there green and the whole file passed while a
+    // live sanitiser was deleted from a live remote-bytes log site.
+    //
+    // The second predicate — any surviving `$(`/backtick — is default-DENY rather than a taint
+    // judgement. A command run INLINE in the argument list has no variable for a per-variable loop
+    // to iterate, so round 3's scan could not see it at all: deleting `catalog_lb_log_safe` from
+    // `"$(catalog_lb_log_safe "$(cat "$jq_err")")"` left the whole file green at 76 passed. Once
+    // every `$(catalog_lb_log_safe …)` is blanked, a `printf … >&2` has no business running
+    // anything. Backticks too: they are the other substitution spelling.
     for (const line of logPrintfs) {
-      const stripped = blankSanitiserCalls(line);
-      for (const v of tainted) {
-        if (sanitised.has(v)) continue;
-        if (!new RegExp(`\\$\\{?${v}\\b`).test(stripped)) continue;
+      const { rawVars, substitution } = flagPrintf(line, tainted, sanitised);
+      for (const v of rawVars) {
         if (!raw.has(v)) raw.set(v, []);
         (raw.get(v) as string[]).push(line.slice(0, 100));
       }
-      // A command run INLINE in the argument list has no variable for the loop above to iterate, so
-      // round 3's scan could not see it at all: deleting `catalog_lb_log_safe` from
-      // `"$(catalog_lb_log_safe "$(cat "$jq_err")")"` left the whole file green at 76 passed. The
-      // rule is therefore default-deny rather than a taint judgement — once every
-      // `$(catalog_lb_log_safe …)` is blanked, a `printf … >&2` has no business running anything.
-      // Backticks too: they are the other substitution spelling, and `dropSingleQuoted` has already
-      // removed the ones this script uses in prose inside its format strings.
-      const bare = dropSingleQuoted(stripped);
-      if (bare.includes("$(") || bare.includes("`")) subs.push(line.slice(0, 120));
+      if (substitution) subs.push(line.slice(0, 120));
     }
     const undeclared = [...raw.keys()].filter((v) => !(v in RAW_OK)).sort();
     const stale = Object.keys(RAW_OK)
@@ -1412,36 +1617,133 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     ).toEqual({ undeclared: [], stale: [], rawSubstitutions: [] });
   });
 
-  it("...and that scan can actually SEE an inline substitution and a transitive alias", () => {
-    // The two rules above are the round-4 additions, and both are satisfied by the script today —
-    // so on the real source they are indistinguishable from doing nothing. This drives them with
-    // synthetic lines instead, so neither can rot into a vacuous pass the way round 3's per-variable
-    // loop silently did. `logicalLines` first, so these go through the same stripper the real scan
-    // uses rather than a second, kinder one.
+  it("...and that scan can actually SEE an inline substitution, a transitive alias, and prose", () => {
+    // The rules above are satisfied by the script today — so on the real source they are
+    // indistinguishable from doing nothing. This drives them with synthetic lines instead. It calls
+    // `flagPrintf`, the SAME function the scan above calls; round 4 re-implemented the two
+    // predicates here, so `if false && …` on the real scan left this test green and the file passed
+    // at 79 while a live sanitiser was deleted from the exit-14 site. Re-measured after sharing the
+    // function, with the reviewer's exact pair still applied: this test reds with
+    // `expected [false,false,false,false] to deeply equal [false,true,false,true]`, and it is the
+    // ONLY thing in the file that does.
+    // `logicalLines` first, so these go through the same stripper the real scan uses rather than a
+    // second, kinder one.
     const synthetic = logicalLines(
       [
         "tag=$(jq -r '.tag_name' <<< \"$body\")",
         "rel_name=\"$tag\"",
+        // (0) a tainted variable, no substitution -> rawVars only.
         "printf 'release %s\\n' \"$rel_name\" >&2",
+        // (1) an inline substitution, no tainted variable -> substitution only.
         "printf 'jq said %s\\n' \"$(cat \"$jq_err\")\" >&2",
-        // Must NOT be reported: a sanitiser-wrapped inline call, and prose that merely mentions
-        // `$(` and a backtick inside a single-quoted format string.
+        // (2) must NOT be reported: a sanitiser-wrapped inline call, plus prose mentioning `$(` and
+        // a backtick inside a single-quoted format string.
         "printf 'ok `cmd` $(cat x) %s\\n' \"$(catalog_lb_log_safe \"$(cat \\\"$jq_err\\\")\")\" >&2",
+        // (3) must BE reported. Round 4 read this as clean: `blankSanitiserCalls` searched for the
+        // bare name ANYWHERE in the line and blanked back to the nearest preceding `$(`, so naming
+        // the sanitiser in a trailing prose argument swallowed a real `$(cat …)` in front of it —
+        // a bypass of the headline rule achievable by rewording a message.
+        "printf '%s\\n' \"$(cat /etc/passwd)\" 'per catalog_lb_log_safe policy' >&2",
+        // (4) the same mention in a DOUBLE-quoted argument, where `dropSingleQuoted` cannot reach
+        // it. Closed by the `$(catalog_lb_log_safe` anchor alone — with the round-4 bare-name
+        // search this reds and case (3) does not, which is how the two fixes are told apart.
+        "printf '%s\\n' \"$(cat /etc/passwd)\" \"per catalog_lb_log_safe policy\" >&2",
+        // (5) a mention that opens `$(catalog_lb_log_safe` inside prose and never closes it: the
+        // paren matcher runs off the end of the line and blanks everything after it, real
+        // substitution included. Closed by running `dropSingleQuoted` FIRST alone — the anchor
+        // matches this one, so ordering is what saves it.
+        "printf 'see $(catalog_lb_log_safe %s\\n' \"$(cat /etc/passwd)\" >&2",
       ].join("\n"),
     );
-    const { tainted } = taintedVars(synthetic);
+    const { tainted, sanitised } = taintedVars(synthetic);
     expect(tainted, "transitive taint (`rel_name=\"$tag\"`) is not being followed").toContain("rel_name");
 
-    const flagged: string[] = [];
-    for (const line of synthetic.filter((l) => /^printf\b/.test(l) && />&2\s*$/.test(l))) {
-      const stripped = blankSanitiserCalls(line);
-      const bare = dropSingleQuoted(stripped);
-      if (bare.includes("$(") || bare.includes("`")) flagged.push(line);
-      else if ([...tainted].some((v) => new RegExp(`\\$\\{?${v}\\b`).test(stripped))) flagged.push(line);
-    }
-    expect(flagged.length, `expected exactly the first two printfs to be flagged, got:\n${flagged.join("\n")}`).toBe(2);
-    expect(flagged[0]).toContain("rel_name");
-    expect(flagged[1]).toContain("jq said");
+    const printfs = synthetic.filter((l) => /^printf\b/.test(l) && />&2\s*$/.test(l));
+    expect(printfs.length, "the synthetic lines did not survive `logicalLines`").toBe(6);
+    const verdicts = printfs.map((l) => flagPrintf(l, tainted, sanitised));
+    // Asserted SEPARATELY per predicate, not as one `flagged` count: a count cannot tell which of
+    // the two rules answered, so a count is green when one rule dies and the other happens to fire.
+    expect(
+      verdicts.map((v) => v.rawVars),
+      "the tainted-variable predicate is not classifying the synthetic lines",
+    ).toEqual([["rel_name"], [], [], [], [], []]);
+    expect(
+      verdicts.map((v) => v.substitution),
+      "the default-deny `$(`/backtick predicate is not classifying the synthetic lines",
+    ).toEqual([false, true, false, true, true, true]);
+  });
+
+  it("...and the taint pass follows the ordinary shell shapes, not just the first `=` on a line", () => {
+    // Four shapes the round-4 pass walked straight through, all of them plain shell and none of
+    // them on its stated blind-spot list. Each is a `printf … >&2` carrying remote bytes that the
+    // scan reported as clean. Driven synthetically because the script contains none of them today —
+    // which is the whole reason they were invisible.
+    const cases: { label: string; lines: string[]; want: string[] }[] = [
+      {
+        label: "two assignments on one line, second one ignored",
+        lines: ["tag=$(jq -r .t x)", 'local a="$tag" b="$tag"', 'printf \'%s\\n\' "$b" >&2'],
+        want: ["b"],
+      },
+      {
+        label: "a plain assignment sharing a line with a `=$(` one",
+        lines: ["tag=$(jq -r .t x)", 'local a="$tag" b=$(date)', 'printf \'%s\\n\' "$a" >&2'],
+        want: ["a"],
+      },
+      {
+        label: "append",
+        lines: ["tag=$(jq -r .t x)", 'msg+="$tag"', "printf '%s\\n' \"$msg\" >&2"],
+        want: ["msg"],
+      },
+      {
+        label: "`read` with no `=` on its left",
+        lines: ['while IFS= read -r asset_name; do :; done <<< "$assets"', "printf '%s\\n' \"$asset_name\" >&2"],
+        want: ["asset_name"],
+      },
+      {
+        label: "laundered through a non-tool substitution",
+        lines: ["tag=$(jq -r .t x)", 'washed=$(printf \'%s\' "$tag")', 'printf \'%s\\n\' "$washed" >&2'],
+        want: ["washed"],
+      },
+      {
+        label: "append onto a SANITISED name re-opens it",
+        lines: [
+          "tag=$(jq -r .t x)",
+          'safe=$(catalog_lb_log_safe "$tag")',
+          'safe+="$tag"',
+          "printf '%s\\n' \"$safe\" >&2",
+        ],
+        want: ["safe"],
+      },
+    ];
+    const got = cases.map(({ lines }) => {
+      const parsed = logicalLines(lines.join("\n"));
+      const { tainted, sanitised } = taintedVars(parsed);
+      const printfs = parsed.filter((l) => /^printf\b/.test(l) && />&2\s*$/.test(l));
+      return printfs.flatMap((l) => flagPrintf(l, tainted, sanitised).rawVars);
+    });
+    expect(
+      Object.fromEntries(cases.map((c, i) => [c.label, got[i]])),
+      "a `printf … >&2` carrying remote bytes was classified clean — the taint pass is narrower " +
+        "than the sentence describing it",
+    ).toEqual(Object.fromEntries(cases.map((c) => [c.label, c.want])));
+  });
+
+  it("...and no logical line of the script ever reaches the stripper's fail-OPEN branch", () => {
+    // `dropSingleQuoted` consumes an unterminated `'` to end of line, matching the shell. Round 4's
+    // comment called that "the fail-CLOSED direction … it can only hide code, never invent it" —
+    // backwards. For a default-DENY detector, hidden text is fail-OPEN: a `$(` swallowed by a
+    // phantom span is a substitution that is never flagged. Rather than reason about whether that
+    // can happen here, measure it — every logical line of the real script is re-lexed and none may
+    // end inside a single-quoted span. `logicalLines` has already joined `\`-continuations, so a
+    // quote legitimately spanning physical lines is one logical line and closes within it.
+    const lines = guardLogicalLines();
+    expect(lines.length, "the guard script parsed to almost nothing").toBeGreaterThan(80);
+    expect(
+      lines.filter(endsInsideSingleQuote),
+      "these logical lines end inside an unterminated single quote, so `dropSingleQuoted` deletes " +
+        "the rest of the line — anything after the quote, including a real `$(`, is hidden from " +
+        "the default-deny rule rather than judged by it",
+    ).toEqual([]);
   });
 
   it("...and its quote stripper survives the `'\"'\"'` apostrophe idiom this script uses", () => {
@@ -1489,6 +1791,102 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       `these functions can return 1 AND have their status propagated out of the script, so exit 1 is ` +
         `reachable and the executed leg's "N >= 2" derivation is wrong: ${propagated.join(", ")}`,
     ).toEqual([]);
+  });
+});
+
+// ── The asset enumeration, run on the line endings jq actually produces (CPE-1951, round 5) ──────
+//
+// Round 4 replaced `grep -Fxq 'catalog-index.json'` with `while IFS= read -r` + `[ = ]` and wrote
+// "EQUIVALENCE MEASURED, not assumed, executing this script with gh/curl/jq shimmed". The shim was
+// a shell `printf`, which emits LF. Real jq writes stdout in TEXT mode on Windows, so the `\n`
+// inside `join("\n")` leaves the process as `\r\n`; cygwin `grep -Fx` tolerates the trailing `\r`
+// and `[ "$asset_name" = 'catalog-index.json' ]` does not. Measured with jq 1.7.1, bash 5.3.15
+// cygwin, at that head:
+//     $assets bytes: c a t a l o g - i n d e x . j s o n \r \n x
+//     grep -Fxq          -> MATCH
+//     while read + [ = ] -> have_index=0
+// i.e. the guard took the "no index among the assets" branch on a release that lists it, and printed
+// `::warning::… carries NO catalog-index.json (2 asset(s) enumerated) … Proceeding with no lower
+// bound.` at exit 0 — byte-for-byte the self-contradicting fail-open the change was made to remove.
+// `catalogPublishLowerBound.test.ts` on Windows: round 3 = 76 passed / 0 failed; round 4 head =
+// 34 passed / **45 failed**. CI runs vitest on ubuntu-latest only, where jq emits LF, so CI stayed
+// green throughout. A SHIM MEASURES YOUR SHIM.
+//
+// This block is the platform-independent pin, and it is deliberately NOT another end-to-end run: on
+// Linux real jq emits LF and there is nothing to catch, and a CRLF-emitting jq stub would be a
+// third configuration that exists on no real machine (it would also make `count` non-numeric, which
+// Windows does not do — `$( )` there strips a trailing `\r\n` as a unit, so the single-line `tag`,
+// `count` and `bound` captures come back clean; swept, all four jq sites, same run). Instead it
+// lifts the script's OWN transformation-and-enumeration lines out of the file and drives them with
+// the byte sequence jq hands them. Nothing here asserts that a CR strip exists — the behaviour is
+// the assertion, so deleting the strip reds this rather than reding a line-is-present check.
+describe("the asset enumeration matches on jq's real line endings (CPE-1951)", () => {
+  /**
+   * The script's own lines between "the assets fetch has succeeded" and "the enumeration is done",
+   * minus anything that runs a command. Anchored on code: the `fi` closing the `if ! assets=$(…)`
+   * block, and `done <<< "$assets"`. A new line that TRANSFORMS `$assets` is picked up
+   * automatically; a new line that FETCHES something is dropped, because this probe supplies
+   * `$assets` itself and has no `$api_out` to give.
+   */
+  function enumerationLines(): string[] {
+    const lines = guardLogicalLines();
+    const fetch = lines.findIndex((l) => /\bassets=\$\(/.test(l));
+    expect(fetch, "no `assets=$(…)` line found — the slice is broken, not the script").toBeGreaterThan(-1);
+    const fi = lines.findIndex((l, i) => i > fetch && l === "fi");
+    const done = lines.findIndex((l, i) => i > fi && /^done\s+<<<\s+"\$assets"$/.test(l));
+    expect(fi, "no `fi` after the assets fetch").toBeGreaterThan(-1);
+    expect(done, 'no `done <<< "$assets"` after it').toBeGreaterThan(fi);
+    const slice = lines.slice(fi + 1, done + 1).filter((l) => !l.includes("$(") && !l.includes("`"));
+    // Fail loudly on a near-empty enumeration rather than pass vacuously (CLAUDE.md).
+    expect(slice.length, `the enumeration slice came back as ${slice.length} lines:\n${slice.join("\n")}`).toBeGreaterThan(4);
+    return slice;
+  }
+
+  /** `have_index` after running those lines with `$assets` set to `input`. */
+  function enumerate(input: string): string {
+    const body = enumerationLines()
+      .map((l) => `  ${l}`)
+      .join("\n");
+    const probe = `probe() {\n  local assets="$CPE_ASSETS"\n${body}\n  printf '%s' "$have_index"\n}\nprobe\n`;
+    const r = spawnSync("bash", ["-c", probe], {
+      encoding: "utf8",
+      env: { ...process.env, CPE_ASSETS: input },
+    });
+    if (r.status !== 0) throw new Error(`probe exited ${r.status}: ${r.stderr}\n---\n${probe}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  it("finds the index whether jq joined the names with LF or with CRLF", () => {
+    const cases: Record<string, string> = {
+      // What jq hands it on Linux, and on Windows. Both must match.
+      "LF, index first": "catalog-index.json\napp.msi",
+      "CRLF, index first": "catalog-index.json\r\napp.msi",
+      "CRLF, index last": "app.msi\r\ncatalog-index.json",
+      "CRLF, sole asset": "catalog-index.json",
+    };
+    expect(
+      Object.fromEntries(Object.entries(cases).map(([k, v]) => [k, enumerate(v)])),
+      "the asset enumeration did not find `catalog-index.json` in an asset list that contains it. " +
+        "That is not a near-miss: it takes the exit-0 `carries NO catalog-index.json … Proceeding " +
+        "with no lower bound` branch, which is the fail-open this whole guard exists to remove.",
+    ).toEqual(Object.fromEntries(Object.keys(cases).map((k) => [k, "1"])));
+  });
+
+  it("...and still refuses the substring and the `.sig` trap on both line endings", () => {
+    // `-F` alone (substring, no `-x`) would match all four of these. The whole-line comparison the
+    // `grep -Fxq` spelling meant must survive the CR strip, or the fix trades a fail-open for a
+    // different one: a release that publishes only a signature would read as publishing an index.
+    const cases: Record<string, string> = {
+      "sig only, CRLF": "catalog-index.json.sig\r\napp.msi",
+      "sig only, LF": "catalog-index.json.sig\napp.msi",
+      "prefixed name": "old-catalog-index.json\r\napp.msi",
+      "no assets at all": "",
+    };
+    expect(
+      Object.fromEntries(Object.entries(cases).map(([k, v]) => [k, enumerate(v)])),
+      "the enumeration matched something that is NOT `catalog-index.json` — the whole-line " +
+        "comparison `-Fx` stood for has been weakened",
+    ).toEqual(Object.fromEntries(Object.keys(cases).map((k) => [k, "0"])));
   });
 });
 

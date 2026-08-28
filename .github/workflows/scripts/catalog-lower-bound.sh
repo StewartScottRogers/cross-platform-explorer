@@ -301,6 +301,13 @@ catalog_lower_bound_url() {
 #     * `grep` is gone — the enumeration match below is pure bash, so the dependency it added is
 #       removed rather than declared (same argument `catalog_lb_log_safe` makes for using no
 #       `sed`/`tr`). One fewer tool is strictly better than one more list entry.
+#       BUT NOT FOR FREE, and round 4 shipped the bill unpaid. Dropping a tool means inheriting the
+#       behaviour it was quietly supplying, and cygwin `grep -Fx` was quietly tolerating the `\r`
+#       that Windows jq puts on every line; `[ "$x" = … ]` does not, so the replacement fired the
+#       exact exit-0 fail-open this header describes, on a release that DOES list the index. See the
+#       CR strip at the enumeration below. Note also that the old spelling was correct on both
+#       platforms for two DIFFERENT unstated reasons (cygwin grep strips CR; Linux jq emits none) —
+#       which is why replacing it needed a measurement rather than an argument.
 #     * src/lib/catalogPublishLowerBound.test.ts DERIVES every external command this file actually
 #       invokes, from this file's own text, and reds on any that is neither in the `for t in` list
 #       below nor declared safe there with a reason. Add `awk` anywhere in this script and that test
@@ -377,6 +384,20 @@ catalog_published_lower_bound() {
       "$repo" "$(catalog_lb_log_safe "$tag")" "$(catalog_lb_log_safe "$assets")" >&2
     return 5
   fi
+  # CR strip at the boundary where the artefact is BORN, not at the one consumer that noticed.
+  # jq writes stdout in TEXT mode on Windows, so the `\n` inside `join("\n")` leaves the process as
+  # `\r\n`. Measured with REAL jq 1.7.1 under bash 5.3.15 cygwin (round 5 — the round-4 note below
+  # was measured against a jq SHIM, which is why it missed this; a shim measures your shim):
+  #     $assets bytes: c a t a l o g - i n d e x . j s o n \r \n x
+  # Only the EMBEDDED separators survive: `$( )` here strips the trailing `\r\n` as a unit, so the
+  # single-line `tag`, `count` and `bound` captures come back clean — swept, all four jq sites, same
+  # run. That is why this strip is on `$assets` alone and why it is here rather than in the loop.
+  # `//` (every CR) not `%` (a trailing one): a CR anywhere in an asset NAME is not a name we can
+  # match, and the two directions are not symmetric — a false NEGATIVE here takes the exit-0
+  # "carries NO catalog-index.json" branch (fail-OPEN), while a false POSITIVE reaches the fetch and
+  # a 404 there is refused as a listed-but-not-served contradiction (fail-CLOSED). Same argument
+  # `catalog_lb_log_safe` makes at its own `${text//$'\r'/}`.
+  assets="${assets//$'\r'/}"
 
   # `.assets | length`, NOT a line count over the joined names. Round 1 derived the count from the
   # joined string, so a release whose assets are all nameless objects reported "0 asset(s)
@@ -393,11 +414,25 @@ catalog_published_lower_bound() {
   # says otherwise, at exit 0. A whole-line comparison in the shell has no such state: there is no
   # tool to be absent. `IFS= read -r` and `=` (not `==`, not a `case` glob) so the match is exact and
   # literal on the whole line, which is what `-Fx` meant.
-  # EQUIVALENCE MEASURED, not assumed, executing this script with gh/curl/jq shimmed (round 4):
-  # a release listing `catalog-index.json.sig` but NOT `catalog-index.json` still yields `none` at
-  # exit 0 — the substring trap `-F` alone would fall into; a release listing the real asset reaches
-  # the fetch and compares; nameless assets still report the array length; and the forged-tag
-  # exit-0 line still comes out as `  |::error::FORGED-NONE`, defanged and visible.
+  # WHAT THE ROUND-4 EQUIVALENCE MEASUREMENT ACTUALLY COVERED, restated because it was overclaimed.
+  # It ran this script with gh/curl/jq SHIMMED, and said "equivalence measured, not assumed". A shim
+  # measures your shim: the stand-in `jq` was a shell `printf`, which emits LF, and the one input
+  # shape that separates `grep -Fxq` from `read`+`=` is jq's own CRLF. Under real jq the claim was
+  # FALSE and this branch fired on a release that does list the index — see the strip above. So,
+  # honestly scoped: the shimmed run establishes the SELECTION rules only — a release listing
+  # `catalog-index.json.sig` but NOT `catalog-index.json` still yields `none` at exit 0 (the
+  # substring trap `-F` alone would fall into), a release listing the real asset reaches the fetch
+  # and compares, nameless assets still report the array length, and the forged-tag exit-0 line
+  # still comes out as `  |::error::FORGED-NONE`, defanged and visible.
+  # The line-ENDING half is not left to a shim and not left to a comment. It is NOT a CRLF-emitting
+  # jq stub either — that would be a third configuration existing on no real machine, and it would
+  # break `count` in a way Windows does not. src/lib/catalogPublishLowerBound.test.ts's block
+  # `the asset enumeration matches on jq's real line endings` lifts THIS function's own
+  # transformation and enumeration lines out of this file (anchored on the `fi` above and on
+  # `done <<< "$assets"`, dropping any line that runs a command) and executes them with `$assets`
+  # set to the bytes jq hands them. Pure bash, so it runs on CI's LF-only Linux too. Red-proofed by
+  # deleting the strip above: **46 failed / 37 passed** with real jq on Windows, of which that block
+  # is one, reporting `"CRLF, index first": "0"` with no jq involved at all.
   local have_index=0 asset_name
   while IFS= read -r asset_name; do
     if [ "$asset_name" = 'catalog-index.json' ]; then have_index=1; fi
