@@ -29,8 +29,12 @@ pub fn enabled() -> bool {
 }
 
 /// The trace log file: `<temp>/cpe-ai-console/session-diag.log`.
+///
+/// Both components come from `console_temp_dir` (CPE-1975) rather than being spelled here — this was
+/// one of the three sites that each built the same fixed path by hand, and the reason two of them got
+/// hardened and one did not was that nobody had them in one place.
 pub fn log_path() -> PathBuf {
-    std::env::temp_dir().join("cpe-ai-console").join("session-diag.log")
+    crate::console_temp_dir::console_temp_dir().join(crate::console_temp_dir::DIAG_LOG_NAME)
 }
 
 fn now_ms() -> u128 {
@@ -41,6 +45,17 @@ fn now_ms() -> u128 {
 }
 
 /// Append one timestamped line, and echo it to stderr. Best-effort — never panics, never blocks I/O.
+///
+/// **Gated: it does nothing at all unless [`enabled()`] — one of four env vars — is true.** Stated
+/// here because the `eprintln!` below reads as an unconditional stderr echo and is only unconditional
+/// *relative to the file writes after it*. CPE-1975 round 2 relied on that misreading to report a
+/// security-relevant refusal from `session_supervisor::discover_or_spawn`, which runs in the
+/// **console** process where none of the four vars is set by default (`CPE_AICONSOLE_DIAG` is set by
+/// `run_session_daemon()` in the *daemon* process; `CPE_AICONSOLE_SESSION_DAEMON_ADDR` only on the
+/// host-injected path, which does not call `discover_or_spawn`) — so the report went nowhere.
+///
+/// If a message **must** be seen regardless of diagnostics, write it to the real stderr handle
+/// yourself and call this in addition, not instead. That is what that call site now does.
 pub fn trace(component: &str, msg: &str) {
     if !enabled() {
         return;
@@ -48,8 +63,22 @@ pub fn trace(component: &str, msg: &str) {
     let line = format!("{} pid={} {}: {}", now_ms(), std::process::id(), component, msg);
     eprintln!("[cpe-diag] {line}");
     let path = log_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    // CPE-1975. This used to be `let _ = std::fs::create_dir_all(dir);` — which walks a junction or
+    // symlink planted at `<temp>/cpe-ai-console` and then appends this log, which carries session
+    // ids, pids and byte counts, into whatever directory the attacker chose.
+    //
+    // The failure must be an EARLY RETURN, not the old `let _ =`. Ignoring the error and falling
+    // through to the open would defeat the whole change: `OpenOptions::create(true)` resolves the
+    // path itself, so it writes through the link with or without our `create_dir`. The two refusals
+    // below are what stop the write; the stderr echo above has already happened, so a refused trace
+    // is not a silent one.
+    let Some(dir) = path.parent() else { return };
+    if crate::console_temp_dir::ensure_console_dir_at(dir).is_err() {
+        return;
+    }
+    // And the log file itself must not be a link inside an otherwise-genuine directory.
+    if !crate::console_temp_dir::regular_file_or_absent(&path) {
+        return;
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
@@ -133,5 +162,86 @@ mod tests {
     fn log_path_is_under_the_daemon_temp_dir() {
         assert!(log_path().ends_with("cpe-ai-console/session-diag.log")
             || log_path().ends_with("cpe-ai-console\\session-diag.log"));
+    }
+
+    /// **`trace` is OFF by default, so it is not a channel for anything that must be seen.**
+    ///
+    /// This is the fact CPE-1975 round 2 got wrong, and it got it wrong in the direction that
+    /// matters: it routed a security-relevant refusal ("something is planted at the rendezvous
+    /// path", from `session_supervisor::discover_or_spawn`) through `trace` alone, on the reasoning
+    /// that `trace` "echoes to stderr unconditionally". The `eprintln!` is unconditional only
+    /// *relative to the file writes after it*; `trace` itself returns early unless [`enabled()`].
+    ///
+    /// `discover_or_spawn` runs in the **console** process, where none of the four vars is set by
+    /// default — `CPE_AICONSOLE_DIAG` is set by `run_session_daemon()` in the *daemon* process, and
+    /// `CPE_AICONSOLE_SESSION_DAEMON_ADDR` only on the host-injected path, which uses
+    /// `SessionDaemonHandle::external` instead. So the report reached nobody.
+    ///
+    /// ## What this test does and does NOT guard — corrected in round 4, because it claimed both
+    ///
+    /// Round 3 wrote here that this pins the fact "so that a future edit routing a must-see message
+    /// back through `trace` alone has a red test standing next to it". **That was false and was
+    /// measured false:** deleting the ungated `writeln!` from `session_supervisor::discover_or_spawn`
+    /// and leaving its `trace` call alone left the crate at **423 passed / 0 failed**. This test
+    /// asserts a property of `trace`; nothing structurally connects it to any call site, so it could
+    /// not fire for the regression it named — CLAUDE.md's *"do not name a backstop without checking
+    /// it can fire; one that structurally cannot fire is worse than none, because it reads as one."*
+    ///
+    /// **The call site is guarded by `src/lib/consoleRefusalReport.test.ts`**, which derives the
+    /// shape of that error arm from the Rust source (comments stripped first) and was red-proofed
+    /// against exactly that deletion. This test's job is only the narrower fact its name states.
+    ///
+    /// Round 3 also shipped two weak legs, both now gone: an `assert!(!enabled())` that merely
+    /// restated one already made twenty lines up in `a_byte_trace_is_inert_when_disabled`, and an
+    /// `assert_eq!(log_path().exists(), before)` that **compared existence to existence** — vacuous
+    /// wherever the log already exists, which in this crate's own suite is near-guaranteed because
+    /// `tests/session_supervisor.rs` and `tests/session_engine_daemon.rs` spawn the real
+    /// `--session-daemon`, and it sets `CPE_AICONSOLE_DIAG` on itself and appends to that same file.
+    /// With the gate sabotaged (`if false && !enabled()`) the trace wrote 66 bytes to the real log
+    /// and the test still passed.
+    ///
+    /// So the assertion is now on **content, via a token no other writer can produce** — immune both
+    /// to the file pre-existing and to a concurrent daemon appending to it, which a length or mtime
+    /// comparison would not be.
+    ///
+    /// If this ever fails because a fifth env var was added, or because the harness sets one, the
+    /// conclusion is not "relax the test", it is "`trace` is still not guaranteed on, so must-see
+    /// messages still need the real stderr handle".
+    ///
+    /// ## CPE-1929 pair, re-run on the repaired test (Windows, 2026-08-28)
+    ///
+    /// Round 3's version failed **both** legs green, which is this repo's definition of unreachable.
+    /// The repaired version:
+    ///
+    /// * **gate made to lie** (`if false && !enabled()` in [`trace`], i.e. no gate at all) →
+    ///   **RED**, `cargo test --locked --no-fail-fast --lib` 395 passed / **1 failed**, this test.
+    ///   Round 3's version was **GREEN** under the identical sabotage — the vacuous
+    ///   existence-vs-existence compare — so this is the leg that was bought.
+    /// * the **other** half of the pair, "delete the `writeln!` at the call site", is not this
+    ///   test's to catch and is not claimed here; `src/lib/consoleRefusalReport.test.ts` owns it and
+    ///   was red-proofed against exactly that deletion.
+    ///
+    /// Windows-measured only, like every other pair in this ticket.
+    #[test]
+    fn a_disabled_trace_writes_nothing_to_the_log() {
+        let token = format!(
+            "CPE-1975-must-go-nowhere-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        trace("test", &token);
+        // `unwrap_or_default()` treats an unreadable log (a permission error) the same as the
+        // legitimate first-run `NotFound`, so an unreadable log would pass this vacuously. Left as
+        // is, and named rather than silently accepted: the process that wrote the file is the one
+        // reading it, so the case is very narrow. If it ever widens, distinguish `NotFound` from
+        // every other error and fail on the rest.
+        let contents = std::fs::read_to_string(log_path()).unwrap_or_default();
+        assert!(
+            !contents.contains(&token),
+            "a disabled `trace` wrote to {} — so `trace` is NOT inert by default, and every place \
+             that relies on it being a real channel (or on it being a silent one) needs re-checking. \
+             See this test's doc and CPE-1975.",
+            log_path().display()
+        );
     }
 }

@@ -35,13 +35,13 @@
 // (b) the single property CPE-1964's fix rests on: the mission-directory name is spelled in exactly
 // one production file, so the guessable `format!("cpe-swarm-{}", now_millis())` shape cannot come
 // back somewhere else while `swarm_mission_dir.rs` stays hardened.
+//
+// CPE-1975 note: steps 1–4 of that recipe, and the `stripRustComments` fallback below, now live in
+// `rustProductionSources.ts`. They were lifted there — not copied — when a second guard needed the
+// same enumeration, so there is still exactly one implementation of it (CPE-1950: where the
+// duplication is removable, remove it).
 import { describe, it, expect } from "vitest";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { stripRustComments } from "./rustSource";
-
-const ROOT = resolve(__dirname, "..", "..");
+import { productionCode, productionRustFiles } from "./rustProductionSources";
 
 /**
  * The one production file allowed to spell the mission-directory prefix. Everything else reaches it
@@ -52,47 +52,6 @@ const MISSION_PREFIX_HOME = "sidecar/ai-console/src/swarm_mission_dir.rs";
 
 /** The prefix itself, spelled here so the guard fails loudly if the Rust constant is renamed. */
 const MISSION_PREFIX = "cpe-swarm-";
-
-/**
- * A tracked Rust file's production half: comments blanked, then everything from the first column-0
- * `#[cfg(test)]` onward dropped.
- *
- * ## The fallback, and why it is safe *here* specifically
- *
- * `stripRustComments` ends with a tripwire — "no line may still begin with `//`" — that catches a
- * desync of any cause (CPE-1950). Three files in this repo trip it without being desynced at all,
- * because a `//` line legitimately *survives* when it lives inside a string literal:
- * `crates/server/src/net_share.rs` (a `/proc/mounts` fixture whose CIFS row starts `//fileserver/…`,
- * in a backslash-continued string), `sidecar/host/src/scaffold.rs` (an `r#"…"#` template of a
- * generated `main.rs`, doc comments and all) and `sidecar/agent-board/src/ui.rs` (an `r#"…"#` page
- * with inline JS). The strip is correct in all three; the invariant is stricter than the property.
- *
- * Fixing that belongs to `rustSource.ts`, not to a caller (its doc says so in as many words), so this
- * enumerator falls back to the **raw** source for such a file. That is conservative in the only
- * direction that matters here: raw text is a superset of stripped text, so every assertion below can
- * only gain matches, never lose them — a comment could make one of these three files red, never
- * green. It would be the wrong fallback for a guard that reads a *value* out of Rust.
- */
-function productionCode(rel: string): string {
-  const raw = readFileSync(join(ROOT, rel), "utf8");
-  let stripped: string;
-  try {
-    stripped = stripRustComments(raw);
-  } catch {
-    stripped = raw;
-  }
-  const cut = stripped.search(/^#\[cfg\(test\)\]/m);
-  return cut === -1 ? stripped : stripped.slice(0, cut);
-}
-
-/** Every tracked `.rs` file that is not an integration test. */
-function productionRustFiles(): string[] {
-  return execFileSync("git", ["ls-files", "*.rs"], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 << 20 })
-    .split("\n")
-    .map((l) => l.trim().split("\\").join("/"))
-    .filter(Boolean)
-    .filter((p) => !p.split("/").includes("tests"));
-}
 
 /** `file:line` for every `std::env::temp_dir()` in production code, derived by the corrected recipe. */
 function tempDirSites(): string[] {
