@@ -2033,3 +2033,22 @@ helper named for a DOM API that does not call that DOM API is a trap that had be
 further latent call sites, waiting for whichever spec next put a fixed-position element in front of
 it. The fix replaces the command with the actual DOM API and adds a guard test so the command cannot
 come back.
+
+## 2026-08-27 — a reviewer in a worktree off the PR branch sees the repo as of the PR's BASE
+
+PR #1070's Reviewer reported, as a finding, that *"there is no `CPE-1957` anywhere in `Ticketing/`"* and
+that no ticket existed for the two sites the PR deliberately left. Both tickets exist on `main` —
+CPE-1957 and CPE-1961, the latter filed hours earlier from that same PR's Security Auditor. The
+Reviewer's worktree branches off #1070's base, which predates both, so its `find` was correct about its
+checkout and wrong about the repo.
+
+This is easy to repeat and easy to miss, because the finding *reads* like the strongest kind: an
+absence, mechanically verified. The rule: **any claim of the form "X does not exist in this repo" made
+from a PR worktree is a claim about that branch's base commit.** Ticket files, docs and sibling guards
+all move on `main` while a review runs, and a long review — this one took an hour — guarantees drift.
+Check such claims against `origin/main`, not the working tree, or state the base you checked.
+
+The corroborating half of the same finding was genuinely valuable and nearly lost with it: the Reviewer
+independently re-measured arm E at **51/1,000 (Windows) and 55/1,000 (Linux)** on the fixed branch,
+a second confirmation of CPE-1961's numbers from a different harness run. Worth separating the
+verifiable half of a finding from the stale half rather than discarding both.
