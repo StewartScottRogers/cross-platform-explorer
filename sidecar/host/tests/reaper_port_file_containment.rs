@@ -60,6 +60,23 @@
 //! `src-tauri` calls at startup — `reap_orphan_session_daemons`, not a copy of it. The port file's
 //! own name comes from the production constant [`PORT_FILE_NAME`], so a rename moves the fixture
 //! with it, and [`the_production_port_file_path_is_the_one_under_test`] pins the real path itself.
+//!
+//! ## This file and `ai-console`'s companion are asymmetric, on purpose
+//!
+//! `sidecar/ai-console/tests/console_temp_dir_containment.rs` plants under the **real**
+//! `std::env::temp_dir()` (at a `<name>-cpe1975-<pid>` sibling); this file plants entirely inside a
+//! `tempfile::tempdir()`. Said out loud rather than left for a reader to notice, because "a stand-in
+//! path is unfalsifiable" (CPE-1929) is the standing rule and this looks like a breach of it.
+//!
+//! The difference is that the two crates expose different seams. `ensure_console_dir_at` is the
+//! primitive that *decides where the rendezvous directory goes*, so pointing it at a scratch root
+//! would test a decision production never makes — it has to see the real temp directory.
+//! `reap_orphan_session_daemons` takes the port file **as a parameter** and is entirely path-generic;
+//! `src-tauri` hands it `default_session_daemon_port_file()`. So the production path is not something
+//! this function chooses, and it is pinned separately by
+//! [`the_production_port_file_path_is_the_one_under_test`], which asserts it from the production
+//! constants against the real `std::env::temp_dir()`. Planting in the real temp directory here would
+//! add no reachability and would risk the machine's live rendezvous directory.
 
 use std::path::{Path, PathBuf};
 

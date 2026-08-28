@@ -54,20 +54,22 @@ fn norm(p: &Path) -> String {
     }
 }
 
-/// The rendezvous directory's name, and the port file inside it.
+/// The rendezvous directory's name, and the port file inside it — **one copy, in the contract
+/// crate**, re-exported here (CPE-1975).
 ///
-/// These are a **duplicate** of `ai_console::console_temp_dir::{CONSOLE_DIR_NAME, PORT_FILE_NAME}`.
-/// The duplication is forced: ADR 0001's one-way rule means the host may not depend on a sidecar
-/// crate, and CI fails the build if it tries.
+/// This used to be a second literal spelling, under a bare "Keep them in sync" comment. Round 1 of
+/// CPE-1975 replaced the comment with a derived test and then justified keeping the duplicate with
+/// "ADR 0001's one-way rule means the host may not depend on a sidecar crate, and CI fails the build
+/// if it tries" — **which is false**, and is the same untested-provenance defect the round was
+/// closing, one level up. ADR 0001's rule and its CI guard are about a *sidecar* depending on the
+/// *explorer app*: the guard greps `sidecar/*/Cargo.toml` for `^(app_lib|cross-platform-explorer)\b`
+/// or `path = "../../src-tauri"`, neither of which a host→sidecar edge matches.
 ///
-/// It used to carry a bare "Keep them in sync" comment, which is the untested provenance claim
-/// CLAUDE.md warns about — worse than no comment, because the green suite beside it reads as
-/// vouching for it. It is now **derived**: `src/lib/consoleTempDirPath.test.ts` reads these two
-/// literals and the sidecar's out of the two Rust sources (comments stripped first) and fails
-/// naming both values if they drift. Red-proofed by changing this literal — see that file.
-pub const CONSOLE_DIR_NAME: &str = "cpe-ai-console";
-/// See [`CONSOLE_DIR_NAME`]. Same duplication, same derivation.
-pub const PORT_FILE_NAME: &str = "session-daemon.port";
+/// The duplication was removable all along and is now gone: the name is a host↔sidecar rendezvous,
+/// so it belongs in `sidecar-contract`, which **both** crates already depend on — no new dependency
+/// edge, no effect on the one-way rule or the delete-test. CPE-1950: where the duplication is
+/// removable, remove it.
+pub use sidecar_contract::{CONSOLE_DIR_NAME, PORT_FILE_NAME};
 
 /// The well-known session-daemon port file: `<temp>/cpe-ai-console/session-daemon.port`.
 pub fn default_session_daemon_port_file() -> PathBuf {
@@ -100,12 +102,32 @@ pub fn default_session_daemon_port_file() -> PathBuf {
 /// There is no `exists()` pre-check: `symlink_metadata` answers existence and kind in one call, and
 /// adding `exists()` in front of it would be a shadowed guard.
 ///
+/// ## The residual, stated HERE and not only one crate over
+///
+/// Both checks are **verify-then-use**, so a window remains between the last `symlink_metadata` and
+/// the `remove_file`: a same-user attacker who wins that race can still have the unlink land through
+/// a link swapped in after the checks. It is much narrower than the pre-fix "compute the path in
+/// advance and plant at leisure" — it needs a process already running as the victim, and it needs to
+/// win a race measured in microseconds — but it is not zero, and no path-based design closes it.
+/// Closing it needs a handle-based one: open the directory once (`O_DIRECTORY|O_NOFOLLOW`, or
+/// `NtCreateFile` with `FILE_FLAG_OPEN_REPARSE_POINT`) and reach the file through `openat`-style
+/// calls on that handle. Out of scope for CPE-1975.
+///
+/// Written out at this site deliberately. `ai_console::console_temp_dir`'s module header makes the
+/// same disclosure for the write half, and a reader of `reaper.rs` never sees it — a residual
+/// declared only in the other crate is, for this file's reader, not declared at all.
+///
 /// ## CPE-1929 sabotage pairs, both refusals, measured 2026-08-28 on **Windows**
 ///
 /// `cargo test --locked --no-fail-fast` in `sidecar/host` (`--no-fail-fast` because otherwise cargo
 /// stops after the first failing binary and the totals are not comparable), with the `Compiling
 /// sidecar-host` line confirmed present in every sabotage run so none is a stale-binary pass.
 /// Baseline: **153 passed / 0 failed**.
+///
+/// Two of the four (the parent-directory *disabled* leg and the port-file *lie* leg) were **re-run in
+/// round 2**, after this file changed to re-export the path constants from `sidecar-contract`; both
+/// reproduce their round-1 numbers exactly, naming the same tests. Round 2 also independently
+/// reproduced all four of these numbers during review.
 ///
 /// * **parent-directory refusal disabled** (`if false && !parent_is_real_dir(port_file)`) → **RED**,
 ///   152 passed / **1 failed**: `the_reaper_does_not_delete_through_a_planted_directory_link`.

@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::session_client::SessionClient;
+use crate::session_diag;
 
 /// Owns (or references) the session-daemon process. A daemon we **spawned** is reaped on drop; a
 /// daemon we **discovered** already running (across a console restart) is left alive — it must
@@ -71,7 +72,30 @@ impl SessionDaemonHandle {
             }
         }
         let handle = Self::spawn_detached(exe)?;
-        let _ = write_port_file(port_file, handle.port);
+        // CPE-1975 round 2. This was `let _ = write_port_file(…)`, and round 1's claim that the
+        // error is "propagated rather than dropped" was **false of the code**: making
+        // `write_port_file` return the error only moved the swallow one frame up, to here.
+        //
+        // It is deliberately not `?`. The daemon has already been spawned **detached** at this
+        // point, so returning `Err` would abandon a live daemon nobody holds a handle to — trading a
+        // bookkeeping failure for an orphan process. The handle is still good and is still returned.
+        //
+        // But the failure is no longer silent, and that matters: after the hardening, the *only*
+        // ways this fails are a real I/O error and **a refusal**, i.e. something has planted a link
+        // or a non-regular file at the rendezvous path. That is a security-relevant event reported to
+        // nobody if it is dropped. `session_diag::trace` echoes to stderr unconditionally, so the
+        // line survives even when the refusal is precisely what stops the trace log being written.
+        if let Err(e) = write_port_file(port_file, handle.port) {
+            session_diag::trace(
+                "supervisor",
+                &format!(
+                    "could not record the daemon port at {}: {e} — the daemon is running on {} but a \
+                     restarted console will not rediscover it (CPE-1975)",
+                    port_file.display(),
+                    handle.port
+                ),
+            );
+        }
         Ok(handle)
     }
 
@@ -160,9 +184,16 @@ fn daemon_answers(port: u16) -> bool {
 /// choose the port this console then connects to. See `console_temp_dir`'s header for why that is
 /// currently unreachable (nothing calls [`SessionDaemonHandle::discover_or_spawn`]) and why the
 /// check is here anyway.
+///
+/// **A read path must not create anything.** Round 1 called `ensure_console_dir_at` here, which
+/// `mkdir`s the rendezvous directory as a side effect of a lookup — harmless (a refusal still
+/// returns `None`, so the caller spawns a fresh daemon, which is the right fail-safe) but surprising,
+/// and a reader that writes is the kind of thing the next person has to re-derive. It now uses
+/// [`console_temp_dir::console_dir_is_real`], which only `lstat`s. A directory that is not there yet
+/// answers "no port file", which is exactly right on a first run.
 fn read_port_file(path: &Path) -> Option<u16> {
     let dir = path.parent()?;
-    if crate::console_temp_dir::ensure_console_dir_at(dir).is_err() {
+    if !crate::console_temp_dir::console_dir_is_real(dir) {
         return None;
     }
     if !crate::console_temp_dir::regular_file_or_absent(path) {
@@ -174,9 +205,15 @@ fn read_port_file(path: &Path) -> Option<u16> {
 /// Record the daemon's port, refusing a redirected path (CPE-1975).
 ///
 /// Was `let _ = std::fs::create_dir_all(dir);` followed by an unconditional write — the second of the
-/// two `create_dir_all` sites the ticket names. The error is now **propagated** rather than dropped:
-/// the caller already returns `io::Result`, and a port file that could not be written safely must not
-/// look like one that was.
+/// two `create_dir_all` sites the ticket names. The refusal now **fails this function** instead of
+/// being swallowed inside it, so a port file that could not be written safely does not look like one
+/// that was.
+///
+/// The signature was already `io::Result<()>` before CPE-1975, so returning the error is only half a
+/// change: round 1 claimed it was "propagated rather than dropped", which was **not true of the
+/// code** — the sole caller had `let _ = write_port_file(…)`, so the swallow simply moved one frame
+/// up. [`SessionDaemonHandle::discover_or_spawn`] now handles it, and says at that site why it
+/// reports rather than returns.
 fn write_port_file(path: &Path, port: u16) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "port file path has no parent directory")

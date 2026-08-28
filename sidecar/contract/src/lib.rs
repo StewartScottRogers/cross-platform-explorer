@@ -34,6 +34,37 @@ pub const ENVELOPE_SCHEMA_VERSION: u16 = 1;
 /// (CPE-275).
 pub const AUTH_TOKEN_ENV: &str = "CPE_SIDECAR_TOKEN";
 
+/// The AI Console's rendezvous directory under the OS temp directory: `<temp>/cpe-ai-console`
+/// (CPE-1975).
+///
+/// It lives here because it is a **rendezvous between the host and a sidecar** — the sidecar
+/// (`ai_console::console_temp_dir`) creates and writes it; the host
+/// (`sidecar_host::reaper`) reads and sweeps the port file inside it. That is exactly the
+/// "single shared surface" this crate is for, and both crates already depend on it, so naming
+/// it once here adds **no new dependency edge** and cannot break the one-way rule or the
+/// delete-test.
+///
+/// It used to be spelled twice, once in each crate, under a `Keep them in sync` comment. The
+/// commit that derived that comment instead of asserting it also wrote — as measured fact —
+/// that the duplication was *forced*, because "ADR 0001's one-way rule means the host may not
+/// depend on a sidecar crate, and CI fails the build if it tries". **That was false**, and it
+/// is recorded here because it is the exact defect that commit set out to kill: ADR 0001's
+/// rule and its CI guard (`ci.yml`, "Enforce one-way dependency") both point the *other* way —
+/// they grep `sidecar/*/Cargo.toml` for `^(app_lib|cross-platform-explorer)\b` or
+/// `path = "../../src-tauri"`, i.e. a sidecar depending on the **explorer app**. A
+/// `path = "../ai-console"` in the host's manifest matches neither and CI would have passed.
+/// The claim was never run as an experiment; it read as a measurement because it sat beside a
+/// green test. CPE-1950's preference applies and the duplication is simply gone.
+pub const CONSOLE_DIR_NAME: &str = "cpe-ai-console";
+
+/// The session daemon's port file inside [`CONSOLE_DIR_NAME`]. Same rendezvous, same reason.
+///
+/// Nothing writes it today — `SessionDaemonHandle::discover_or_spawn` is its only reader and
+/// only writer and has zero callers, so the production daemon port travels over the spawned
+/// child's stdout pipe instead. The name is shared here so the host's startup sweep and the
+/// sidecar's (currently dormant) writer cannot drift apart before that path is wired up.
+pub const PORT_FILE_NAME: &str = "session-daemon.port";
+
 // ---------------------------------------------------------------------------
 // Versioning & negotiation (CPE-263)
 // ---------------------------------------------------------------------------

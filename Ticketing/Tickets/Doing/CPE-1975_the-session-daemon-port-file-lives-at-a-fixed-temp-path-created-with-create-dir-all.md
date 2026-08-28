@@ -259,3 +259,109 @@ always will — that is what a rendezvous is.
 `src/docs/04-ai-console.md` gains a "Limits / notes" entry explaining the `cpe-ai-console` temp folder,
 why it is at a fixed name, that the app now refuses to use it if it is not a plain folder, and that it
 never deletes what it finds there.
+
+---
+
+## Round 2 — review response (PR #1097: SEC PASS, CHANGES REQUESTED)
+
+The Reviewer independently reproduced everything load-bearing: the zero-callers finding (swept
+tree-wide, **confirmed true**, production path traced, corroborated on disk), four of the eight
+sabotage numbers (**all four reproduce exactly, same tests named**), `daemon_answers` as
+liveness-not-auth, the enumerator lift as one copy, and the controls (9 tests, none `#[ignore]`d, both
+sensitivity controls escaping, `plant_or_panic` panicking, "NOT VERIFIED" appearing in no run).
+
+Two claim-scope findings were **required**, and the first is the same defect this ticket exists to
+kill, committed by the commit that killed it.
+
+### F1 (required) — I stated a CI guard as measured fact and it covers the opposite direction
+
+Round 1 kept the duplicated path constants and justified it with *"ADR 0001's one-way rule means the
+host may not depend on a sidecar crate, and CI fails the build if it tries."* **False.** ADR 0001's
+rule and its CI guard (`ci.yml`, "Enforce one-way dependency") are about a *sidecar* depending on the
+*explorer app*; the guard greps `sidecar/*/Cargo.toml` for `^(app_lib|cross-platform-explorer)\b` or
+`path = "../../src-tauri"`. A `path = "../ai-console"` matches neither. **CI would have passed.** I
+never ran the experiment; the claim read as a measurement because it sat next to a green test that
+actually vouched only for two string literals being equal. Verified the Reviewer's reading against
+`docs/adr/0001-sidecar-platform.md:68` and `ci.yml:1626-1634` before acting.
+
+**Took option (a): the duplication is gone.** Both constants now live in **`sidecar-contract`** — the
+crate that exists for exactly this, a host↔sidecar shared surface — and both crates re-export them.
+Neither gains a dependency edge (both already depend on the contract), so the one-way rule and the
+delete-test are untouched. CPE-1950's stated preference, applied.
+
+The false claim is **recorded at all three sites** (`sidecar_contract::CONSOLE_DIR_NAME`,
+`console_temp_dir`, `reaper`) rather than quietly deleted, because "the claim was never run as an
+experiment" is the reusable lesson. `consoleTempDirPath.test.ts` loses its two agreement cases (there
+is nothing left to agree) and keeps the sweep, which is the part a shared constant cannot enforce.
+
+### F2 (required) — *"propagated rather than dropped"* was not true of the code
+
+Both halves were wrong: `discover_or_spawn` returns `Result<_, String>`, not `io::Result`, and its
+sole call site still read `let _ = write_port_file(port_file, handle.port);`. `write_port_file` was
+**already** `-> io::Result<()>` before the diff, so all that changed was *where* the error got
+swallowed — one frame up. Net behaviour: still dropped. Worse, the sentence was written for the
+CPE-309 S4 wiring step and told that reader the opposite of what the code does.
+
+Handled at the call site. Deliberately **not** `?`: the daemon is already spawned **detached** by that
+point, so returning `Err` would abandon a live daemon nobody holds a handle to — a bookkeeping failure
+traded for an orphan process. The handle is still returned; the failure now goes through
+`session_diag::trace`, which echoes to stderr unconditionally, so it survives even when the refusal is
+precisely what stops the trace *log* being written. That matters because after the hardening the only
+ways this fails are real I/O and **a refusal** — i.e. someone has planted something at the rendezvous
+path, which is a security-relevant event that was being reported to nobody. `write_port_file`'s doc
+now says the error is returned by this function and what its caller does with it.
+
+### F3 (minor, taken) — a read path no longer creates anything
+
+`read_port_file` called `ensure_console_dir_at`, so a lookup `mkdir`ed. The `!meta.is_dir()` predicate
+was extracted as `console_dir_is_real` (lstat only, every error `false`), and both `ensure_console_dir_at`
+and `read_port_file` now use it — one predicate, one place to sabotage, one place to audit. "Directory
+not there yet" answers "no port file", which is correct on a first run.
+
+Because that extraction is a claim of behaviour-preservation, **both ai-console sabotage legs were
+re-run against the shipping code** rather than carried forward: 420/**2** and 421/**1**, identical to
+round 1, same tests named. Two host legs were re-run too (that file changed as well): 152/**1** each,
+also identical. One deliberate consequence is noted at the site — an unreadable `symlink_metadata` used
+to propagate its own `io::Error` and now surfaces as the `AlreadyExists` refusal. Both refuse.
+
+### F4 (minor, taken) — the residual TOCTOU is now declared in `reaper.rs` too
+
+It was disclosed only in `console_temp_dir`'s header, and a reader of `reaper.rs` never sees that file
+— a residual declared only in the other crate is, for this reader, not declared. `remove_stale_port_file`
+now states the window between its last `symlink_metadata` and the `remove_file`, what it costs an
+attacker, and that closing it needs a handle-based design.
+
+### The two "no action demanded" notes, both taken
+
+**The control files' asymmetry is now remarked**, in the host file's header: ai-console plants under
+the real `temp_dir()`, the host file inside a `tempfile::tempdir()`, and the reason is that the two
+crates expose different seams. `ensure_console_dir_at` *decides where the directory goes*, so it must
+see the real temp directory; `reap_orphan_session_daemons` takes the port file **as a parameter** and
+is path-generic, with the production path pinned separately from the production constants. Planting in
+the real temp directory there would add no reachability and would risk the machine's live rendezvous
+directory.
+
+**The `npm test` figure is corrected, and it was wrong in a second way I had not noticed.** Round 1
+reported "5,380 passed / 2 skipped" — 5,380 is the **total**; the pass count is 5,378. Re-measured
+here: **360 files, 5,378 passed / 2 skipped / 0 failed**. The Reviewer measures **5,320 passed / 19
+failed** on their machine, with the identical 19 failing on `main` (`337ac334`) —
+`catalogPublishVersion`, `catalogPublishFreshnessGuard`, `catalogPublishLoudFailure`,
+`releaseVerifyWiringGuard`, all shell-execution guards, environmental. Both numbers are reported with
+whose machine they came from, because a single figure would imply the other environment does not
+exist; **the 19 are pre-existing and not caused by this branch.**
+
+### Round-2 verification
+
+- `sidecar/contract`: **12 passed / 0 failed**; clippy clean.
+- `sidecar/ai-console`: **422 passed / 0 failed**; clippy clean. `sidecar/host`: **153 passed /
+  0 failed**; clippy clean.
+- `src-tauri`: clippy clean in **both** feature modes.
+- `npm run check`: 0 errors, 0 warnings. Both path guards green.
+- No new dependency edge, so no lockfile changes; `--locked` builds pass in all three sidecar crates.
+
+### Noted for a follow-up ticket (not this one)
+
+The Reviewer found two more fixed-name temp paths of the same class, outside this ticket's three:
+`src-tauri/src/lib.rs:10167` `cpe-ai-console-catalog` (holds **verified catalog manifests**) and
+`:11911` `cpe-sidecar-storage` — both `app_data_dir()` fallbacks, both higher-value targets than a
+trace log.

@@ -139,17 +139,20 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The rendezvous directory's name under `std::env::temp_dir()`.
+/// The rendezvous directory's name under `std::env::temp_dir()`, and the port file inside it.
 ///
-/// Duplicated — deliberately and unavoidably — in `sidecar_host::reaper`, because ADR 0001 forbids
-/// the host crate depending on a sidecar crate. That duplication used to carry a bare "Keep them in
-/// sync" comment, which is precisely the untested provenance claim CLAUDE.md warns about; it is now
-/// derived at test time by `src/lib/consoleTempDirPath.test.ts`, which reads this literal and the
-/// host's out of the two Rust sources and fails if they disagree.
-pub const CONSOLE_DIR_NAME: &str = "cpe-ai-console";
-
-/// The session daemon's port file, inside [`CONSOLE_DIR_NAME`]. Same duplication, same derivation.
-pub const PORT_FILE_NAME: &str = "session-daemon.port";
+/// **There is exactly one copy of each, in `sidecar-contract`**, re-exported here so callers in this
+/// crate keep reading them from `console_temp_dir`. Round 1 of this ticket spelled them a second time
+/// in `sidecar_host::reaper` and justified the duplicate with "ADR 0001 forbids the host depending on
+/// a sidecar crate, and CI fails the build if it tries" — **a false claim of exactly the class this
+/// ticket set out to kill**, sitting beside a green test that vouched only for the two string
+/// literals matching. ADR 0001's rule and its CI guard both point the other way (a *sidecar* must not
+/// depend on the *explorer app*), so the experiment would have passed; it was never run. See
+/// `sidecar_contract::CONSOLE_DIR_NAME`'s own doc for the full record.
+///
+/// The contract crate is where a host↔sidecar rendezvous name belongs anyway, and both crates already
+/// depend on it, so removing the duplication added **no new dependency edge**.
+pub use sidecar_contract::{CONSOLE_DIR_NAME, PORT_FILE_NAME};
 
 /// The CPE-309 I/O trace log, inside [`CONSOLE_DIR_NAME`].
 pub const DIAG_LOG_NAME: &str = "session-diag.log";
@@ -179,20 +182,26 @@ pub fn console_temp_dir() -> PathBuf {
 /// shadowed guard in CPE-1929's exact sense — every input that trips it trips `create_dir` first,
 /// and racily — and a shadowed guard reads as coverage.
 ///
-/// ## CPE-1929 sabotage pair on the `!meta.is_dir()` refusal
+/// ## CPE-1929 sabotage pair on the [`console_dir_is_real`] refusal
 ///
 /// Measured 2026-08-28 on **Windows**, `cargo test --locked --no-fail-fast` in `sidecar/ai-console`
 /// (`--no-fail-fast` because without it cargo stops after the first failing binary and the totals are
 /// not comparable). The `Compiling ai-console` line was confirmed present in every run below, so none
 /// of them is a stale-binary pass. Baseline: **422 passed / 0 failed**.
 ///
-/// * **disabled** (`if false && !meta.is_dir()`) → **RED**, 420 passed / **2 failed**:
+/// **Re-run in round 2**, after the predicate was extracted into [`console_dir_is_real`] so a read
+/// path could ask the same question without the `mkdir` side effect. The extraction is meant to be
+/// behaviour-preserving, and "meant to be" is a claim — so both legs were run again rather than
+/// carried forward, and both reproduce the round-1 numbers exactly, naming the same tests.
+///
+/// * **disabled** (`if false && !console_dir_is_real(dir)`) → **RED**, 420 passed / **2 failed**:
 ///   `console_temp_dir::tests::ensure_console_dir_at_refuses_a_plain_file_at_the_path` and
 ///   `the_hardened_primitive_refuses_a_planted_link`. So the refusal is reachable, and those two
 ///   tests are what reach it.
 /// * **predicate made to lie** (`std::fs::metadata(dir)` — the *following* stat — in place of
-///   `symlink_metadata`, so a junction reports `is_dir() == true`) → **RED**, 421 passed /
-///   **1 failed**: `the_hardened_primitive_refuses_a_planted_link`. One rather than two, and the
+///   `symlink_metadata` inside [`console_dir_is_real`], so a junction reports `is_dir() == true`) →
+///   **RED**, 421 passed / **1 failed**: `the_hardened_primitive_refuses_a_planted_link`. One rather
+///   than two, and the
 ///   difference is informative: a plain *file* at the path is refused by either stat, so only the
 ///   planted-link test can tell the two apart — which is exactly why the link test has to exist.
 ///
@@ -207,8 +216,7 @@ pub fn ensure_console_dir_at(dir: &Path) -> io::Result<()> {
     match std::fs::create_dir(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let meta = std::fs::symlink_metadata(dir)?;
-            if !meta.is_dir() {
+            if !console_dir_is_real(dir) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!(
@@ -222,6 +230,28 @@ pub fn ensure_console_dir_at(dir: &Path) -> io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Is `dir` a **plain directory** — not a symlink, not a Windows junction, not a file, not missing?
+///
+/// The refusal [`ensure_console_dir_at`] rides on, split out so a **read** path can ask the question
+/// without the `mkdir` side effect (CPE-1975 round 2: `read_port_file` used to call
+/// `ensure_console_dir_at`, so a lookup created a directory). One predicate, two callers, so there is
+/// a single place to sabotage and a single place to audit.
+///
+/// `symlink_metadata` does **not** follow. `FileType::is_dir()` is `is_directory() && !is_symlink()`
+/// on Windows, and std reports a name-surrogate reparse point (a junction) as a symlink, so this one
+/// predicate excludes junctions, Unix symlinks, files, and anything else that is not a plain
+/// directory. Measured on real ext4 (module header): `lstat` on a planted symlink reports
+/// `is_dir: False, is_symlink: True`.
+///
+/// Every error is `false` — an unreadable entry is refused, never assumed benign. For the read path
+/// that also makes "not there yet" a clean `false`, which is the correct answer on a first run.
+/// (One deliberate consequence for [`ensure_console_dir_at`]: an unreadable `symlink_metadata` used
+/// to propagate its own `io::Error` and now surfaces as the `AlreadyExists` refusal below. Both
+/// refuse; only the message differs.)
+pub fn console_dir_is_real(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir).map(|m| m.is_dir()).unwrap_or(false)
 }
 
 /// [`ensure_console_dir_at`] at the real `<temp>/cpe-ai-console`, returning the path on success.
