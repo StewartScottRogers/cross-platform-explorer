@@ -157,18 +157,31 @@ CATALOG_LB_U64_MAX='18446744073709551615'
 #   exit 0. Reproduced AGAIN on round 3 at exit 10, with only `gh` stubbed and the REAL curl hitting
 #   the REAL index URL — which 404s today (#1062) — so no control over curl is needed either.
 #
-#   THE SITES, and why this list is no longer what the guard rests on. Round 2 wrote three here —
-#   the `gh api` body on exits 4/5, curl's and jq's stderr, the release tag on the exit-0 permissive
-#   path — and the release tag on the **exit-10** path was the fourth, unsanitised, for a round. A
-#   universal claim ("nothing fetched becomes a workflow command") standing on a remembered list is
-#   how the fourth got through, and re-listing them here more carefully would only make the same
-#   mistake more neatly. So the sites today are: the `gh api` body (exits 4/5), curl's stderr (6/7/
-#   8/9), jq's stderr (14), the bound (17), and the release tag on the exit-0 permissive path AND on
-#   the exit-10 contradiction path — but what actually holds the property is
-#   src/lib/catalogPublishLowerBound.test.ts's 5c block, which derives the exit-code set from THIS
-#   FILE's own `return N` statements at run time and drives every one of them with forged `::` bytes
-#   on every remote-influenced input it has. A new exit code, or a new echo site on an existing one,
-#   reds there without anyone updating this paragraph.
+#   THE SITES ARE DELIBERATELY NOT LISTED HERE, on the third attempt. Round 2 enumerated three; the
+#   release tag on the **exit-10** path was a fourth and went out unsanitised for a round. Round 3
+#   said re-listing them more carefully would only make the same mistake more neatly — and then
+#   re-listed them, carefully, as six. #1091 round 4 counted NINE calls: `$tag` and `$assets` on the
+#   exit-5 assets-is-not-an-array branch were missing, and the tag turned out to be echoed on THREE
+#   paths, not the two named. Wrong on the day it was written, inside the paragraph explaining why
+#   such lists rot. So the list is deleted rather than corrected again. For today's sites:
+#       grep -n catalog_lb_log_safe .github/workflows/scripts/catalog-lower-bound.sh
+#
+#   WHAT HOLDS THE PROPERTY is src/lib/catalogPublishLowerBound.test.ts's 5c block, and here is what
+#   it covers — narrowed to the derivation, not to the ambition:
+#     * EXECUTED: one case per exit CODE, and the code set is derived from THIS FILE's own `return N`
+#       statements at run time, each driven with forged `::` bytes on every remote-influenced input
+#       that path reads. A new `return N` reds until a case drives it. Per code, NOT per branch —
+#       exit 5 has two branches and only the first is executed there.
+#     * STRUCTURAL: every `printf … >&2` must route each remote-assigned variable through
+#       catalog_lb_log_safe, and — added in round 4 — must contain no surviving `$(…)` or backtick
+#       substitution at all once the sanitiser calls are blanked out. Taint follows plain
+#       variable-to-variable assignment transitively, so `rel_name="$tag"; printf … "$rel_name" >&2`
+#       reds too.
+#   So a new echo site reds there, with no case to add and without anyone updating this paragraph,
+#   PROVIDED it is a `printf … >&2` that interpolates a variable or calls a command inline. What
+#   that leg cannot see — `read`, `printf -v`, an echo on some other channel, a wrapper function
+#   that prints remote bytes itself — is enumerated at `taintedVars` in that file, each with the
+#   sabotage result that measured it.
 #
 #   Any line CONTAINING `::` is prefixed with `  |`, not merely indented: the runner trims leading
 #   whitespace before looking for the `::` prefix, so indentation alone is not a mitigation. `|` is
@@ -275,6 +288,23 @@ catalog_lower_bound_url() {
 #   A missing tool is "did not run", never "found nothing". Refused up front with its own code so it
 #   can never be mistaken for a clean result further down.
 #     16 = a required tool is absent
+#
+#   THIS LIST IS NOT A REMEMBERED LIST — that is the one thing it must not be, because a tool left
+#   off it fails OPEN rather than loudly. Measured on #1091 round 4: `grep` was used at the asset
+#   enumeration below and was never in this list, and with `grep` shadowed by a stub exiting 127
+#   against a release whose assets DO list the index, the guard printed
+#     ::warning::… carries NO catalog-index.json (2 asset(s) enumerated) … Proceeding with no
+#     lower bound.
+#   and exited 0 — a self-contradicting message, and exactly the "did not run read as found
+#   nothing" this header refuses, emitted from inside the function that refuses it.
+#   Two things now hold it, and neither is anyone's memory:
+#     * `grep` is gone — the enumeration match below is pure bash, so the dependency it added is
+#       removed rather than declared (same argument `catalog_lb_log_safe` makes for using no
+#       `sed`/`tr`). One fewer tool is strictly better than one more list entry.
+#     * src/lib/catalogPublishLowerBound.test.ts DERIVES every external command this file actually
+#       invokes, from this file's own text, and reds on any that is neither in the `for t in` list
+#       below nor declared safe there with a reason. Add `awk` anywhere in this script and that test
+#       fails until one of those two things is true.
 catalog_lower_bound_tools() {
   local missing="" t
   for t in gh curl jq; do
@@ -357,7 +387,22 @@ catalog_published_lower_bound() {
   case "$count" in
     '' | *[!0-9]*) count='an unreportable number of' ;;
   esac
-  if ! grep -Fxq 'catalog-index.json' <<< "$assets"; then
+  # Pure bash, NOT `grep -Fxq` — see catalog_lower_bound_tools's header for the measurement. `grep`
+  # was never in the tools list, and `if ! grep …` is TRUE on a 127, so a machine without grep took
+  # the branch below and announced "carries NO catalog-index.json" about a release whose asset list
+  # says otherwise, at exit 0. A whole-line comparison in the shell has no such state: there is no
+  # tool to be absent. `IFS= read -r` and `=` (not `==`, not a `case` glob) so the match is exact and
+  # literal on the whole line, which is what `-Fx` meant.
+  # EQUIVALENCE MEASURED, not assumed, executing this script with gh/curl/jq shimmed (round 4):
+  # a release listing `catalog-index.json.sig` but NOT `catalog-index.json` still yields `none` at
+  # exit 0 — the substring trap `-F` alone would fall into; a release listing the real asset reaches
+  # the fetch and compares; nameless assets still report the array length; and the forged-tag
+  # exit-0 line still comes out as `  |::error::FORGED-NONE`, defanged and visible.
+  local have_index=0 asset_name
+  while IFS= read -r asset_name; do
+    if [ "$asset_name" = 'catalog-index.json' ]; then have_index=1; fi
+  done <<< "$assets"
+  if [ "$have_index" -eq 0 ]; then
     # (A) above, POSITIVELY established: the release exists, its assets were enumerated, and
     # catalog-index.json is not among them. There is nothing published to be newer than.
     # `$tag` is remote-controlled and this line is a workflow command, so the tag goes through the
