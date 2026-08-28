@@ -141,14 +141,15 @@ the board from `gh pr view N --json statusCheckRollup`, the required set from `g
 | outcome | PRs |
 |---|---|
 | clean | **168** |
-| **exposed — a required job produced no check at all** | **16** |
+| a required job produced no check at all | **16** — of which **15 exposure, 1 rename noise** (see round 2) |
 | unreadable (#896, #899 — squash commits unreachable from `main`); counted fail-closed, not clean | **2** |
 
 Absent job → merges it could not judge: `ratchet-guard` ×5 (#1053, #1055, #1057, #1054, **#1056**),
 `ci-verdict` ×5 (#1073, #1075, #1076, #1077, #1078), `lockfile-preflight` ×2 (#1048, #1049), `msrv` ×2
-(#1030, #1032), `ffmpeg-pin-guard` ×1 (#955), `gui-smoke-linux` ×1 (#921). **#1056 reproduces
-independently.** 14 of the 16 fall in the window's last 36 hours — this shift's own merges, exactly as
-the ticket says.
+(#1030, #1032), `ffmpeg-pin-guard` ×1 (#955), `gui-smoke-linux` ×1 (#921 — **reclassified in round 2 as
+the PR renaming its own job, not an unjudged merge**). **#1056 reproduces independently.** 14 of the 15
+genuine firings fall in the window's last 36 hours — this shift's own merges, exactly as the ticket
+says.
 
 *A cheaper first instrument is recorded because it was wrong.* Comparing the PR head's workflow files
 against `main`'s (pure git) also produced 16, but a different 16: it missed #921 and wrongly flagged
@@ -160,13 +161,15 @@ check uses the rollup.
 **2. Remedy, argued — and it needs the user.** `docs/design/CI-STALENESS.md` §2 is the decision-ready
 section: the exact ruleset items (required checks, **require branches to be up to date**, do-not-allow-
 bypassing, which the crew's `--admin` merges currently walk past), the suggested required-check list
-derived from `main`'s PR-triggered jobs, and the cost measured on this repo: **13.0 merges/day**,
-**2.90 other PRs open at the average merge** (max 10), successful `ci.yml` **median 65.9 min / p90
-108.2 min** (196 completed runs in the window). Consequence: merging becomes serial at one run apiece —
-a queue of five drains in **~5.5 h**, the ceiling is **~21 merges/day at median and 13 at p90**, and the
-crew already does 13.0. Recommendation is required-checks + up-to-date **plus a merge queue**, which
-restores most of the throughput; §2d flags the trap that `ci.yml`'s `paths-ignore` turns a required
-check into a permanent *pending* on ticket-only PRs.
+derived from `main`'s PR-triggered jobs, and the cost measured on this repo: **12.86 merges/day**,
+**2.90 other PRs open at the average merge** (max 10), successful `ci.yml` **median 60.9 min / p90
+81.8 min** (417 successful of **790 completed** runs in the window, paged to exhaustion — round 1
+reported 65.9/108.2 off a truncated 196-run list; see round 2). Consequence: merging becomes serial at
+one run apiece — a queue of five drains in **~5.1 h**, the ceiling is **~23.6 merges/day at median and
+17.6 at p90** against 12.86 actual. Recommendation is required-checks + up-to-date **plus a merge
+queue**, which restores most of the throughput. (Round 1's §2d claimed `ci.yml`'s `paths-ignore` would
+turn a required check into a permanent *pending* on ticket-only PRs; **that is false of this repo** and
+§2d was rewritten — see round 2.)
 
 **3. Shipped, because the settings change may never come.** `scripts/ci-poll.mjs` gains exit **5**:
 `completed stale-checks` (a job `main` requires produced no check on this board) and `completed
@@ -176,22 +179,25 @@ appended after `gh_failures=` so the pinned key order is untouched. The required
 **`origin/main`** via `git show`, not the working tree — a Worker's worktree *is* the PR branch, so
 reading it would have reproduced the defect from inside the guard.
 
-*Precision choice, argued at the site and in the doc:* "`main` moved at all" was rejected (593 commits
-in 14 days, ~42/day — it fires on nearly every merge and gets aliased away); "the newest run finished
+*Precision choice, argued at the site and in the doc:* "`main` moved at all" was rejected (**589**
+commits in the window, ~41/day — it fires on nearly every merge and gets aliased away); "the newest run finished
 before the guard landed" was rejected by this ticket's own evidence (#1056's run finished 67 s before
 the merge). *What it misses, stated:* a guard added **inside** an existing job — a new `.test.ts` under
 `Frontend`, a new ratchet under `Ratchet guard`, CPE-1936's parser fix — is invisible to any name-based
 instrument, which is why §2 is still the ask. Also a locally stale `origin/main` (the poll does not
 fetch; the ref+SHA is printed and `sprint.md` now says to fetch first), and a workflow that contributed
-nothing (the `paths-ignore` carve-out; those workflows are **named** on stdout rather than dropped).
+nothing (round 1 excused every such workflow; round 2 narrowed the excuse to workflows whose own
+`pull_request:` trigger is path-filtered — excused silences are still **named** on stdout).
 
-*Noise, measured:* swept over the 184 evaluable merges — **168 clean, 16 firings**, all 16 naming a job
-that still exists on `main` today, so **0** deletion/rename false positives.
+*Noise, measured:* swept over the 184 evaluable merges — **168 clean, 16 firings**. Round 1 called all
+16 genuine "because all 16 name a job that still exists on `main` today"; **that test keyed on the job
+id while the matcher keys on the label**, and round 2's re-classification gives **15 genuine, 1 rename
+(#921)** — a true rename rate of 1 in 16 firings (6.3%) / 1 in 184 merges (0.54%).
 
 **4. Red-proof, both directions, on exit code and stdout.** New `guard-gap` stub mode emits **one
 identical rollup**; only `main` changes, via two fixture dirs asserted to differ by exactly one job:
 `workflows-base-ahead/` → **exit 5**, `completed stale-checks`, guard named, `coverage=1-unjudged`;
-`workflows-base/` → **exit 0**, `completed success`, `coverage=ok`. Plus unreadable base and empty base
+`workflows-base/` → **exit 0**, `completed success`, `coverage=ok(1-silent)`. Plus unreadable base and empty base
 → exit 5 `coverage-unknown`; a red board stays exit 1 even with an unreadable base; `--run` →
 `coverage=n/a(run-mode)`; pending → `coverage=n/a(board-pending)`. A CPE-1950 derivation leg reads
 **this repo's real `.github/workflows`** through the shipped functions and reconstructs #1056 against
@@ -205,7 +211,7 @@ tests, both red — nothing earlier in the ladder shadows it.
 **5. The other ratchets** — `gui-smoke/known-failing.json`, the hex ratchet and the eight allowlists are
 all measured by `ratchet-baselines.mjs` under the **one** `ratchet-guard` job, so a board without that
 job bypasses all of them at once. That is one hole, not eight, and it is the one exit 5 refuses (5 of
-the 16). Recorded in `docs/design/CI-STALENESS.md` §4.
+the 15). Recorded in `docs/design/CI-STALENESS.md` §4.
 
 **`bidi-render-registry`'s 1552 → 1553 is deliberately NOT backdated.** CPE-1948 already settled this in
 `docs/design/RATCHETS.md`: a licence row is consumable only from inside the diff that performs the
@@ -224,4 +230,98 @@ CI/merge procedure with no app surface, so there is no `Section` to map.
 | `npx vitest run` (whole root suite) | **358 files, 5283 passed, 2 skipped** |
 | the 2 skipped | both in `catalogPublishLoudFailure.test.ts`, gated on `jq`, which is not installed on this machine |
 | `src/lib/ciPollFailClosed.test.ts` alone | 63 passed, 0 failed, 0 skipped (46 before this ticket) |
+| Rust | untouched — no crate changed |
+
+---
+
+## Round 2 — three measured numbers whose instrument was narrower than the claim, and two silent fail-opens
+
+The design survived review unchanged and was re-derived independently. Everything below is a correction
+to what was *reported*, plus two holes in what shipped. **The pattern in all five is the same one this
+PR is about: a question narrower than the confidence placed in its answer.**
+
+**1. The headline is 15, not 16, and "zero rename noise" was falsified by our own data.** #921 **is**
+CPE-1753 — the PR that sharded the Linux GUI-smoke leg. At `ad809938^` `main` carried job id
+`gui-smoke-linux` named `GUI smoke (ubuntu-latest) — tauri-driver + WebdriverIO (CPE-1171)`; at #921's
+head the **same job id** is named `GUI smoke (ubuntu-latest) shard ${{ matrix.shard }} — …`, and its
+board carried all four shards, the build job and the verdict, green. **The job was renamed by the PR
+being judged — nothing went unjudged.** Round 1 tested "does this job still exist on `main`" by **id**
+while the matcher keys on the **label**: wrong field, wrong conclusion. Re-classified by asking whether
+the absent job's id existed in that PR's own head tree (`gh api .../contents/…?ref=<head>`): **15
+GENUINE, 1 RENAMED-BY-THIS-PR**. True rename rate **1 of 16 firings (6.3%) / 1 of 184 merges (0.54%)**.
+The shipped code behaves correctly on #921 (it blocks and names itself); only the measurement and the
+noise-rate argument were wrong. Corrected in the doc's §1 table (new `classification` column), §3, the
+`ci-poll.mjs` header and `coverageOf`'s header.
+
+**2. The timing figures came from a truncated sample — inside a doc that invokes CPE-1932.** Re-taken
+with `gh api --paginate` (`total_count` **793**, 793 rows returned, 790 completed / 417 success):
+**median 60.9 min, p90 81.8 min**, not 65.9/108.2. The old sample's stated size — "196 completed runs"
+— is not any plausible count for a fortnight and was the tell. Reproduced the old family by taking the
+**newest 200 runs only**: median 63.7, p90 105.3, oldest created 2026-08-27T04:17Z, i.e. the last ~27
+hours of a 14-day window — the crew's busiest, slowest stretch. §2b now states its instrument first,
+and §2b's peak claim (*"at p90 it is the entire current throughput, with no slack"*) is **withdrawn**:
+the real ceiling is 1440/81.8 ≈ **17.6 merges/day** against **12.86** actual, ~37% of headroom. The
+recommendation (protection + merge queue) survives; the sentence selling it did not.
+
+**3. §2d's trap did not exist, and it was the section most likely to change what the user does.**
+`ci.yml`'s `paths-ignore` is on the **`push:`** trigger only — `{"push":{…,"paths-ignore":[…]},
+"pull_request":{"branches":["main"]}}` — and `ci.yml:62-64` says so in its own words. Neither
+PR-triggered workflow has any `pull_request:` path filter, `ci-verdict` has no `paths-ignore` to
+remove, and ticket-only PRs would **not** become unmergeable. §2d is rewritten to say what is actually
+true, and the claim is now **asserted rather than written down**: a new test enumerates
+`.github/workflows/` at run time, pins the PR-triggered set to `ci.yml` + `gui-smoke.yml`, and reds
+naming the file if either ever grows a `pull_request:` path filter. The same false premise was removed
+from `ci-poll.mjs` ×2, the test file, both `nightly.yml` fixtures and §3.
+
+**4. `workflowTriggersPullRequest` failed OPEN, silently, on legal YAML.** A `#` at **column 0**
+anywhere inside `on:` hit `if (/^\S/.test(line)) return false;` and removed the **entire workflow** from
+the required set — no `silentWorkflows` line, no signal. Measured on the real `ci.yml`: `true`, then
+`false` with `# a comment` inserted at column 0 under `on:`, after which a one-check board scored `ok`.
+`ci.yml`'s `on:` block already carries a ~60-line comment; one re-wrap and every `ci.yml` guard leaves
+the required set permanently. It also failed open on `"pull_request":`, `"on":` and 4-space indent.
+Rewritten as `readOnBlock`, a **tri-state**: comments stripped in both positions (CLAUDE.md rule 2 —
+there was no filter at all, not merely an insufficient one), quoted keys and any indentation
+understood, and an unclassifiable `on:` returns `null` → `coverage=unknown` → **exit 5**, never a quiet
+`false`. Same shape one layer down: `scanWorkflowJobs` truncated the job list at a column-0 comment
+inside `jobs:` (`["a"]` for the two-job case) and inside a block `needs:` list — pre-existing from
+CPE-1906, but the coverage check is the first consumer for which a short list fails *open*. Closed.
+
+**5. The whole-workflow fail-open is closed, and the narrowing is measured rather than assumed.** With
+(3) established, the blanket "a PR-triggered workflow that contributed nothing is never flagged"
+carve-out bought nothing and cost a whole-guard-set blind spot: a board with zero `ci.yml` checks
+returned `coverage=ok`, exit 0, against the real `origin/main`. Now excused **only** when the
+workflow's own `pull_request:` trigger is path-filtered. Cost measured before changing it, over all 186
+merges by grouping each rollup on `checkSuite.workflowRun.workflow.name`: **0** boards missing `CI`,
+**0** missing `GUI smoke` — zero added firings. Token is now `coverage=ok(N-silent)`, never a bare `ok`
+when something stayed silent.
+
+**Non-blocking, all done.** `npm audit` dropped from §2a's suggested required list, with that job's own
+design note (`ci.yml:198-201`) quoted as the reason. `Guard set read from <ref>@<sha>` now appended to
+**every** verdict branch, not the two the doc claimed — pinned across the stub matrix. Numbers
+corrected: 12.86/day (13.29 over a round 14 days), **589** commits not 593, p90 open→merged 469.7
+(linear-interpolated; 485.2 is nearest-rank, and the method is now stated); 2.90 mean / max 10 and
+median 157.5 reproduce exactly. §1 now states the window is **inclusive at both ends** — #1090 merged
+at exactly 11:05:17Z, so a strictly-exclusive bound gives 185.
+
+**Red-proofs, run by hand, results written at each site.** Dropping the `on:`-block comment skip reds
+exactly *"a column-0 comment inside `on:` no longer deletes the workflow from the required set"* (1
+failed / 5 passed / 64 skipped). `if (false && …)` on the `jobs:` comment skip reds exactly *"a column-0
+comment inside `jobs:` no longer truncates the job list"*. Restoring the blanket carve-out reds exactly
+*"a PR-triggered workflow with NO path filter that contributed nothing is UNJUDGED, not excused"*.
+Removing `${against}` from the `failure` branch reds the guard-set-ref test, naming `failure-and-skips`
+and printing the offending line. Four changes, four distinct tests, no overlap.
+
+**CPE-1929's two sabotages RE-RUN at 70 tests**, because round 2 changed both this rung's inputs and the
+suite around it, and carrying a sabotage number forward unchanged is the same stale-evidence defect this
+PR is about: disabling the rung → **3 failed / 67 passed**; forcing `coverageOf` to always answer `ok` →
+**11 failed / 59 passed** (was 7/56). Still red, still on different tests. Numbers rewritten at the site.
+
+**Gate table, re-run after the final round-2 edit.**
+
+| check | result |
+|---|---|
+| `npm run check` (svelte-check + tsc) | 0 errors, 0 warnings |
+| `npx vitest run` (whole root suite) | **358 files — 5290 passed, 2 skipped** |
+| the 2 skipped | both in `catalogPublishLoudFailure.test.ts`, gated on `jq`, not installed on this machine — unchanged from round 1 |
+| `src/lib/ciPollFailClosed.test.ts` alone | **70 passed, 0 failed, 0 skipped** (63 after round 1) |
 | Rust | untouched — no crate changed |

@@ -223,9 +223,11 @@ establishing CI outcomes, the Foreman must actually pick them up:
   **`5` THE CHECKS ARE STALE** — nothing on the board is red, and that is the problem: a job `main`
   already requires produced **no check at all** on this PR, so a guard that exists on `main` never
   judged it. `main` has no branch protection (`branches/main/protection` → 404, `rulesets` → `[]`), so
-  nothing else stops this. Measured over the 186 PRs merged 2026-08-14 → 2026-08-28: **16 merged this
+  nothing else stops this. Measured over the 186 PRs merged 2026-08-14 → 2026-08-28: **15 merged this
   way** — `ratchet-guard` ×5 (including #1056, the merge that found it), `ci-verdict` ×5,
-  `lockfile-preflight` ×2, `msrv` ×2, `ffmpeg-pin-guard` ×1, `gui-smoke-linux` ×1. The fix is a rebase
+  `lockfile-preflight` ×2, `msrv` ×2, `ffmpeg-pin-guard` ×1. (A sixteenth board, #921, also tripped the
+  rule, but that PR had renamed the job itself — the one measured false positive, 0.54% of merges.)
+  The fix is a rebase
   onto `main` and a re-run, not an `--admin` merge. Exit 5 also covers `completed coverage-unknown` —
   the poll could not read `main`'s workflows, which is "did not run", not "nothing to check".
   **The prefix and the code agree, one-to-one** — `completed success`→0, `completed failure`→1,
@@ -234,8 +236,8 @@ establishing CI outcomes, the Foreman must actually pick them up:
   disagree, which they used to: a board of nothing but by-design skips printed `completed skipped` and
   exited **1** ("a check FAILED") with zero failures, and `completed skipped` was simultaneously the
   exit-4 prefix.
-  Every verdict line — including the green ones — now carries **`coverage=`**: `ok`, `N-unjudged`,
-  `unknown`, or `n/a(<reason>)`. It is printed even where the check did not apply, because a coverage
+  Every verdict line — including the green ones — now carries **`coverage=`**: `ok`, `ok(N-silent)`,
+  `N-unjudged`, `unknown`, or `n/a(<reason>)`. It is printed even where the check did not apply, because a coverage
   check that goes quiet is indistinguishable from one that ran and found nothing. What it does **not**
   see: a guard added *inside* an existing job (a new `.test.ts` under the same `Frontend` check, a new
   ratchet under the same `Ratchet guard` check). Only branch protection's *require branches to be up to

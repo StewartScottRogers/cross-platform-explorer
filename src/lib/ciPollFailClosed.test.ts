@@ -43,6 +43,7 @@ import {
   explainableSkipMatchers,
   classifySkips,
   workflowTriggersPullRequest,
+  readOnBlock,
   readBaseWorkflowSources,
   coverageOf,
 } from "../../scripts/ci-poll.mjs";
@@ -573,7 +574,15 @@ describe("ci-poll: a guard `main` carries that never reached the board is not gr
   });
 
   it("says which `main` it read the guard set from, because a stale local ref under-reports", () => {
+    // ROUND 2: this used to be asserted on the two lines someone remembered while the doc claimed it of
+    // EVERY verdict — and `formatVerdict` appended the ref in exactly two of its seven branches. Now
+    // derived: every stub whose board reaches the coverage check must carry it, whatever the verdict.
     for (const line of [stale.verdict, fresh.verdict]) expect(line).toContain("Guard set read from seam:");
+    for (const mode of ["failure-and-skips", "skip-cascade", "all-skipped-by-design", "green", "guard-gap"]) {
+      const run = runPoll(mode, ["--pr", "1", "--budget", "6", "--interval", "1"], BASE_WORKFLOWS);
+      if (run.verdict.includes("coverage=n/a") || run.verdict.includes("CI VERDICT: pending")) continue;
+      expect(run.verdict, `${mode} printed no guard-set ref: ${run.verdict}`).toContain("Guard set read from seam:");
+    }
   });
 });
 
@@ -588,11 +597,33 @@ describe("ci-poll: the coverage check is narrow ON PURPOSE, and its carve-outs a
     expect(fresh.stdout).not.toContain("Publish installers");
   });
 
-  it("a PR-triggered workflow that contributed NO check is not flagged — but it IS named", () => {
-    // The `paths-ignore` case: a Ticketing-only PR legitimately gets no `ci.yml` checks. Silence here
-    // is a deliberate fail-open, so the operator is shown it rather than left to infer it.
+  it("a silent workflow is excused ONLY because its own `pull_request:` carries a path filter", () => {
+    // Round 2 narrowed this from a blanket carve-out. `nightly.yml` in the fixture declares
+    // `pull_request: { paths: [...] }`, so GitHub was entitled not to run it — that, and nothing else,
+    // is what buys the excuse. The operator is still shown it rather than left to infer it, and the
+    // machine-readable token says `ok(1-silent)` rather than a bare `ok`.
     expect(fresh.verdict).not.toContain("Nightly sweep A");
     expect(fresh.stdout).toContain("nightly.yml contributed no check to this board");
+    expect(fresh.stdout).toContain("path-filtered on `pull_request`");
+    expect(fresh.verdict).toContain("coverage=ok(1-silent)");
+    // …and the excuse really is derived from that key: strip it and the same board reds.
+    const filtered = readFileSync(join(BASE_WORKFLOWS, "nightly.yml"), "utf8");
+    expect(filtered, "the fixture no longer declares the `paths:` this test is about").toContain("paths:");
+    expect(readOnBlock(filtered).prPathFiltered).toBe(true);
+    expect(readOnBlock(filtered.replace(/^\s*paths:.*$/m, "    branches: [main]")).prPathFiltered).toBe(false);
+  });
+
+  it("a PR-triggered workflow with NO path filter that contributed nothing is UNJUDGED, not excused", () => {
+    // The whole-workflow blind spot round 1 shipped: a board carrying zero `ci.yml` checks returned
+    // `ok`, exit 0, with every `ci.yml` guard absent. Measured before narrowing the rule: across all
+    // 186 merges in the window, 0 boards were missing the `CI` workflow and 0 were missing `GUI smoke`,
+    // so this costs zero real firings. Asserted against THIS repo's real `ci.yml`, not a fixture.
+    const ci = readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8");
+    expect(readOnBlock(ci)).toMatchObject({ trigger: "pull-request", prPathFiltered: false });
+    const gap = coverageOf(["some check from another workflow"], [{ file: "ci.yml", text: ci }]);
+    expect(gap.state).toBe("unjudged");
+    expect(gap.silentWorkflows).toEqual([]);
+    expect(gap.unjudged.length).toBeGreaterThan(5);
   });
 
   it("`--run` mode says the check did not apply rather than going quiet about it", () => {
@@ -607,6 +638,91 @@ describe("ci-poll: the coverage check is narrow ON PURPOSE, and its carve-outs a
     const run = runPoll("pending", ["--pr", "1", "--budget", "4", "--interval", "1"]);
     expect(run.status).toBe(2);
     expect(run.verdict).toContain("coverage=n/a(board-pending)");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// CPE-1970 ROUND 2 — the `on:`-block scanner used to fail OPEN, silently, on legal YAML, and the shape
+// was one reformat away from live. Every case below was reproduced against the REAL
+// `.github/workflows/ci.yml` before the fix; each one removed the entire workflow from the required set
+// with `coverage=ok` still printed. CLAUDE.md rule 2: a whole-line-comment filter is not enough, and
+// this had no comment handling at all.
+describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never quietly false (CPE-1970)", () => {
+  const CI = readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8");
+
+  it("a column-0 comment inside `on:` no longer deletes the workflow from the required set", () => {
+    // The red-proof, run by hand before the fix: `true` for the real file, `false` for the same bytes
+    // with `# a comment` at column 0 under `on:`, and `coverageOf` then returned `ok` for a one-check
+    // board. Revert `readOnBlock`'s comment handling and the second expectation below goes red.
+    expect(workflowTriggersPullRequest(CI)).toBe(true);
+    const injected = CI.replace(/^on:\s*$/m, "on:\n# a comment");
+    expect(injected).not.toBe(CI);
+    expect(workflowTriggersPullRequest(injected)).toBe(true);
+    expect(coverageOf(["Frontend — type-check and test"], [{ file: "ci.yml", text: injected }]).state).toBe("unjudged");
+  });
+
+  it("reads the legal spellings that used to answer `false`: quoted keys, deeper indent, flow seq", () => {
+    for (const src of [
+      'on:\n  "pull_request":\n    branches: [main]\n',
+      '"on":\n  pull_request:\n    branches: [main]\n',
+      "on:\n    pull_request:\n        branches: [main]\n",
+      "on: [push, pull_request]\n",
+      "on:\n  - push\n  - pull_request\n",
+      "on: # a trailing comment\n  pull_request:\n",
+    ]) {
+      expect(workflowTriggersPullRequest(src), src).toBe(true);
+    }
+    for (const src of ["on:\n  push:\n    branches: [main]\n", "on: [push]\n", "on:\n  schedule:\n    - cron: '0 7 * * *'\n"]) {
+      expect(workflowTriggersPullRequest(src), src).toBe(false);
+    }
+  });
+
+  it("an unclassifiable `on:` is `null`, and `coverageOf` turns that into exit-5 territory", () => {
+    for (const src of ["jobs:\n  a:\n    name: A\n", "on:\nname: X\n", "on: >\n  push\n"]) {
+      expect(workflowTriggersPullRequest(src), src).toBeNull();
+    }
+    const cov = coverageOf(["anything"], [{ file: "mystery.yml", text: "on:\nname: X\njobs:\n  a:\n    name: A\n" }]);
+    expect(cov.state).toBe("unknown");
+    expect(cov.detail).toContain("mystery.yml");
+  });
+
+  it("a PR-triggered workflow whose jobs cannot be read is `unknown`, not an empty requirement", () => {
+    const cov = coverageOf(["anything"], [{ file: "empty.yml", text: "on:\n  pull_request:\n" }]);
+    expect(cov.state).toBe("unknown");
+    expect(cov.detail).toContain("empty.yml");
+  });
+
+  it("a column-0 comment inside `jobs:` no longer truncates the job list", () => {
+    // Pre-existing from CPE-1906 — `["a"]` before the fix. Harmless while the only consumer was the
+    // skip matcher; the coverage check is the first consumer for which a short job list fails OPEN.
+    expect([...scanWorkflowJobs("jobs:\n  a:\n    name: A\n# c\n  b:\n    name: B\n").keys()]).toEqual(["a", "b"]);
+    // …and the same hole in a block `needs:` list, which shortens the skip closure instead.
+    const jobs = scanWorkflowJobs("jobs:\n  a:\n    name: A\n  b:\n    name: B\n    needs:\n      - a\n# note\n      - c\n");
+    expect(jobs.get("b")?.needs).toEqual(["a", "c"]);
+  });
+
+  it("every real workflow in this repo still classifies, so the tri-state is not hiding a regression", () => {
+    // Enumerate, don't recall (CPE-1932): read the directory, refuse a near-empty answer, and require a
+    // definite yes/no for every file. A `null` here means a live workflow the scanner cannot read —
+    // which now blocks at exit 5 rather than going quiet, so it must never be normal.
+    const base = readBaseWorkflowSources("HEAD");
+    expect(base!.files.length).toBeGreaterThan(5);
+    for (const f of base!.files as { file: string; text: string }[]) {
+      expect(workflowTriggersPullRequest(f.text), `${f.file} could not be classified`).not.toBeNull();
+    }
+    const prTriggered = (base!.files as { file: string; text: string }[])
+      .filter((f) => workflowTriggersPullRequest(f.text))
+      .map((f) => f.file)
+      .sort();
+    expect(prTriggered).toEqual(["ci.yml", "gui-smoke.yml"]);
+    // §2d of docs/design/CI-STALENESS.md rests on this: NEITHER carries a `pull_request:` path filter,
+    // so no PR in this repo can legitimately be missing either workflow's checks.
+    for (const f of base!.files as { file: string; text: string }[]) {
+      if (!workflowTriggersPullRequest(f.text)) continue;
+      expect(readOnBlock(f.text).prPathFiltered, `${f.file} now path-filters pull_request — §2d needs rewriting`).toBe(
+        false,
+      );
+    }
   });
 });
 
