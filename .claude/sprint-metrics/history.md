@@ -3872,3 +3872,37 @@ disabled.
 Smaller, and characteristic of a good round: the author **predicted a red-proof number, measured a
 different one, and put the measured one in the file** — 1/22/60 where 2/17 was expected. That is the
 habit the whole shift has been arguing for, done without being asked.
+
+## 2026-08-28 — the blind-spot list is what makes the paragraph read as coverage
+
+#1093 round 2 closed a fail-open by making a parser tri-state, and wrote a *"WHAT THIS STILL CANNOT SEE"*
+section to bound it. Its reviewer found a gap the section does not name: **`pull_request_target` returns a
+confident `false`**, so a whole workflow drops out of the required set with no `unjudged`, no
+`silentWorkflows` entry, and no trace — a bare `coverage=ok`, exit 0, with a guard entirely absent. That
+trigger **does** run on pull requests and its checks **do** land on the rollup, so the header's premise —
+*"only PR-triggered workflows can contribute checks to a PR's rollup"* — is false as written.
+
+**And the round's own new "asserted, not written down" test cannot see it.** Driven through its seam, a
+`paths:` filter reds correctly and names the file; a `pull_request_target`-only workflow gives **1 passed
+/ 69 skipped, green**, because the enumeration never contains it in the first place.
+
+There is no live instance today — **exactly as latent as the column-0 comment the previous round closed.**
+The reviewer's sentence is the one to keep: *"the header's explicit 'what this cannot see' list does not
+name it, **which is what makes it read as coverage**."*
+
+**That is the mechanism, stated better than I have managed.** A limitations section does not merely fail
+to warn — it **actively certifies** everything it omits. A reader who checks the list, finds their concern
+absent, and concludes it is handled is reading the document correctly; the document is what is wrong.
+**An unqualified blind-spot list is a whitelist of every gap you did not think of.**
+
+The same round's other blocker is the identical defect one size down: a paragraph arguing the tri-state is
+complete says two shapes *"now land in `unknown` rather than a quiet `false`"* and names an example for
+each. **One of the two examples lands in `false`.** Exposure is nil — no legal event name contains a `#` —
+but the sentence vouches for a fail-closed the code does not deliver, in the paragraph whose job is to
+establish that it does. **Every example cited as landing in a safe state is a claim; run it.**
+
+Worth recording what the reviewer did that made this findable: it drove the guard through its own seam
+with a synthetic workflow rather than reading the regex. The regex looks right — `\bpull_request\b`
+correctly does *not* match `pull_request_target`, which is exactly what a careful author would check for.
+**The bug is that the correct non-match routes to the wrong bucket**, and no amount of reading the pattern
+shows that; only running a workflow through it does.
