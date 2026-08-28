@@ -99,7 +99,7 @@ hour to a rule followed from recall when seventeen instances existed.
 | `bidi-render-registry` | `src/lib/bidiEscape.guard.test.ts` | component render sites showing a raw filesystem name (CPE-1757/1885) | 1552 |
 | `bidi-app-markup-offenders` | `src/lib/bidiEscape.guard.test.ts` | the same, in `App.svelte`'s markup | 31 |
 | `bidi-app-script-basename-allowlist` | `src/lib/bidiEscape.guard.test.ts` | `App.svelte` `<script>` `baseName()` calls skipping `displaySafeName` | 2 |
-| `manual-test-mvd` | `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` | still-manual verification surfaces (MVD) | 13 — **enumerated, not gated** |
+| `manual-test-mvd` | `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` | still-manual verification surfaces (MVD) | 14 — **enumerated, not gated** (13 → 14 on 2026-08-27, CPE-1946) |
 
 `manual-test-mvd` is enumerated but deliberately **not** gated: the MVD legitimately *rises* whenever
 a QA-Architect audit discovers pre-existing unlogged debt (the ledger records a +5 shift on
