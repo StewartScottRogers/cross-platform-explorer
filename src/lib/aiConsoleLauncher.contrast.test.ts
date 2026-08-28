@@ -34,27 +34,40 @@
  * exactly what the browser does, so "missing from the dark block" surfaces as a contrast failure
  * naming the token instead of passing silently.
  *
- * ── What is NOT checked, and cannot be by this shape of guard ─────────────────────────────────
+ * ── What is NOT checked HERE, and why that is no longer the same as "not checked" (CPE-1966) ──
  * `SITES` derives from `color: var(--token)` rules, so four whole categories walk straight
- * through it. Each is a real, MEASURED, pre-existing defect on this page today — listed so that
- * a green run here is not mistaken for a clean page (CPE-1966 owns all four):
+ * through this file. CPE-1921 shipped with all four open and all four populated by real, measured
+ * defects, which is how a green run here coexisted with a page that had them:
  *
  *   - NON-TEXT roles. `border-color` / `background` / `box-shadow` are not a `color:`. The
- *     `:focus` border is the page's only focus indicator and measures 2.46:1 against the `Field`
- *     interior in dark, under SC 1.4.11's 3:1. See the note at that rule in launcher.html.
- *   - Elements that DO NOT RENDER on the page as loaded: `#view-bar` is `display: none` until a
- *     second session exists, and a `position: fixed; inset: 0; z-index: 9999` boot overlay covers
- *     the rest. `#swarm-help` / `#grid-help` (`.area-help`, a flat `opacity: .75` over a
- *     `ButtonFace` fill) are 4.24 / 4.28 in dark — this ticket's own defect class, a blanket
- *     opacity dimming a foreground.
- *   - STATES: `:hover`, `:focus`, `:active`. `.close-all-btn:hover { color: #d05656 }` is 3.65:1
+ *     `:focus` border is the page's ONLY focus indicator and measured 2.46:1 against the `Field`
+ *     interior in dark, under SC 1.4.11's 3:1.
+ *   - Elements that DO NOT EXIST on the page as loaded. Session tabs, the "Close all" button,
+ *     model-menu rows, the whole grid view and its `.pane-head` are built by the launcher's own
+ *     JavaScript; a static load has nothing to measure. `.pane-head` hard-codes a `#161616`
+ *     background but inherited `CanvasText`, so every label in the grid view was BLACK ON
+ *     NEAR-BLACK in light theme — 1.09:1, the worst reading on the page.
+ *   - STATES: `:hover`, `:focus`, `:active`. `.close-all-btn:hover { color: #d05656 }` was 3.65:1
  *     in light (it sits on `#tabs`'s `rgba(128,128,128,0.10)` fill, not on bare Canvas) and
- *     4.13:1 in dark.
- *   - ANIMATED opacity, which has no single value to sample: `boot-pulse` swings `.boot-label`
+ *     4.13:1 in dark — invisible twice over, as a literal hex AND as a state.
+ *   - ANIMATED opacity, which has no single value to sample: `boot-pulse` swung `.boot-label`
  *     between .45 and .85, dipping to 3.35:1 in light at the trough.
  *
- * Literal hexes are the one gap that IS covered, and only for the two status-line functions, by
- * the inline-hex tripwire below. Everywhere else a literal hex is invisible here too.
+ * All four are now covered — not here, but by a REAL BROWSER:
+ * `scripts/dev-harness/launcher-contrast/`, run in CI by gui-smoke.yml's `launcher-contrast` job
+ * (`npm run harness:launcher-contrast`). It drives headless Chrome over CDP, forces every
+ * `:hover`/`:focus`/`:active` rule with `CSS.forcePseudoState`, steps every CSS animation through
+ * 21 frames and reports the worst, mounts the JS-built DOM from derived fixtures, walks the real
+ * ancestor chain for each site's ground, and measures `border-color`/`background-color`/
+ * `box-shadow` at SC 1.4.11's 3:1 alongside text at 1.4.3's 4.5:1. Because that job is the half
+ * that covers this file's blind spots, `describe("the browser half")` below asserts the job still
+ * exists and still runs that script: deleting it must not quietly turn the cheap half back into
+ * the whole story.
+ *
+ * Literal hexes remain invisible to THIS file except for the two status-line functions (the
+ * inline-hex tripwire below). The browser harness reads computed colours, so it sees a literal hex
+ * exactly as well as a token — which is how it found `.badge.no`/`.badge.yes` (3.25:1 / 3.44:1
+ * under their own white text) and `.pane-head`, none of which contain a `var(` at all.
  *
  * ── Red-proof, run by hand, RESULTS AT THE SITE (CPE-1933 rule 3) ─────────────────────────────
  * Five sabotages of launcher.html, each run against this file (10 tests); each named the culprit,
@@ -207,7 +220,127 @@ function barFor(selector: string): { bar: number; note: string } {
   return { bar: large ? 3 : 4.5, note: `font-size ${size ?? "inherited"}px / weight ${weight ?? 400}` };
 }
 
+// ── The launcher's <body> as an element tree, so a site's GROUND can be derived rather than assumed
+// A quote-aware tag scan is enough here and a real HTML parser is not: this is one hand-written file
+// with well-formed markup, and the alternative is an npm dependency for a guard whose whole point is
+// to be the cheap layer. Comments and <script>/<style> bodies are removed first — a `<` inside a
+// script string would otherwise open a phantom element (the same trap CPE-1933 rule 2 records for
+// shell scanners).
+type MarkupNode = { tag: string; id?: string; classes: string[]; parent: number | null };
+
+function parseBodyMarkup(source: string): MarkupNode[] {
+  const start = source.indexOf("<body");
+  const end = source.lastIndexOf("</body>");
+  if (start === -1 || end === -1) throw new Error("launcher.html: no <body> — the markup scan is broken, not passing");
+  const body = source
+    .slice(start, end)
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script\b[\s\S]*?<\/script>/g, "")
+    .replace(/<style\b[\s\S]*?<\/style>/g, "");
+  const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+  const nodes: MarkupNode[] = [];
+  const stack: number[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const lt = body.indexOf("<", i);
+    if (lt === -1) break;
+    // Find the matching ">", skipping any inside a quoted attribute value.
+    let j = lt + 1;
+    let quote = "";
+    while (j < body.length) {
+      const c = body[j];
+      if (quote) { if (c === quote) quote = ""; }
+      else if (c === '"' || c === "'") quote = c;
+      else if (c === ">") break;
+      j++;
+    }
+    if (j >= body.length) break;
+    const raw = body.slice(lt + 1, j);
+    i = j + 1;
+    if (raw.startsWith("!") || raw.startsWith("?")) continue;
+    if (raw.startsWith("/")) {
+      const t = raw.slice(1).trim().toLowerCase();
+      for (let k = stack.length - 1; k >= 0; k--) {
+        if (nodes[stack[k]].tag === t) { stack.length = k; break; }
+      }
+      continue;
+    }
+    const tag = (raw.match(/^[A-Za-z][\w-]*/)?.[0] ?? "").toLowerCase();
+    if (!tag) continue;
+    const id = raw.match(/\bid\s*=\s*"([^"]*)"/)?.[1];
+    const classes = (raw.match(/\bclass\s*=\s*"([^"]*)"/)?.[1] ?? "").trim().split(/\s+/).filter(Boolean);
+    nodes.push({ tag, id, classes, parent: stack.length ? stack[stack.length - 1] : null });
+    if (!raw.trimEnd().endsWith("/") && !VOID.has(tag)) stack.push(nodes.length - 1);
+  }
+  return nodes;
+}
+
+const MARKUP = parseBodyMarkup(html);
+
+function ancestorIds(id: string): string[] {
+  let n = MARKUP.findIndex((x) => x.id === id);
+  const out: string[] = [];
+  while (n !== -1 && MARKUP[n].parent !== null) {
+    n = MARKUP[n].parent!;
+    if (MARKUP[n].id) out.push(MARKUP[n].id!);
+  }
+  return out;
+}
+
+/** The element a checked rule's ground hangs off: the LAST `#id` in its selector, else the last class. */
+function anchorElementFor(selector: string): number | undefined {
+  const ids = [...selector.matchAll(/#([\w-]+)/g)].map((m) => m[1]);
+  for (const id of ids.reverse()) {
+    const idx = MARKUP.findIndex((n) => n.id === id);
+    if (idx !== -1) return idx;
+  }
+  const classes = [...selector.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+  for (const c of classes.reverse()) {
+    const idx = MARKUP.findIndex((n) => n.classes.includes(c));
+    if (idx !== -1) return idx;
+  }
+  return undefined;
+}
+
+/** Does any rule for this element declare a background? Reads EVERY matching rule, not just the first. */
+function ownBackground(node: MarkupNode): string | undefined {
+  let found: string | undefined;
+  for (const r of allRules) {
+    for (const part of r.selector.split("::").pop()!.split(",")) {
+      const key = part.trim().split(/\s+/).pop() ?? "";
+      if (!key) continue;
+      const matchesId = node.id !== undefined && key.includes(`#${node.id}`);
+      const matchesClass = node.classes.some((c) => key.includes(`.${c}`));
+      const matchesTag = key === node.tag;
+      if (!matchesId && !matchesClass && !matchesTag) continue;
+      const d = decls(r.body);
+      const bg = d.get("background") ?? d.get("background-color");
+      // A later rule wins, as the cascade does — so keep walking rather than returning the first.
+      if (bg) found = bg.split(/\s+/)[0];
+    }
+  }
+  return found;
+}
+
+/** Walks up from `idx` (inclusive) to the first element that paints a background. */
+function nearestBackgroundPainter(idx: number): { by: string; value: string } | undefined {
+  let n: number | null = idx;
+  while (n !== null) {
+    const node: MarkupNode = MARKUP[n];
+    const bg = ownBackground(node);
+    if (bg && bg !== "none" && bg !== "transparent") {
+      return { by: node.id ? `#${node.id}` : node.classes.length ? `.${node.classes[0]}` : node.tag, value: bg };
+    }
+    n = node.parent;
+  }
+  return undefined;
+}
+
 // ── The launcher's two status-line painters, read out of the file ──────────────────────────────
+/** The launcher's own <script> bodies — the source of every element its markup does not contain. */
+const scriptSrc = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+if (scriptSrc.length < 2000) throw new Error("launcher.html: no <script> body found — the JS-built-element check is broken, not passing");
+
 const setMsgSrc = html.match(/function setMsg\([\s\S]*?\n\}/)?.[0] ?? "";
 const keysMsgSrc = html.match(/function keysMsg\([^\n]*\n/)?.[0] ?? "";
 
@@ -226,16 +359,103 @@ describe("AI Console launcher — the ground (CPE-1921)", () => {
     ).toBe("Canvas");
   });
 
-  it("no checked foreground element paints its own background (which would move the ground)", () => {
-    for (const s of new Set(SITES.map((x) => x.selector))) {
-      const r = allRules.find((x) => x.selector.split("::").pop()!.trim() === s)!;
-      const d = decls(r.body);
-      expect(
-        d.get("background") ?? d.get("background-color"),
-        `${s} declares its own background — it no longer sits on Canvas, so its ground must be ` +
-          "re-measured and this guard taught about it.",
-      ).toBeUndefined();
-    }
+  // CPE-1966 finding, and the reason this test was rewritten rather than kept. The version CPE-1921
+  // shipped asked only whether the CHECKED ELEMENT ITSELF painted a background, and it read only the
+  // FIRST rule whose selector matched — so it could not see the thing that actually decides the
+  // ground: the ANCESTORS. `#keys-msg` and `#help-body h3` do not sit on `Canvas` because they say
+  // so; they sit on it because `#keys-panel` and `#help-panel` paint `Canvas` OVER their overlays'
+  // `rgba(0,0,0,.35)` / `rgba(0,0,0,.45)` scrims. Drop that one declaration and the ground silently
+  // becomes a mid-grey scrim over Canvas, taking `--accent-text` from 4.55:1 to about 1.35:1 in
+  // light — with every assertion in this file still green, because none of them looked up.
+  //
+  // So the chain is now DERIVED: the launcher's <body> markup is parsed into a real element tree,
+  // and for each checked site this walks UP from its element to the first ancestor (itself included)
+  // whose CSS declares a background, then requires that background to be the opaque `Canvas` the
+  // measured constants at the top of this file were taken against. Any other answer — a scrim, a
+  // translucent wash, a hard-coded hex — means the constants are stale and says which element moved.
+  describe("the ground is derived from the real ancestor chain, not assumed", () => {
+    it("parses the launcher's <body> into an element tree (an empty tree is a broken parse)", () => {
+      expect(MARKUP.length).toBeGreaterThan(80);
+      expect(MARKUP.some((n) => n.id === "msg")).toBe(true);
+      expect(MARKUP.some((n) => n.id === "help-panel")).toBe(true);
+      // The tree must be a tree: #keys-msg really is inside #keys-panel inside #keys-overlay.
+      expect(ancestorIds("keys-msg")).toContain("keys-panel");
+      expect(ancestorIds("keys-msg")).toContain("keys-overlay");
+    });
+
+    it("every site that EXISTS in the markup has its ground derived, and the rest are JS-built", () => {
+      const checked = new Set(SITES.map((x) => x.selector));
+      expect(checked.size).toBeGreaterThanOrEqual(3);
+      const problems: string[] = [];
+      let grounded = 0;
+      const jsBuilt: string[] = [];
+      for (const sel of checked) {
+        const anchor = anchorElementFor(sel);
+        if (anchor === undefined) {
+          // No element with this class/id in the static markup. That is legitimate for the DOM the
+          // launcher's own JS builds (`.tab`, `.close-all-btn`, …) and a typo otherwise — so it is
+          // DERIVED rather than waved through: the class has to appear in the launcher's script.
+          const names = [...sel.matchAll(/[.#]([\w-]+)/g)].map((m) => m[1]);
+          if (names.some((n) => scriptSrc.includes(`"${n}"`) || scriptSrc.includes(`${n} `) || scriptSrc.includes(`"${n} `))) {
+            jsBuilt.push(sel);
+          } else {
+            problems.push(
+              `${sel}: no element in launcher.html's markup carries this class/id, and the launcher's ` +
+                "own script never creates one either — the rule is dead, or the selector is a typo.",
+            );
+          }
+          continue;
+        }
+        grounded++;
+        const painter = nearestBackgroundPainter(anchor);
+        if (!painter) {
+          problems.push(`${sel}: nothing in its ancestor chain paints a background at all`);
+          continue;
+        }
+        if (painter.value !== "Canvas") {
+          problems.push(
+            `${sel}: its ground is now painted by \`${painter.by}\` as \`${painter.value}\`, not by ` +
+              "`body { background: Canvas }`. The measured light/dark constants at the top of this " +
+              "file no longer apply to it — re-measure against the new ground before trusting any " +
+              "ratio here, and re-run `npm run harness:launcher-contrast` for the real numbers.",
+          );
+        }
+      }
+      expect(problems.join("\n")).toBe("");
+      // A run that grounded nothing is a broken derivation, not a clean bill (CPE-1932).
+      expect(grounded, "no checked site was found in the markup at all — the tree walk is broken").toBeGreaterThanOrEqual(3);
+      // Everything this cheap layer could not ground is grounded by the browser harness instead —
+      // it mounts the JS-built DOM from fixtures and walks the real chain. Named here so the split
+      // is visible rather than implied.
+      expect(jsBuilt.every((s) => typeof s === "string")).toBe(true);
+    });
+  });
+});
+
+describe("AI Console launcher — the browser half is still connected (CPE-1966)", () => {
+  // CPE-1933: this file's header CLAIMS that states, animation frames, non-text roles and JS-built
+  // elements are covered elsewhere. A claim beside a green test reads as vouched-for, so it is
+  // derived rather than asserted — the workflow and package.json are read at run time.
+  const WORKFLOW = join(process.cwd(), ".github/workflows/gui-smoke.yml");
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+
+  it("package.json still defines the harness script this file points at", () => {
+    expect(
+      pkg.scripts?.["harness:launcher-contrast"],
+      "`npm run harness:launcher-contrast` is gone. This file's header says four whole categories of " +
+        "defect are covered by that harness; without it they are covered by nothing.",
+    ).toContain("scripts/dev-harness/launcher-contrast/run.mjs");
+  });
+
+  it("CI still runs it — the `launcher-contrast` job exists and invokes that script", () => {
+    const yml = readFileSync(WORKFLOW, "utf8");
+    expect(yml, "no `launcher-contrast:` job in gui-smoke.yml").toMatch(/^ {2}launcher-contrast:$/m);
+    const job = yml.slice(yml.search(/^ {2}launcher-contrast:$/m));
+    const body = job.slice(0, job.indexOf("\n  ", 40) === -1 ? undefined : job.length);
+    expect(
+      /run:\s*npm run harness:launcher-contrast/.test(body),
+      "the `launcher-contrast` job no longer runs `npm run harness:launcher-contrast`",
+    ).toBe(true);
   });
 });
 
@@ -254,6 +474,56 @@ describe("AI Console launcher — status line (CPE-1921)", () => {
         ).toBeUndefined();
       }
     }
+  });
+
+  it("the focus indicator has its own token, not the fill token (CPE-1966 site 1)", () => {
+    // `outline: none` makes this border the page's only focus indicator, so it must clear SC 1.4.11's
+    // 3:1 against the FIELD INTERIOR it encloses as well as the page it sits on. `--accent` is tuned
+    // for the fill role and cleared only the second (2.46:1 vs rgb(59,59,59) in dark). The ratios
+    // themselves are measured by the browser harness — what this cheap layer pins is that the two
+    // roles have not been re-merged onto one token, which is the regression that reopens the defect.
+    const focusRules = allRules.filter((r) => /:focus\b/.test(r.selector) && decls(r.body).has("border-color"));
+    expect(focusRules.length, "no `:focus { border-color }` rule found — this tripwire is measuring nothing").toBeGreaterThanOrEqual(1);
+    for (const r of focusRules) {
+      const v = decls(r.body).get("border-color")!;
+      expect(
+        v,
+        `${r.selector} paints the focus border with ${v}. \`var(--accent)\` is the FILL token and is ` +
+          "2.46:1 against the dark `Field` interior this border encloses — the focus role needs its own " +
+          "token (CPE-1919's multi-role trap, third instance).",
+      ).not.toMatch(/var\(--accent\)/);
+      expect(v, `${r.selector}'s focus border is a literal colour, invisible to every token guard here`).toMatch(/^var\(--[\w-]+\)$/);
+      const token = v.match(/^var\((--[\w-]+)\)$/)![1];
+      for (const scheme of ["light", "dark"] as Scheme[]) {
+        expect(resolve(`var(${token})`, scheme), `${token} has no value in the ${scheme} scheme`).toBeTruthy();
+      }
+      expect(
+        resolve(v, "light"),
+        `${token} has the same value in both schemes. The ground a focus ring encloses is \`Field\`, ` +
+          "which the engine resolves to white in light and rgb(59,59,59) in dark — one value cannot " +
+          "clear 3:1 against both.",
+      ).not.toBe(resolve(v, "dark"));
+    }
+  });
+
+  it("no `:hover`/`:focus`/`:active` rule paints a literal colour (CPE-1966 site 4)", () => {
+    // `.close-all-btn:hover { color: #d05656 }` was invisible to CPE-1921's sweep twice over: a
+    // literal hex (not `var(--token)`) on a state rule (not the default state). The browser harness
+    // measures both regardless of spelling; this keeps the cheap layer from being lied to as well,
+    // and it is the one place a literal hex is cheap to forbid outright.
+    const offenders: string[] = [];
+    for (const r of allRules) {
+      if (!/:(hover|focus|focus-visible|active)\b/.test(r.selector)) continue;
+      for (const [prop, value] of decls(r.body)) {
+        if (!/^(color|border(-\w+)?-color|outline-color)$/.test(prop)) continue;
+        if (/^#[0-9a-fA-F]{3,8}$/.test(value.trim())) offenders.push(`${r.selector} { ${prop}: ${value} }`);
+      }
+    }
+    expect(
+      offenders.join("\n"),
+      "a state rule paints a hard-coded colour. It cannot carry a `prefers-color-scheme` value and it " +
+        "is invisible to every token-derived check in this file — give it a token in :root + the dark block.",
+    ).toBe("");
   });
 
   it("setMsg/keysMsg pick a class, never an inline hex colour", () => {

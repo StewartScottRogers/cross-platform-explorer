@@ -16,33 +16,50 @@
      Pinned by src/lib/aiConsoleLauncher.contrast.test.ts, which re-reads THIS block. */
   :root {
     color-scheme: light dark; --line: rgba(128,128,128,0.26);
-    /* --accent is a NON-TEXT role token. Every role it backs, measured (headless Chrome,
-       getComputedStyle for the engine-resolved system colours, WCAG 2.1 ratios):
+    /* --accent is a NON-TEXT FILL token, and after CPE-1966 that is ALL it is. Its three roles have
+       three different bars against three different grounds, and one value cannot serve them — the
+       CPE-1919/CPE-1921 multi-role trap, met here for the third time. Measured (headless Chrome over
+       CDP, getComputedStyle for the engine-resolved system colours, WCAG 2.1 ratios; every number
+       below is re-derived on every run of `npm run harness:launcher-contrast`):
 
-         role                                        light   dark    bar    pinned by a test?
-         button.primary fill, under literal #fff     4.55    4.55    4.5    no — SITES is text-only
-         button.primary fill vs the page behind it   4.55    4.12    3.0    no —      "
-         .tab.active accent bar vs the page          4.55    4.12    3.0    no —      "
-         focus-ring border vs the page               4.55    4.12    3.0    no —      "
-         focus-ring border vs the FIELD INTERIOR     4.55    2.46    3.0    no — AND IT FAILS
+         role                                        light   dark    bar    where it now lives
+         button.primary fill, under literal #fff     4.55    4.55    4.5    --accent (this token)
+         button.primary fill vs the page behind it   4.55    4.12    3.0    --accent
+         .tab.active accent bar vs the page          4.55    4.12    3.0    --accent
+         focus-ring border vs the page               4.55    4.12    3.0    --focus-ring
+         focus-ring border vs the FIELD INTERIOR     4.55    2.46    3.0    --focus-ring  <- FAILED
+         11px bold help headings on Canvas           4.55    4.12    4.5    --accent-text
 
-       Only the TEXT role below is pinned by a test; the rest are documented here and nothing
-       enforces them, because the guard derives its checked set from `color: var(--token)` rules
-       and a fill or a border is not a `color:`. Do not read this comment as coverage.
-
-       THE FOCUS-RING ROLE FAILS AND IS NOT FIXED HERE. `select:focus, input:focus,
-       textarea:focus` set `outline: none` and `border-color: var(--accent)`, so that border is
-       the ONLY focus indicator in this page; against the field interior it encloses — `Field`,
-       which the engine resolves to rgb(59,59,59) in dark — it is 2.46:1, under WCAG 2.1 SC
-       1.4.11's 3:1. Pre-existing, and a keyboard-navigation defect rather than a cosmetic one.
-       Tracked as CPE-1966, which owns it deliberately: the fix wants its own token (the same
-       split done below one role over) plus a guard that can see non-text roles at all, and doing
-       it here would ship an unpinned colour change inside a contrast ticket.
-
-       It is NOT safe as a foreground either (4.12:1 on Canvas in dark, for the 11px bold help
-       headings), so the text role gets its own token rather than being pinned at the fill role's
-       looser bar — the CPE-1919 multi-role trap. */
+       THE FOCUS RING WAS THE FAILURE, AND IT IS FIXED HERE (CPE-1966 site 1). `select:focus,
+       input:focus, textarea:focus` set `outline: none`, so their border is the ONLY focus indicator
+       on this page. Against the `Field` interior it encloses — which the engine resolves to
+       rgb(59,59,59) in dark — `--accent` measured 2.46:1, under WCAG 2.1 SC 1.4.11's 3:1: keyboard
+       focus was hard to locate, a navigation defect rather than a cosmetic one. It now has its own
+       token, tuned against BOTH adjacencies a ring has (the field it encloses AND the page it sits
+       on) rather than only the easy one. */
     --accent: #2f6fed;
+    /* FOCUS-RING role, split out of --accent by CPE-1966. A focus indicator abuts two grounds and
+       must clear 3:1 against both, which is why this needs a dark value where the fill role does
+       not: measured 4.55 (light, vs Field=#ffffff) / 3.84 (dark, vs Field=rgb(59,59,59)), and
+       4.21 (light) / 6.42 (dark) against the page behind the control. */
+    --focus-ring: #2f6fed;
+    /* DESTRUCTIVE-TEXT role. `.close-all-btn:hover` used the literal #d05656 — 3.65:1 on #tabs's own
+       rgba(128,128,128,0.10) fill in light and 4.13:1 in dark, both under 4.5:1 for its 11px text,
+       and invisible to CPE-1921's guard twice over (a literal hex, on a :hover rule). Measured on the
+       ground it actually lands on, not on bare Canvas — that mistake is what made the original
+       report say 4.08 light-only. */
+    --danger-text: #c02c2c;
+    /* RECESSED-TAB-TEXT role. The tab strip used the system `GrayText`, which is the colour for
+       DISABLED controls; an inactive tab is not disabled, it is one click away. Measured at 4.31:1
+       (light) / 3.93:1 (dark) for `.tab-label`, worse for `.tab-close`, all under 4.5:1. */
+    --tab-text: #545454;
+    /* BLOCKED-TAB BAR (a 2px inset box-shadow, so a non-text 3:1 role against the tab's own fill).
+       The literal #d08a1a measured 2.39:1 in light / 2.22:1 on a hovered tab. */
+    --blocked-bar: #a8690a;
+    /* BADGE FILLS, under literal white at 10px/600 — a 4.5:1 text pairing, not a 3:1 one. The old
+       #3a9d4a / #b5872b measured 3.44:1 and 3.25:1 under that white. */
+    --badge-ok: #2f7d3b;
+    --badge-warn: #946200;
     /* NAME NOTE: `src/app.css` also declares an `--accent-text`, with DIFFERENT values (light
        #0067c0, dark #3aa0f0). Not a collision — this page never loads app.css, and app.css never
        loads here — but a real hazard for readers: one grep returns both, and each file's guard
@@ -55,9 +72,13 @@
   @media (prefers-color-scheme: dark) {
     :root {
       /* --accent deliberately keeps its light value: white-on-#2f6fed is the same 4.55:1 in
-         either scheme, so its fill role does not need one. Its focus-ring role DOES need one and
-         does not get it here — see the 2.46:1 note in the bare :root block, and CPE-1966. Only
-         the foreground roles move below. */
+         either scheme, so its fill role does not need one. Its focus-ring role DOES need one — the
+         `Field` interior it encloses is rgb(59,59,59) here rather than white — which is exactly why
+         CPE-1966 split --focus-ring out rather than moving --accent and breaking the fill. */
+      --focus-ring: #5c95ff;  /* vs Field rgb(59,59,59): 3.84:1; vs the page rgb(18,18,18): 6.42:1 */
+      --danger-text: #f0736a; /* on #tabs's fill over rgb(18,18,18): 6.19:1 */
+      --tab-text: #adadad;    /* on an inactive tab's fill: 6.92:1; on its hovered close button: 4.79:1 */
+      --blocked-bar: #d08a1a; /* the light value is too dark against a dark tab; 5.42:1 here */
       --accent-text: #4f86ff; /* on rgb(18,18,18): 5.52:1 */
       --msg-ok: #4fb862;      /* on rgb(18,18,18): 7.46:1 */
       --msg-warn: #d0982f;    /* on rgb(18,18,18): 7.33:1 */
@@ -86,7 +107,12 @@
   }
   @keyframes boot-spin { to { transform: rotate(360deg); } }
   .boot-label { font-size: 12.5px; letter-spacing: .3px; color: CanvasText; animation: boot-pulse 1.6s ease-in-out infinite; }
-  @keyframes boot-pulse { 0%,100% { opacity: .45; } 50% { opacity: .85; } }
+  /* CPE-1966 site 3: an ANIMATED opacity has no single value to check, and the trough is the value
+     that matters. At .45 the label composited to #8c8c8c on white — 3.35:1, under 4.5:1 — for most
+     of every 1.6s cycle, while any single-frame sample of the source could report a passing number.
+     The trough now clears the bar (6.21:1 light / 7.60:1 dark) and the pulse is the same 0.38 swing.
+     The harness steps this animation through 21 frames and reports the WORST one. */
+  @keyframes boot-pulse { 0%,100% { opacity: .62; } 50% { opacity: 1; } }
   @media (prefers-reduced-motion: reduce) {
     .boot-ring { animation-duration: 2.2s; }
     .boot-label { animation: none; opacity: .7; }
@@ -118,11 +144,13 @@
                   border-radius: 6px; }
   textarea { font: inherit; width: 100%; padding: 6px 9px; background: Field; color: FieldText;
              border: 1px solid var(--line); border-radius: 6px; resize: vertical; min-height: 30px; }
-  /* KNOWN DEFECT, not fixed by CPE-1921 — see the --accent note in :root. `outline: none` makes
-     this border the only focus indicator in the page, and against the `Field` interior it
-     encloses (engine-resolved rgb(59,59,59) in dark) it measures 2.46:1, under WCAG 2.1 SC
-     1.4.11's 3:1. Pre-existing; owned by CPE-1966. No test asserts this pairing today. */
-  select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  /* `outline: none` makes this border the ONLY focus indicator on the page, so it carries SC
+     1.4.11's 3:1 against both adjacencies — the `Field` interior it encloses and the page outside
+     it. `var(--accent)` cleared the second and failed the first at 2.46:1 in dark (CPE-1966 site 1);
+     `--focus-ring` is the same colour in light and a lighter blue in dark, measured 3.84:1 against
+     rgb(59,59,59). Pinned by scripts/dev-harness/launcher-contrast (the border role) and by
+     src/lib/aiConsoleLauncher.contrast.test.ts (that the focus rule uses its own token at all). */
+  select:focus, input:focus, textarea:focus { outline: none; border-color: var(--focus-ring); }
   /* Swarm tasks pane resize (CPE-935): the textarea uses a full-width drag handle instead of the tiny
      native corner grip, so you can grab the whole bottom edge and drag it down into the console. */
   #swarm-task { resize: none; }
@@ -156,7 +184,7 @@
   .sw-route { flex: 0 0 auto; opacity: 0.7; white-space: nowrap; }
   .sw-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sw-note { padding: 4px 10px; font-size: 12px; border-bottom: 1px solid rgba(128,128,128,0.12); white-space: pre-wrap; word-break: break-word; }
-  .sw-empty { padding: 8px 10px; opacity: 0.5; font-size: 12px; }
+  .sw-empty { padding: 8px 10px; opacity: 0.72; font-size: 12px; }
   button { font: inherit; height: 30px; padding: 0 14px; border-radius: 6px; cursor: pointer; white-space: nowrap;
            border: 1px solid var(--line); background: ButtonFace; color: ButtonText; font-weight: 500; }
   button.primary { height: 34px; min-width: 130px; padding: 0 20px; background: var(--accent);
@@ -166,8 +194,12 @@
   .install { display: flex; align-items: center; gap: 8px; height: 30px; }
   .badge { font-size: 10px; padding: 2px 9px; border-radius: 999px; font-weight: 600;
            text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
-  .badge.no { background: #b5872b; color: #fff; }
-  .badge.yes { background: #3a9d4a; color: #fff; }
+  /* 10px/600 white on a coloured fill is NORMAL text for WCAG (large starts at 18.66px bold), so
+     these fills carry 4.5:1 against their own white, not 3:1. The old #b5872b/#3a9d4a measured
+     3.25:1 and 3.44:1 — found by CPE-1966's sweep, not by the ticket, because a literal hex on a
+     JS-built element is invisible to a token-driven static guard. */
+  .badge.no { background: var(--badge-warn); color: #fff; }
+  .badge.yes { background: var(--badge-ok); color: #fff; }
   /* Status line (CPE-1921). It used to carry a blanket `opacity: .85`, which knocked EVERY status
      colour toward the ground regardless of hue — in light theme all three states landed under the
      4.5:1 bar (green 2.83:1, amber 2.44:1, red 3.30:1 measured from painted pixels), and dark's
@@ -187,8 +219,12 @@
           border-bottom: 1px solid var(--line); }
   #tabs:empty { display: none; }
   /* Inactive tabs read as distinct, recessed chips (dimmed text + a subtle fill/border). */
+  /* `color: GrayText` was the system colour for DISABLED text (rgb(109,109,109) light /
+     rgb(128,128,128) dark). An inactive tab is one click from being the active one, not disabled, and
+     it measured 4.31:1 / 3.93:1 for its label — under 4.5:1 in BOTH schemes. --tab-text keeps the
+     recessed look and clears the bar (CPE-1966). */
   .tab { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 12px;
-         font-size: 12px; cursor: pointer; border-radius: 6px 6px 0 0; color: GrayText;
+         font-size: 12px; cursor: pointer; border-radius: 6px 6px 0 0; color: var(--tab-text);
          white-space: nowrap; max-width: 240px; min-width: 120px;
          background: rgba(128,128,128,0.07); box-shadow: inset 0 0 0 1px var(--line); }
   .tab:hover { background: rgba(128,128,128,0.14); color: CanvasText; }
@@ -198,24 +234,33 @@
                 margin-bottom: -1px;
                 box-shadow: inset 0 2px 0 0 var(--accent),
                             0 -1px 0 var(--line), 1px 0 0 var(--line), -1px 0 0 var(--line); }
-  .tab.ended .tab-label { text-decoration: line-through; opacity: .6; }
+  /* The line-through is what says "ended"; the opacity was only reinforcing it, and at .6 over an
+     already-recessed tab it took the label to 2.66:1 (light) / 3.43:1 (dark). */
+  .tab.ended .tab-label { text-decoration: line-through; opacity: .9; }
   .tab-label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
   /* Session-identity chip (CPE-490): same colour+number as the explorer's left-pane Agents leaf. */
   .tab-chip { flex: 0 0 auto; display: inline-grid; place-items: center; width: 16px; height: 16px;
     border-radius: 5px; color: #fff; font-size: 10px; font-weight: 700; line-height: 1;
     font-variant-numeric: tabular-nums; }
   /* Provider-reported usage/cost for the session (CPE-311); hidden until the agent reports any. */
-  .tab-usage { font-size: 10px; opacity: .62; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* The three `opacity` dimmers below all sat on top of an ALREADY dimmed --tab-text, and opacity
+     multiplies losses rather than adding them: .62 over an inactive tab took the usage readout to
+     2.74:1. The hierarchy is now carried by size/weight, with only enough opacity left to read as
+     secondary — the same "bake the softness in, don't paint through a blanket opacity" call CPE-1921
+     made for #msg. */
+  .tab-usage { font-size: 10px; opacity: .88; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tab-usage:empty { display: none; }
   .tab-close { width: 20px; height: 20px; display: grid; place-items: center; border: 0;
                background: transparent; color: inherit; cursor: pointer; border-radius: 4px;
-               flex: none; opacity: .7; font-size: 14px; line-height: 1; }
-  .tab-close:hover { background: rgba(128,128,128,0.28); opacity: 1; }
+               flex: none; font-size: 14px; line-height: 1; }
+  /* The hover fill LIGHTENS the ground under this glyph in light theme (#eaeaea -> #cccccc), so the
+     hovered state is the harder one to clear, not the easier one — 3.24:1 before CPE-1966. */
+  .tab-close:hover { background: rgba(128,128,128,0.28); }
   /* "Close all" pinned to the end of the tab strip; only present while sessions exist (CPE-442). */
   .close-all-btn { margin-left: auto; align-self: center; border: 1px solid var(--line);
                    background: transparent; color: inherit; cursor: pointer; font-size: 11px;
-                   padding: 3px 9px; border-radius: 4px; opacity: .72; white-space: nowrap; }
-  .close-all-btn:hover { opacity: 1; border-color: #d05656; color: #d05656; }
+                   padding: 3px 9px; border-radius: 4px; opacity: .85; white-space: nowrap; }
+  .close-all-btn:hover { opacity: 1; border-color: var(--danger-text); color: var(--danger-text); }
   /* Model picker combobox (CPE-460) — a real dropdown, type-to-filter + a visible ▾ affordance. */
   .model-combo { position: relative; display: flex; align-items: stretch; }
   .model-combo #model { flex: 1; min-width: 0; }
@@ -278,8 +323,12 @@
   #terms.grid-view .term-pane.focused { border-color: #4a86c5; box-shadow: inset 0 0 0 1px #4a86c5; }
   /* Per-pane identity header (CPE-507): chip + label + usage, shown only in grid view; reserves a
      22px strip at the top of each tile that the terminal host/scrollbar are offset below. */
+  /* `color` is declared, not inherited, and that is the point: this strip sits on a permanently DARK
+     terminal surface (#161616 over #terms's #0d0d0d) in BOTH schemes, so inheriting `CanvasText` made
+     every label black-on-near-black in light theme — 1.09:1, the worst reading on the page and one
+     nothing had ever measured, because the grid view does not exist until JS builds it (CPE-1966). */
   .pane-head { display: none; position: absolute; top: 0; left: 0; right: 0; height: 22px; z-index: 2;
-               align-items: center; gap: 6px; padding: 0 8px; background: #161616;
+               align-items: center; gap: 6px; padding: 0 8px; background: #161616; color: #e6e6e6;
                border-bottom: 1px solid #2a2a2a; font-size: 11px; }
   #terms.grid-view .pane-head { display: flex; }
   #terms.grid-view .term-host { top: 22px; }
@@ -295,7 +344,7 @@
      tab pulses subtly since it needs the user; colours are theme-safe fixed hues (not menu text). */
   .state-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #7a7a7a; }
   .pane-state { flex: 0 0 auto; font-size: 10px; opacity: .6; text-transform: lowercase; }
-  .tab.blocked { box-shadow: inset 2px 0 0 #d08a1a; }
+  .tab.blocked { box-shadow: inset 2px 0 0 var(--blocked-bar); }
   .tab.blocked .state-dot { animation: dotpulse 1.4s ease-in-out infinite; }
   @keyframes dotpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   /* "Manage agents" dropdown + Help panel (CPE-390) */
@@ -316,8 +365,17 @@
   .menu-item input[type="checkbox"] { flex: 0 0 auto; width: auto; height: auto; min-width: 0; margin: 0; }
   #help-btn { width: 30px; padding: 0; font-weight: 700; }
   /* Per-area "?" — direct docs access from the Grid / Swarm areas (CPE-764). */
-  .area-help { width: 22px; height: 22px; padding: 0; margin-left: 4px; font-weight: 700; border-radius: 6px; opacity: .75; flex: 0 0 auto; }
-  .area-help:hover { opacity: 1; }
+  /* NO blanket `opacity` here, deliberately (CPE-1966 site 2). It carried `opacity: .75`, which
+     composited BOTH the ButtonFace fill and the ButtonText glyph toward the page — and the resulting
+     ratio then depends entirely on what the engine resolves `ButtonFace` to in dark, which is not a
+     constant: this repo's Chrome gives rgb(107,107,107) and measures 5.07:1 (passing), while the
+     build CPE-1966 was filed against measured 4.24/4.28 (failing). A colour whose compliance is
+     decided by a browser build is not a colour we control, so the dimmer is gone; the "?" reads as
+     secondary from its size, not from a transparency. */
+  .area-help { width: 22px; height: 22px; padding: 0; margin-left: 4px; font-weight: 700; border-radius: 6px; flex: 0 0 auto; }
+  /* The hover cue is a fill rather than the `opacity: 1` it used to be — same reason as above, and it
+     matches #view-toggle:hover, which is the other small button in the same bar. */
+  .area-help:hover { background: rgba(128,128,128,0.16); }
   #help-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid;
                   place-items: center; z-index: 65; }
   #help-overlay[hidden] { display: none; }

@@ -63,6 +63,32 @@ painted on — below the 4.5:1 readable-text bar, in the very setting chosen for
 contrast palettes now use their own amber (13.0:1 on High contrast + Dark, 7.8:1 on High contrast +
 Light). The Light and Dark themes are unchanged.
 
+## The AI Console follows your system, not the Theme control
+
+The AI Console (the Agent Deck window) is a separate window with its own stylesheet, and it does **not**
+read the Theme or Contrast settings above. It follows your **operating system's** light/dark preference
+directly. So switching the explorer to Dark while your OS is set to Light leaves the Agent Deck light —
+that is expected, not a bug.
+
+Its colours are now measured rather than assumed. Several were readable in one scheme and not the
+other, and one was hard to see in both:
+
+- **Keyboard focus is now easy to find.** The Agent Deck draws no focus outline; a coloured border on
+  the field itself is the only indicator you get. Against a dark input's interior that border measured
+  2.5:1 — under the 3:1 bar for a visual indicator — so tabbing through the window was genuinely hard
+  to follow. It now uses a lighter blue in dark mode and clears the bar.
+- **The grid view's per-pane headers were black on near-black in light mode.** The agent name, state
+  and cost strip above each terminal tile inherited your system's text colour while painting a fixed
+  dark background, so in light mode it read at 1.1:1 — effectively invisible. Those headers now set
+  their own light text.
+- **Inactive session tabs, the ✕ close buttons, the "Close all" hover, the installed/not-installed
+  badges and the "Starting the Agent Deck…" message** all sat under the 4.5:1 readable-text bar in at
+  least one scheme, several of them only while hovered or mid-animation. All now clear it.
+
+One thing is knowingly still out: the small coloured chip carrying each session's number picks from a
+shared palette that the explorer's Agents list uses too, and two of its colours are too light for the
+white numeral on them. Changing that palette affects both windows at once, so it is tracked separately.
+
 ## What's next
 
 Theme and Contrast are the first slices of the broader appearance program. Native accent colour and
