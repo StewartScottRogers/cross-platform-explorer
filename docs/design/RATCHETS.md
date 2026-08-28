@@ -149,10 +149,11 @@ The movement was real and legitimate — PR #1056 (CPE-1928) recorded one new re
 `text:blockedRemedy` in `MacroRunConfirm.svelte`. Two things are worth writing down about how it got
 past the guard, because neither is a bug in the guard:
 
-- **The `ratchet-guard` job never saw it.** #1056's last CI run was 16:29Z; the guard landed on `main`
-  at 17:42Z; #1056 merged at 18:36Z on those stale checks. A guard is only as live as the newest run
-  of the PR it is meant to judge — a merge on checks older than the guard is a merge the guard did not
-  make. Nothing here can fix that; branch protection with required, up-to-date checks can.
+- **The `ratchet-guard` job never saw it.** The decisive fact is a content check, not a timestamp one:
+  `ratchet-guard` is absent from `ci.yml` at #1056's head SHA — grep 0 — so no run of that PR could
+  have judged it, however recent the run. A merge whose checks predate a guard is a merge that guard
+  did not make. Nothing here can fix that; branch protection with required, up-to-date checks can.
+  Filed as **CPE-1970**, which carries the measurement and is where this belongs rather than here.
 - **The doc had no such excuse.** Nothing was watching it at all, which is what this ticket changed.
 
 ## What this guard does *not* catch
@@ -185,6 +186,20 @@ A row here is what makes a raise legal. Two conditions, both required:
 
 `from` is an integer, or `new` when the baseline has no value at the base revision at all (a
 brand-new guard, or a rename git could not follow).
+
+**Why this table is still empty when the recount above records a `1552 → 1553` movement.** A row
+here is a **licence**, not a history entry. The two conditions directly above make a row meaningful
+only inside the diff that performs the raise, and rows are counted against the base revision rather
+than looked up — so a row added after the fact satisfies neither condition: it licenses a movement
+that has already merged and can therefore never be consumed, and it would be the only row on the page
+that is false by the page's own definition of a row. It would also cost the reading that makes an
+empty ledger worth anything — *no raise got past the guard* — because once rows can appear
+retroactively, their absence stops meaning that.
+
+The `bidi-render-registry` movement is not unrecorded; it is recorded where it belongs, in the recount
+above. PR #1056 (CPE-1928) added a real render site and never declared it, because `ratchet-guard`
+did not yet exist in `ci.yml` at that PR's head — a stale-checks merge, filed as **CPE-1970**. The
+fix for it is requiring up-to-date checks before merge, not backdating a licence here.
 
 | baseline | from → to | ticket | why this raise is right |
 |----------|-----------|--------|-------------------------|

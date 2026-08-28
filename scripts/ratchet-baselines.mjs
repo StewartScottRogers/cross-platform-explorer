@@ -737,6 +737,18 @@ export function parseEnumerationTable(md) {
   if (!isTableRow(sep) || !tableCells(sep).every((c) => /^:?-{2,}:?$/.test(c))) {
     throw new Error(`${LEDGER_PATH}:${start + 2}: the enumeration table header is not followed by a separator row`);
   }
+  // The row scan takes every consecutive table-shaped line and stops at the first that is not one.
+  // Two shapes slip past it, and neither is caught HERE: a blank line mid-table silently TRUNCATES
+  // the row list, and a second four-column table butted straight against this one (no blank line)
+  // has its rows ABSORBED into this one. Both are caught downstream instead, by the ORDERED id
+  // comparison against REGISTRY in `src/lib/ratchetsDoc.test.ts`. Measured, not assumed: a blank
+  // line injected before the `mojibake-allowlist` row cut this parse from 12 rows to 6 and reddened
+  // that comparison, with the not-gated non-vacuity check firing as a second net. The `today`
+  // assertion did NOT fire, because the six surviving rows were each still correct. So this parser
+  // is not airtight on its own, and the id comparison is not scaffolding around a check that
+  // already works — it IS the check doing the work here; do not delete it as redundant.
+  // (Absorption needs an intruder whose cells are themselves row-shaped: the raise ledger header,
+  // with its bare `baseline` cell, throws rather than being swallowed.)
   /** @type {DocRow[]} */
   const rows = [];
   for (let i = start + 2; i < lines.length && isTableRow(lines[i]); i++) {

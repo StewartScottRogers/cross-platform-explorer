@@ -123,3 +123,50 @@ still refused as a spent licence. All reverted.
 
 **Also removed:** the two duplicate copies of `hex-files`/`hex-occurrences` in the "Recount" prose
 below the table — a second unchecked copy is the exact defect this ticket is about.
+
+### Round 2 (Reviewer: APPROVE, two non-blocking fixes)
+
+Rebased onto `origin/main` at `fd0bf183`. Main had moved four times since the branch was cut; every
+one of those four commits is `.md`-only (three touch ticket files, one the sprint-metrics log), so no baseline should
+have shifted — confirmed rather than assumed: `compare origin/main` prints all **12 unchanged**,
+`bidi-render-registry` measuring 1553 on both sides.
+
+**F1 — the raise ledger no longer contradicts the page. Decision: no retroactive row; the reason is
+written at the site instead.** The ledger said `_(none yet)_` while the recount six sections up
+recorded `bidi-render-registry` moving 1552 → 1553 under CPE-1928 — an unguarded claim going stale
+inside the page about unguarded claims going stale. Both answers were defensible and the Reviewer
+confirmed the row is free (`compare origin/main` exits 0 with it, 80 ratchet tests green), but a row
+is a **licence**, not a history entry, and the two conditions printed directly above that table make
+one meaningful only inside the diff that performs the raise. A row added now satisfies neither: the
+movement already merged, so base and head both measure 1553 and the licence can never be consumed —
+and it would be the only row on the page that is false by the page's own definition. It would also
+cost the reading that makes an empty ledger worth anything — *no raise got past the guard* — because
+once rows can appear retroactively, their absence stops meaning that. The paragraph now says all of
+this immediately above the table.
+
+The same edit stops the recount re-explaining how #1056 got past the guard and points at **CPE-1970**
+instead, adopting that ticket's corrected framing: the decisive fact is that `ratchet-guard` is
+**absent from `ci.yml` at #1056's head SHA** (grep 0), not that its last run was old — the run
+timestamps in the previous wording were misleading, since that run finished one minute before the
+merge.
+
+**F2 — `parseEnumerationTable`'s two structural gaps now say what actually closes them.** The scan
+takes consecutive table-shaped lines, so a blank line mid-table silently **truncates** the row list
+and an adjacent four-column table has its rows **absorbed**. Verified here rather than taken on
+trust: injecting a blank line before the `mojibake-allowlist` row cut the parse from 12 rows to 6,
+reddening the **ordered id comparison** in `ratchetsDoc.test.ts` (12 expected, 6 received) with the
+not-gated non-vacuity check as a second net — and the `today` assertion **not** firing, because the
+six surviving rows were each still correct. Absorption also probed: it needs an intruder whose cells
+are themselves row-shaped; the raise ledger's own header throws on its bare `baseline` cell. The
+comment at the site now names the id comparison as the check doing the work, so the next reader does
+not read the parser as airtight and delete it as redundant.
+
+**F3 — no action, as advised.** Dropping `(13 → 14 on 2026-08-27, CPE-1946)` from the `manual-test-mvd`
+cell is the correct trade: it was the load-bearing example of the defect, and the history survives in
+`MANUAL-TEST-BURNDOWN.md`'s own CPE-1946 section with both tickets named in the surrounding prose.
+
+**Gates.** `npm run check` **0 errors, 0 warnings**. `npm test` **350 files, 5016 passed, 2 skipped**.
+`node scripts/ratchet-baselines.mjs compare origin/main` — 12 enumerated, all unchanged, exit 0.
+Byte-wise line-ending check after the edits: `RATCHETS.md` 206 CRLF / 206 LF / 0 bare CR / no BOM
+(was 191/191; +19 / -4 lines), `ratchet-baselines.mjs` still pure LF (1143/1143 with 0 CRLF),
+`ratchetsDoc.test.ts` untouched at 216/216 — `--numstat` 19/4 and 12/0, not a line-ending rewrite.
