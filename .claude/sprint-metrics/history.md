@@ -2467,3 +2467,41 @@ check reads a different thing at a different moment, it is not shadowing — it 
 Same PR, the other direction: it also declared a *new* guard **untestable by construction** (disable →
 green, lie → 79 failed) and **said so at the site with both numbers**, which is what the standard asks
 for when a backstop genuinely cannot be reached. Both dispositions in one diff, argued separately.
+
+## 2026-08-28 — the report claimed a leg ran, because the count came from intent rather than work
+
+CPE-1966's round 2 fixed three safeguards that stayed green while permitting what they existed to
+prevent. A **narrow** re-review — scoped to only the round-2 changes — found the same class again, in
+the legs the PR exists to add.
+
+Three of the four measurement legs could measure **nothing** and still print
+`PASS — every enforced site clears its bar in both schemes.`, exit 0:
+
+- **states**: `const stateRules = []` → PASS, 844 readings instead of 1306. And it can happen with
+  nobody editing anything, because the loop wraps its query in a bare `catch { continue; }` — a CDP
+  change makes every rule skip **silently**.
+- **base**: `const all = []` → `0 raw readings -> 0 distinct sites, 0 enforced`, then PASS. Caught under
+  `--verify-pixels` only **incidentally** (the pixel leg is fed from `all`), so the documented local
+  invocation — the package.json script, no flag — passes on zero measurements.
+- **time**: disabled → PASS, **and the log still prints `3 CSS animations x 21 frames`.**
+
+**That third one is the one worth keeping.** The count is read from `animMeta.count` — the metadata
+describing what the harness *intended to sample* — not from readings that exist. So the report does
+not merely fail to notice the leg did nothing; **it actively asserts the leg ran, with a plausible
+number.** A silent zero invites suspicion. A confident "3 animations × 21 frames" closes the question.
+
+**The rule: every number a report prints must be derived from work done, not from the plan.** Counts
+sourced from configuration, targets, or intent will keep reporting the shape of the job after the job
+stops happening. The tell is asking, of each figure, *what would this print if the loop body never
+ran?* — and `animMeta.count` prints the same thing either way.
+
+Two smaller notes from the same pass. `--json` returned **0 unconditionally**, evaluating no verdict at
+all. And the round-2 JS comment stripper failed **both** ways — four shapes silently deleting real code
+(`return /[//]/;` → `return /[ `, because `prevSignificant` is a single character so every keyword
+matches `[\w$)\]]`) and three letting a comment survive. One path tokenized the **entire HTML
+document**: a single apostrophe in prose outside every `<script>` shifted the output by **11,872
+characters**. Latent only because the swallowed region happened to be copied verbatim.
+
+**And the narrow re-review is the reusable part.** A round-2 fix is new code that no review has seen;
+scoping a pass to *only what changed* cost a fraction of a full review and found two blockers the
+original reviewer could not have — it was reading round 1.
