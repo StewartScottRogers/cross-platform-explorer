@@ -2699,3 +2699,22 @@ never existed in any commit. In fixing that, it **planted a fresh phantom citati
 canonical rule block, pointing at the very test the PR had just renamed away. Along with seven other
 sites still asserting the rule the PR inverted. A comment that names a test is derivable in one `git
 grep`; the ones that rot are the ones nobody thinks to grep because they read as background.
+
+## 2026-08-28 — a "pending" check whose job had already finished
+
+`ci-poll` reported #1088's oldest pending check as `Server crates (macos-latest)`, running 38 minutes,
+and helpfully suggested comparing it against a sibling to tell slow from hung. Both readings were wrong.
+Pulling the job's **steps** showed all 49 completed — including `Complete job` — every one `success`, at
+08:54:34Z. **The job was finished; only the check-run status was stale.**
+
+The genuinely outstanding work was the *other* pending check, Windows, sitting at step 21 of 24 with
+three crates left. So the poll's "oldest pending" pointed at the one thing that needed no waiting at all.
+
+**The technique, and it costs one API call:** when a check looks slow, do not compare its elapsed time
+against a sibling — **read its steps.** `gh api repos/:owner/:repo/actions/jobs/<id> --jq '.steps[]'`
+answers three questions the check-level view cannot: whether it is progressing, *which* step it is on,
+and whether it has in fact already finished. Elapsed time alone cannot distinguish a slow job from a
+finished one from a wedged one; the step list distinguishes all three immediately.
+
+Worth remembering that "compare against a sibling" was advice this crew wrote into the tool earlier this
+same shift, after a different misread. It is decent advice and it is strictly weaker than just looking.
