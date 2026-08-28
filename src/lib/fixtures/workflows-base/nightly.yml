@@ -1,0 +1,28 @@
+# CPE-1970 test fixture — a PR-triggered workflow that contributes NOTHING to the stubbed board AND is
+# entitled to: its `pull_request:` trigger carries a `paths:` filter of its own, so GitHub was allowed
+# not to run it on this diff. That is the ONLY shape `coverageOf` excuses.
+#
+# ROUND 2 CORRECTED WHAT THIS FIXTURE STANDS FOR. It used to be described as the analogue of `ci.yml`'s
+# `paths-ignore`, justifying a BLANKET "a workflow that contributed nothing is never flagged" carve-out.
+# That analogue is false: `ci.yml`'s `paths-ignore` is on its **`push:`** trigger, and no PR-triggered
+# workflow in this repo has a path filter on `pull_request:` at all (`ci.yml:62-64` says so itself). The
+# blanket rule therefore excused nothing real and blinded the check to an entire missing workflow. The
+# narrowed rule is derived from this file's own `paths:` key, and this file is byte-identical in both
+# fixture dirs so the pair still differs by exactly one job — in `ci.yml`, and nowhere else.
+name: Nightly sweep
+
+on:
+  pull_request:
+    paths: ["nothing-that-exists/**"]
+
+jobs:
+  sweep-a:
+    name: Nightly sweep A
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"
+  sweep-b:
+    name: Nightly sweep B
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"

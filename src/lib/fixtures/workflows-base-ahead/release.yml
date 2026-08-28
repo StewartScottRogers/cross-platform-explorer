@@ -1,0 +1,17 @@
+# CPE-1970 test fixture — a workflow that does NOT run on pull_request.
+#
+# Its jobs must never be counted as missing from a PR's board. Without that carve-out this repo's four
+# release/schedule workflows would put ~7 permanently-absent jobs on every single verdict, which is the
+# shape of gate that gets switched off in a week.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    name: Publish installers
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"

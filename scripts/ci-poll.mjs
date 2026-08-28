@@ -1,6 +1,20 @@
 #!/usr/bin/env node
 // CPE-1880 — a CI poll that CANNOT be backgrounded, replacing `gh run watch` in the dispatch contract.
 // CPE-1906 — and that cannot report an error, a hang, or a job that never ran as if CI had answered.
+// CPE-1970 — and that cannot report a board GREEN when a guard `main` already carries never appeared
+//            on it at all. `main` has NO branch protection (`branches/main/protection` → 404,
+//            `rulesets` → []), so nothing stops a merge on checks that predate a guard. Measured by
+//            running `coverageOf()` below over the 186 PRs merged 2026-08-14T00:00:00Z →
+//            2026-08-28T11:05:17Z (inclusive at both ends; #1090 merged at exactly the upper bound)
+//            against each PR's own live check rollup: 16 merged with at least one job `main` already
+//            required entirely absent from their board, 168 clean, 2 fail-closed unreadable (#896 and
+//            #899, whose squash commits are no longer reachable from `main`). The absent jobs:
+//            `ratchet-guard` ×5 (PR #1056 among them — the merge that found this ticket),
+//            `ci-verdict` ×5, `lockfile-preflight` ×2, `msrv` ×2, `ffmpeg-pin-guard` ×1,
+//            `gui-smoke-linux` ×1 (#921 — and that one is NOISE, not exposure: the PR being judged
+//            renamed that job itself, so the exposure count is **15**; see `coverageOf`'s header).
+//            See docs/design/CI-STALENESS.md for the settings change that would make it impossible
+//            rather than merely visible — it needs the repository owner, which is why this ships too.
 //
 // WHY THIS EXISTS (the measurement, not a vibe):
 //   The Claude Code Bash tool caps a single call at `timeout: 600000` ms (10 minutes). When a command
@@ -117,6 +131,11 @@
 //      `completed unclear`     finished in a shape this poll has never seen — no failure, but no
 //                              positive evidence of success either. Both are "not red, not green": do
 //                              not merge, find out why.
+//   5  `completed stale-checks`  nothing is red, and that is the problem: a job `main` requires
+//                              produced NO check on this board, so a guard that exists on `main` never
+//                              judged this PR. Rebase onto `main` and let CI re-run. (CPE-1970)
+//      `completed coverage-unknown`  the coverage check itself could not be computed — `main`'s
+//                              workflow files were unreadable. "Did not run", not "found nothing".
 //   64 bad usage
 //
 //   CPE-1906 round 2 — THE PREFIX AND THE EXIT CODE ARE COMPUTED FROM ONE PREDICATE (`verdictClass`),
@@ -340,6 +359,8 @@ export function shouldSleepAgain(nowMs, intervalMs, deadlineMs, tick, ticks) {
  * @property {number} neutralCount    checks that ran and declined to judge
  * @property {number|null} oldestPendingAgeMs  age of the longest-running unfinished check
  * @property {string|null} oldestPendingName   its name — "slow or hung?" made mechanical
+ * @property {string[]} checkNames     EVERY check name on the board, pending ones included — what the
+ *                                     CPE-1970 coverage check compares against `main`'s required jobs
  */
 
 /** @returns {CiRead} */
@@ -351,6 +372,7 @@ function emptyRead() {
     pending: 0,
     mergeable: null,
     sha: null,
+    checkNames: [],
     skippedNames: [],
     failedNames: [],
     ranCount: 0,
@@ -442,6 +464,17 @@ export function scanWorkflowJobs(source) {
       continue;
     }
     if (!inJobs) continue;
+    // CPE-1970 round 2: a COMMENT AT COLUMN 0 is not a top-level key, and reading it as one truncated
+    // the job list at the comment — `scanWorkflowJobs("jobs:\n  a:\n    name: A\n# c\n  b:\n    name: B\n")`
+    // returned `["a"]`. Pre-existing from CPE-1906 and harmless while the only consumer was the skip
+    // matcher (a short list over-blocks, which is loud); the coverage check is the first consumer that
+    // needs it fail-closed, because a truncated job list silently SHRINKS what `main` requires.
+    // Red-proofed: `if (false && …)` here reds exactly `a column-0 comment inside \`jobs:\` no longer
+    // truncates the job list` — 1 failed / 74 skipped under `-t "no longer truncates the job list"`,
+    // re-measured in round 3 (round 2 wrote `69 skipped`, taken at 70 tests). ROUND 6: the file holds
+    // **76**, and that filter selects the same single test — `1 of 76 / 75 skipped` (measured). Only
+    // the denominator moved; the failed set, which is the claim, did not.
+    if (/^[\t ]*#/.test(line)) continue;
     if (/^\S/.test(line)) {
       // A new top-level key ends the jobs block.
       inJobs = false;
@@ -494,6 +527,12 @@ export function scanWorkflowJobs(source) {
     }
     if (/^ {4}needs:\s*$/.test(line)) {
       for (let j = i + 1; j < lines.length; j += 1) {
+        // Same comment hole as the jobs block above: a `#` line between two `- job` items truncated the
+        // list, which SHORTENS the transitive `needs:` closure and un-excuses a legitimately skipped job.
+        if (/^[\t ]*#/.test(lines[j])) {
+          i = j;
+          continue;
+        }
         const item = /^ {6}-\s*(.+?)\s*$/.exec(lines[j]);
         if (!item) break;
         entry.needs.push(item[1].replace(/^["']|["']$/g, ""));
@@ -615,6 +654,747 @@ export function readWorkflowSources(dir) {
   } catch {
     return [];
   }
+}
+
+// ── Guard coverage: did the checks on this board come from the job set `main` requires? (CPE-1970) ────
+
+/**
+ * @typedef {object} OnBlock
+ * @property {"pull-request"|"other"|"unknown"} trigger  `unknown` = the `on:` block could not be read
+ * @property {boolean} prPathFiltered  EVERY PR-scoped trigger present carries its own
+ *           `paths:`/`paths-ignore:` — so GitHub was entitled to skip the workflow on some diffs
+ * @property {string[]} events  the event names read out of `on:`, comments already stripped — the
+ *           evidence behind `trigger`, so a caller can ask about a name this module does not know.
+ *           `[]` when `trigger === "unknown"`. See `readOnBlock`'s return for the flow-form caveat.
+ * @property {string} why  one clause, for the operator, when `trigger === "unknown"`
+ */
+
+/**
+ * The PR-scoped GitHub event names, as a named literal rather than a condition buried in a loop —
+ * because this list is a standing blind spot of the classifier and the header points at it. NOT "the
+ * one": rounds 3, 4 and 5 each added a shape to that header list, so a count here would have been
+ * wrong three times, and a count in a file whose own list says "AT LEAST THESE" reads as a closing
+ * inventory of something explicitly left open.
+ *
+ * BOTH of these run on a pull request and BOTH land their check runs on the PR's rollup, which is the
+ * only property `coverageOf` cares about. `pull_request_target` differs from `pull_request` in what it
+ * checks out and what secrets it gets, not in whether it judges the PR.
+ */
+export const PR_EVENTS = ["pull_request", "pull_request_target"];
+
+/**
+ * Read one workflow's `on:` block: does it run on a PR event (`PR_EVENTS`), and if so does every such
+ * trigger carry a PATH FILTER of its own?
+ *
+ * Only PR-triggered workflows can contribute checks to a PR's rollup, so a release-only or
+ * schedule-only workflow's jobs must never count as "missing" — that would red every PR on day one,
+ * which is the outcome that gets a gate switched off. The second fact is what lets `coverageOf` tell a
+ * workflow that was ALLOWED to stay silent on this PR from one that simply did not run: see its
+ * comment, and §2d of `docs/design/CI-STALENESS.md`.
+ *
+ * CPE-1970 ROUND 3 — `pull_request_target` WAS A CONFIDENT `false`, AND WITH NO TRACE. The block-key
+ * loop compared the key to the string `"pull_request"` exactly, so a `pull_request_target`-only
+ * workflow answered `{trigger:"other"}`, `coverageOf` `continue`d past it, and the board printed a bare
+ * `coverage=ok` at exit 0 with that workflow's entire guard set absent from the required set — no
+ * `unjudged` row, no `silentWorkflows` entry, nothing. Measured end to end on a board carrying all 11
+ * real `ci.yml` checks and nothing from a `pull_request_target`-only `security.yml`:
+ * `verdict: ok | coverage=ok`, `detail: every job \`main\` requires from ci.yml produced a check here`.
+ * `pull_request_target` IS a pull-request trigger — GitHub runs it on PR events and its check runs land
+ * on the rollup — so the fix widens the class rather than narrowing the claim: it is now
+ * `"pull-request"`, not `"unknown"`. `unknown` would also have been fail-closed, but it is the wrong
+ * answer for a well-understood event: the first `pull_request_target` workflow to land would print
+ * `coverage=unknown` on every board forever, and a gate that is permanently unknown is a gate people
+ * alias away. It takes `paths:`/`paths-ignore:` on exactly the same terms, so the silent-workflow
+ * carve-out needed no special case. There is no live instance today
+ * (`grep -rn pull_request_target .github/workflows/` → none), so this was latent, exactly as latent as
+ * round 1's column-0 comment was — and it is pinned in `ciPollFailClosed.test.ts` so it stays fixed.
+ *
+ * CPE-1970 ROUND 2 — THIS USED TO FAIL OPEN, SILENTLY, ON LEGAL YAML, AND THE SHAPE WAS ONE REFORMAT
+ * AWAY. The predecessor walked the block with `if (/^\S/.test(line)) return false;` as its terminator
+ * and had NO comment handling at all, so a comment at COLUMN 0 anywhere inside `on:` ended the scan
+ * early and removed the whole workflow from the required set — no `silentWorkflows` line, no
+ * `coverage=` change, nothing. Measured on the real `.github/workflows/ci.yml`: it answers `true`, and
+ * the same bytes with `# a comment` inserted at column 0 under `on:` answer `false`, after which
+ * `coverageOf(["Frontend — type-check and test"], [ci.yml])` returns `ok` on a one-check board with
+ * every other `ci.yml` guard absent. `ci.yml`'s `on:` block already carries a ~60-line comment (it is
+ * indented today); one re-wrap and every `ci.yml` guard leaves the required set permanently. It also
+ * answered `false` for `"pull_request":`, for `"on":`, and for four-space indentation — three more
+ * legal spellings, three more whole-workflow blind spots.
+ *
+ * CLAUDE.md rule 2 ("anchor on code, never on prose; a whole-line-comment filter is not enough") is why
+ * comments are stripped in BOTH positions — whole-line at any indent, and trailing after whitespace —
+ * on the `on:` line AND on every line of its block body. Round 2 claimed both positions but applied the
+ * trailing strip only to the `on:` line's inline rest, so the entirely legal
+ * `on:\n  - push\n  - pull_request  # only PRs` answered `unknown` (measured). Fail-closed, but a
+ * workflow spelled that way would have printed `coverage=unknown` on every board until someone deleted
+ * the comment. And `stripTrailing` was a regex, `/(^|\s)#.*$/`, which cannot see quoting: on
+ * `on: ["a #b", pull_request]` it cut at the `#` INSIDE the quoted scalar and ate the `pull_request`
+ * after it, answering a confident `false` (measured) — in the paragraph whose job was to argue the
+ * tri-state is complete. `splitInlineComment` below tracks quote state instead, so that line now reads
+ * as `pull-request` and `on: ["push#1"]` as `other`, both correctly rather than merely closed.
+ *
+ * WHAT THIS STILL CANNOT SEE — AT LEAST THESE, and the list is open by construction, because every
+ * round of review has added one. Say a shape's name here rather than letting the next reader discover
+ * it; an enumeration that reads as exhaustive is how a gap reads as coverage.
+ *   • THE PR-EVENT LIST IS A LITERAL PAIR (`PR_EVENTS`). A third PR-scoped event name — one GitHub
+ *     adds later, or one nobody here has heard of — lands in `other` and drops its whole workflow out
+ *     of the required set silently, which is the shape `pull_request_target` had until round 3.
+ *     Nothing in `readOnBlock` can notice the next one: it compares against a list, and a name not on
+ *     the list is simply not a PR event as far as this code is concerned.
+ *     ROUND 4 — AND THE ENUMERATION TEST'S `toEqual` CANNOT NOTICE IT EITHER, which is what round 3
+ *     wrote here. `prTriggered` is a FILTER: a workflow classified `other` is REMOVED from the array,
+ *     so `toEqual(["ci.yml","gui-smoke.yml"])` still holds and the suite stays green. That `toEqual`
+ *     can only red on OVER-inclusion, or on one of those two dropping out — never on a new file the
+ *     classifier decided to ignore. Measured over the real `HEAD` workflow set plus one hypothetical
+ *     file: `+review-gate.yml (on: pull_request_review:)` → `classify=false`, `toEqual` PASSES;
+ *     `+future.yml (on: pull_request_v2:)` → `classify=false`, `toEqual` PASSES. Round 3's other
+ *     backstop, a text grep for the `pull_request_target` LITERAL, caught only that one name.
+ *     So the guard is now the name-shaped one it always claimed to be: `readOnBlock` returns the
+ *     `events` it parsed, and `ciPollFailClosed.test.ts` reds on any parsed `on:` event matching
+ *     `/^pull_request[_a-z0-9]*$/` that is NOT in `PR_EVENTS` — so `pull_request_v2` reds on the day
+ *     it lands, by shape rather than by anyone having heard of it. What still gets through — AT LEAST
+ *     THESE, inheriting the list header above rather than reading as a closed pair, which is exactly
+ *     how round 4 wrote it and exactly what round 5 then found a third member of: a PR-scoped event
+ *     GitHub names something else entirely (`merge_group` is the live example — it runs on a merge
+ *     queue, not a PR, and is deliberately not in `PR_EVENTS`); any workflow whose `on:` block answers
+ *     `unknown`, since an unread block yields no `events` to check; and — ROUND 5 — an event on the
+ *     CONTINUATION LINE of a multi-line flow collection, which was invisible to `events` because the
+ *     scanner only ever read the `on:` line itself. That third one was the FAIL-OPEN kind while the
+ *     other two are fail-closed, and the refusal above now moves it into the second category rather
+ *     than leaving it as a silent `false`. The lesson is the list's, not the item's: a sub-list under
+ *     an "at least these" heading does not inherit the hedge, and this one was read as complete.
+ *   • FLOW MAPPING. `on: {pull_request: {paths: ['src/**']}}` is legal and DOES carry a path filter;
+ *     the inline branch reports `prPathFiltered: false` for it (measured). That over-blocks — such a
+ *     workflow's silence is called unjudged rather than excused — so there is no exposure, but see the
+ *     inline branch's own comment: it is false by OMISSION, not by construction.
+ *   • YAML ANCHORS AND ALIASES. `on: &trig` / `on: *trig` are not resolved. Round 2 answered a
+ *     confident `other` for the first (measured); they now answer `unknown`, which is fail-closed but
+ *     still not understanding — a workflow written that way stops the poll rather than being read.
+ *     GitHub Actions itself rejects anchors, so this is effectively unreachable.
+ *   • BLOCK SCALARS. `on: >` is not understood; `unknown`.
+ *   • MULTI-LINE FLOW COLLECTIONS (ROUND 5). `on: [push,\n  pull_request]` is legal, and only the
+ *     `on:` LINE is captured, so the continuation is not read. Until round 5 that was a confident
+ *     `false` — `trigger=other`, `events=["push"]`, the `pull_request` never seen — and end to end it
+ *     reproduced round 3's `pull_request_target` defect exactly, `detail` string included. It now
+ *     answers `unknown`, which is fail-closed but again not understanding: the workflow stops the poll
+ *     rather than being read. A real flow parser would read it; that is the fix if one ever lands here.
+ *     SPELL THE OPERATIONAL CONSEQUENCE OUT, because `unknown` is a property of a FILE, not of a
+ *     board: the first `on:` in this repo written any of these three ways makes `ci-poll` exit 5
+ *     `completed coverage-unknown` — naming that file and this `why` — on EVERY PR until the `on:` is
+ *     rewritten. Right, and loud, but repo-wide, and the fix is one line in the workflow, not here.
+ *     Also in `docs/design/CI-STALENESS.md` §2d, which is what an operator reads when the guard
+ *     starts refusing everything; a consequence recorded only at the site is a consequence nobody
+ *     finds in the ten minutes they spend deciding whether to bypass the gate.
+ * Every example named above was RUN, not reasoned about, and the answers are the ones written next to
+ * them — round 2's list claimed two shapes landed in `unknown` and one of them landed in `false`.
+ *
+ * WHY NOT JUST GREP THE SOURCE FOR `pull_request`, WHICH IS WHAT THE BRIEF ASKED FOR — and what the
+ * parse gave up to answer it. A raw grep sees the whole file, so it reads a continuation line, and it
+ * would have caught round 5's finding on the day round 4 landed. What it cannot do is tell a trigger
+ * from a comment: `ci.yml`'s `on:` block carries ~60 lines of commentary, and all five comment
+ * positions naming `pull_request_review` inside `on:` (column 0, indented, trailing on a block key,
+ * trailing on the `on:` line, trailing after a flow seq) red a grep and are correctly ignored here.
+ * NEITHER INSTRUMENT DOMINATES; they have complementary holes, and swapping one for the other traded
+ * a false-positive class for a false-negative class rather than strictly improving. Round 4's
+ * write-up framed the parse as simply the better choice and did not say what it gave up — which is
+ * the shape this whole ticket is about, an instrument narrower than the confidence placed in it. So:
+ * WHEN YOU REPLACE ONE MECHANISM WITH ANOTHER, STATE WHAT THE OLD ONE CAUGHT THAT THE NEW ONE DOES
+ * NOT. The refusal above is the parse buying that case back by refusing to answer, not by reading it.
+ *
+ * RED-PROOFED (CLAUDE.md rule 3), result written here rather than only in the PR body: dropping
+ * `isComment` from the block-body loop below reds `a column-0 comment inside \`on:\` no longer deletes
+ * the workflow from the required set`, `every real workflow in this repo still classifies …` AND (new
+ * in round 5) `a multi-line flow \`on:\` was a confident \`false\` …`, whose five comment positions
+ * include a column-0 one — **3 failed / 10 passed / 63 skipped** under `-t "fails CLOSED"`.
+ * RE-MEASURED IN ROUNDS 3, 4 AND 5: round 2 wrote `1 failed / 5 passed / 64 skipped` here, round 3
+ * `2 failed / 10 passed`, and the FILE has grown 70 → 75 → 76 tests. A red-proof's counts go stale the
+ * moment tests are added beside it, so re-run rather than copy one forward.
+ *
+ * WHAT THE NUMBERS IN THIS HEADER COUNT — ROUND 6, DERIVED BY RUNNING IT, because this one itemisation
+ * has now been wrong in three consecutive rounds and always in the same two ways. Both are the same
+ * mistake: reading a count off the SOURCE when every figure here is the RUNNER's.
+ *   • `npx vitest run src/lib/ciPollFailClosed.test.ts` → **76 tests**. The file holds **68 literal
+ *     `it(` across 16 `describe(`s**; the eight-test gap is table-driven, two of those `it(` sitting
+ *     inside `for (const c of cases)` loops that expand to **3** and **7** (measured by filtering on
+ *     each one's title). So the source count and the test count differ by design and neither round's
+ *     "N tests from M `it(` blocks" was ever going to hold by inspection.
+ *   • `-t "fails CLOSED"` selects **13 of the 76** (63 skipped) — but NOT "the describe". `-t` is a
+ *     substring filter over the whole test name, not a describe selector: **12** of the 13 come from
+ *     the CPE-1970 `on:`-block describe, and the thirteenth is `fails CLOSED when the workflow scan
+ *     comes back empty …`, which lives in an unrelated describe and matched on its own title. It is
+ *     inert for these sabotages — it is one of the `passed` in every row below and never one of the
+ *     `failed` — but the filter has never been the describe, and three rounds of prose said it was.
+ *
+ * ROUND 3'S OWN RED-PROOFS, all five run against `-t "fails CLOSED"`, each number measured rather
+ * than predicted. RE-RUN IN ROUND 4, AGAIN IN ROUND 5, AND AGAIN IN ROUND 6 — round 5 added one `it`
+ * to the CPE-1970 describe, so the filter selects **13 of 76** (63 skipped) and every `passed` below
+ * moved by one even where nothing about the sabotage changed. That is the stale-count trap the
+ * paragraph above warns about, arriving on schedule for the third round running. THE FAILED SETS ARE
+ * THE CLAIM; the passed counts are bookkeeping.
+ *
+ * AND ONE OF THE FIVE CAME BACK GREEN THE FIRST TIME ROUND 5 RAN IT — 13 passed, 0 failed — which
+ * looked like a lost red-proof and was a broken harness: a scripted `replace` of the bare string
+ * `prAts.every(filtered)` hits ITS OWN ENTRY IN THIS LIST, four lines below, before it reaches the
+ * code. CLAUDE.md rule 2 ("anchor on code, never on prose") applies to the SABOTAGE as much as to the
+ * scanner, and the failure is silent in the safe-looking direction: a green run reads as "the test
+ * does not cover this" when the truth is "the test was never given anything to notice". Anchored on
+ * `prPathFiltered: prAts.every(filtered)` it reds as it always did. If you automate these, assert the
+ * patched file DIFFERS FROM THE ORIGINAL IN CODE, not merely that the string was found. AND THAT IS
+ * A PROPERTY OF THE WHOLE LIST, NOT AN ANECDOTE ABOUT ONE RECIPE — enumerated at the end of it.
+ *   • `PR_EVENTS` back to `["pull_request"]` → **4 failed / 9 passed**: `classifies
+ *     \`pull_request_target\` …`, `the PR-event list is a literal pair …`, `\`prPathFiltered\` needs
+ *     EVERY PR trigger filtered …`, `a \`#\` inside a quoted scalar …`. Note `every real workflow in
+ *     this repo still classifies …` stays GREEN — this repo has no `pull_request_target` workflow, so
+ *     the enumeration alone could not have caught it. That is why the four above exist. Re-measured in
+ *     round 4 and still green, which is the SAME fact as round 4's finding above: an enumeration built
+ *     on a filtered list cannot red on an event the filter decided to ignore. Round 3 wrote that fact
+ *     correctly here and its opposite two lines up in the blind-spot bullet.
+ *   • `splitInlineComment` back to `s.replace(/(^|\s)#.*$/, "$1")` → **3 failed / 10 passed** (2 in
+ *     round 4): `a \`#\` inside a quoted scalar …`, `an unclassifiable \`on:\` is \`null\` …`, and now
+ *     `a multi-line flow \`on:\` was a confident \`false\` …`. The THIRD is not a new property of that
+ *     regex — this sabotage replaces the whole function, and round 5 moved the bracket-depth count
+ *     INTO its loop, so it now disables two mechanisms at once. Said here rather than left to read as
+ *     the comment stripper having grown reach it does not have.
+ *   • the block-body key read off the raw line instead of `split.rest` → **1 failed / 12 passed**:
+ *     `reads the legal spellings that used to answer \`false\` …`.
+ *   • `prAts.every(filtered)` back to `filtered(prAts[0])` → **1 failed / 12 passed**:
+ *     `\`prPathFiltered\` needs EVERY PR trigger filtered …`. (This is the one whose scripted form
+ *     patched a comment; see above.)
+ *   • the anchor refusal disabled (`if (false && …)`) → **1 failed / 12 passed**:
+ *     `an unclassifiable \`on:\` is \`null\` …`.
+ *
+ * ROUND 4'S OWN RED-PROOFS, same filter, same 63 skipped — both target the new `events` field, and
+ * both land on `every real workflow in this repo still classifies …`, the test round 3 correctly said
+ * `PR_EVENTS` alone could not red:
+ *   • `events.push(key[2])` suppressed (`if (false) events.push(…)`) → **1 failed / 12 passed**. This
+ *     is the one that matters: an `events` that silently came back `[]` would leave the
+ *     unknown-PR-event assertion green forever, so the test carries an inline POSITIVE CONTROL over
+ *     the real files plus a hypothetical `pull_request_v2` workflow rather than trusting an empty
+ *     `toEqual([])`.
+ *   • the shape check narrowed back to round 3's literal (`/^pull_request_target$/`) →
+ *     **1 failed / 12 passed**, `expected [] to deeply equal [ 'future.yml: pull_request_v2' ]`. The
+ *     generalisation is load-bearing, not decoration: revert it and the case the blind-spot bullet is
+ *     about goes silent again.
+ *
+ * ROUND 5'S OWN RED-PROOFS, same filter, same 63 skipped — and this is also the CPE-1929 SABOTAGE PAIR
+ * for the new refusal, run rather than reasoned about. Disabling it is NOT green, so it is reachable
+ * and not shadowed by the block-scalar or anchor checks in front of it:
+ *   • the flow-depth refusal disabled (`if (false && inlineDepth !== 0)`) → **2 failed / 11 passed**:
+ *     `a multi-line flow \`on:\` was a confident \`false\` …` and `an unclassifiable \`on:\` is
+ *     \`null\` …`.
+ *   • the predicate made to lie in the specific way that looks equivalent — depth counted naively over
+ *     the RETURNED string (`inlineRest.match(/[[{]/g).length !== inlineRest.match(/[\]}]/g).length`)
+ *     instead of in `splitInlineComment`'s quote-aware loop → **1 failed / 12 passed**,
+ *     `a multi-line flow \`on:\` …`, on `on: ["a[b", pull_request]`. `rest` still carries its quotes,
+ *     so the naive count answers 1 and refuses a line the classifier reads correctly today — a fix
+ *     that buys a new false positive. Behaviour changes, so the guard is not shadowed on that leg
+ *     either.
+ *
+ * ROUND 6 — THE PROSE-COLLISION HAZARD IS GENERAL TO THE TEN RECIPES ABOVE, NOT A STORY ABOUT ONE OF
+ * THEM. Round 5 wrote it up as an anecdote about `prAts.every(filtered)`; that is the same mistake as
+ * "the ONE standing blind spot", and this repo's own lesson is that if you find yourself writing about
+ * THE instance, check first whether the hazard is general to the set. It is. ENUMERATED with the
+ * command below over revision `36601fa7` — the state in which round 5 called it a one-off — rather
+ * than recalled:
+ *   • FIVE of the ten have an anchor whose FIRST occurrence is PROSE, an entry in this very list:
+ *     `splitInlineComment`, `split.rest`, `prAts.every(filtered)`, `events.push(key[2])`,
+ *     `inlineDepth !== 0`. A scripted first-match `replace` of any of them patches documentation,
+ *     changes no behaviour, and reports a green run — the failure round 5 hit once, available five
+ *     times over.
+ *   • TWO ARE AMBIGUOUS RATHER THAN PROSE-SHADOWED, AND THE DIFF-IN-CODE ASSERTION DOES NOT SAVE
+ *     THESE — it is satisfied by patching the WRONG code site. `isComment(lines[i])` has two code
+ *     sites, the `on:`-finder and the block-body skip, told apart only by the ORDER of their two
+ *     operands; `split.rest` likewise has two, the `on:`-line rest and the block-body key, where
+ *     patching the first is a DIFFERENT sabotage that reds a different test — a plausible-looking
+ *     result that is not the one you asked for. For a two-site anchor, assert WHICH SITE MOVED.
+ *   • ONE (`/^pull_request_target$/`) has NO code site in this file at all; that recipe's target is
+ *     in `ciPollFailClosed.test.ts`, so a scripted patch of `ci-poll.mjs` touches only prose.
+ *   • TWO were clean at `36601fa7`: `PR_EVENTS = ` (unique) and the anchor/alias refusal's `/^[&*]/`.
+ * AND THIS PARAGRAPH BROKE ONE OF THOSE TWO — measured, not predicted. Run the command over the file
+ * you are reading and NINE of the ten are prose-first: `/^[&*]/` joined the five (the mention above
+ * precedes the refusal it names) and so did `isComment(lines[i])`, previously merely two-sited.
+ * Exactly ONE survives, `PR_EVENTS = `, and for no reason worth relying on — its declaration simply
+ * sits ABOVE this docblock, so a first-match `replace` reaches the code before the prose. Naming an
+ * anchor is itself an occurrence, and the command's own array contains every one of them. That is
+ * not a flaw in writing this down; it is the strongest available statement of the hazard: THERE IS
+ * NO VERSION OF THIS HEADER THAT DOCUMENTS THE TRAP WITHOUT SETTING IT. So "keep the list short" is
+ * not a remedy and neither is "grep and eyeball whether it looks like code" — only the diff-in-code
+ * assertion, plus the which-site check for the two-site anchors, survives contact with this file.
+ *   node -e 'const s=require("fs").readFileSync(process.argv[1],"utf8").split(/\r?\n/);
+ *     for(const a of ["PR_EVENTS = ","splitInlineComment","split.rest","prAts.every(filtered)",
+ *       "events.push(key[2])","inlineDepth !== 0","isComment(lines[i])","/^pull_request_target$/"]){
+ *       const p=[],c=[]; s.forEach((l,i)=>{if(l.includes(a))(/^\s*(\*|\/\*|\/\/)/.test(l)?p:c).push(i+1)});
+ *       console.log(a,"prose",p,"code",c); }' scripts/ci-poll.mjs
+ * and, for the `36601fa7` column, the same script over
+ * `git show 36601fa7:scripts/ci-poll.mjs` written to a scratch file. Both invocations were run.
+ *
+ * Same no-dependency line-scan discipline as `scanWorkflowJobs`; `scripts/` has no `node_modules`.
+ *
+ * @param {string} source
+ * @returns {OnBlock}
+ */
+export function readOnBlock(source) {
+  const lines = String(source ?? "").split(/\r?\n/);
+  const isBlank = (/** @type {string} */ l) => /^[\t ]*$/.test(l);
+  const isComment = (/** @type {string} */ l) => /^[\t ]*#/.test(l);
+  const indentOf = (/** @type {string} */ l) => (/^[\t ]*/.exec(l)?.[0] ?? "").replace(/\t/g, "        ").length;
+  /** @type {(why: string) => OnBlock} */
+  const unknown = (why) => ({ trigger: "unknown", prPathFiltered: false, events: [], why });
+  const isPrEvent = (/** @type {string} */ k) => PR_EVENTS.includes(k);
+  // `\b` will not do here: `\bpull_request\b` does NOT match inside `pull_request_target`, because `_`
+  // is a word character — which is half of why the exact-string comparison went unnoticed for a round.
+  const prEventRe = new RegExp(
+    `(^|[^A-Za-z0-9_-])(${[...PR_EVENTS].sort((a, b) => b.length - a.length).join("|")})([^A-Za-z0-9_-]|$)`,
+  );
+
+  /**
+   * Cut a YAML trailing comment off one line: a `#` that starts the line or follows whitespace AND is
+   * not inside a quoted scalar. The regex this replaces (`/(^|\s)#.*$/`) could not see the quoting and
+   * cut inside `["a #b", pull_request]`, deleting the trigger after it. Single quotes escape by
+   * doubling (`''`), which this loop handles as close-then-reopen — the parity is what matters here.
+   *
+   * ROUND 5 — it also returns `depth`, the net `[`/`{` nesting of `rest`, counted in THIS loop rather
+   * than by a second scan of the returned string, because `rest` still carries its quotes: on
+   * `["a[b", pull_request]` a naive count answers 1 and would refuse a line the classifier reads
+   * correctly today (measured — `pull-request` both before and after this change). Only the flow
+   * branch looks at it; a balanced line is `0`, which is every shape that already worked.
+   *
+   * @param {string} s
+   * @returns {{rest: string, unterminated: boolean, depth: number}}
+   */
+  const splitInlineComment = (s) => {
+    /** @type {string} */ let quote = "";
+    let depth = 0;
+    for (let i = 0; i < s.length; i += 1) {
+      const c = s[i];
+      if (quote === '"' && c === "\\") {
+        i += 1;
+        continue;
+      }
+      if (quote) {
+        if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        continue;
+      }
+      if (c === "[" || c === "{") depth += 1;
+      else if (c === "]" || c === "}") depth -= 1;
+      else if (c === "#" && (i === 0 || /\s/.test(s[i - 1])))
+        return { rest: s.slice(0, i).trim(), unterminated: false, depth };
+    }
+    return { rest: s.trim(), unterminated: quote !== "", depth };
+  };
+
+  let onAt = -1;
+  /** @type {string} */ let inlineRest = "";
+  let inlineDepth = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isComment(lines[i]) || isBlank(lines[i])) continue;
+    const m = /^(?:on|"on"|'on')\s*:(.*)$/.exec(lines[i]);
+    if (m) {
+      const split = splitInlineComment(m[1]);
+      if (split.unterminated) return unknown("unterminated quote on the `on:` line");
+      onAt = i;
+      inlineRest = split.rest;
+      inlineDepth = split.depth;
+      break;
+    }
+  }
+  if (onAt < 0) return unknown("no top-level `on:` key");
+
+  // Flow / scalar form — `on: [push, pull_request]`, `on: push`.
+  //
+  // `prPathFiltered: false` here is by OMISSION, not by construction, and round 2's comment said the
+  // opposite: `on: {pull_request: {paths: ['src/**']}}` is legal YAML and DOES carry a path filter,
+  // and this branch reports `false` for it (measured). The error is in the over-blocking direction —
+  // `false` means "not entitled to be silent", so such a workflow's absence is called unjudged rather
+  // than excused — so it is left as-is rather than given a flow-mapping parser. It is in the header's
+  // "cannot see" list because a safe wrong answer is still a wrong answer.
+  if (inlineRest) {
+    if (/[>|]\s*[-+]?$/.test(inlineRest)) return unknown("`on:` uses a block scalar");
+    // An anchor or alias (`on: &trig`, `on: *trig`) is not resolved. GitHub Actions rejects anchors, so
+    // this is unreachable in practice; round 2 nevertheless answered a confident `other` for it, which
+    // silently dropped the whole workflow. Fail closed instead.
+    if (/^[&*]/.test(inlineRest)) return unknown("`on:` uses a YAML anchor or alias, which is not resolved");
+    // ROUND 5 BLOCKER — A FLOW COLLECTION MAY SPAN LINES, AND THIS BRANCH ONLY EVER SEES THE FIRST ONE.
+    // The `on:` scanner above captures the remainder of the `on:` LINE, so on the entirely legal
+    //     on: [push,
+    //       pull_request]
+    // `inlineRest` was `[push,` — and BOTH `trigger` and `events` were computed from that alone.
+    // Measured before this refusal: `trigger=other`, `triggersPR=false`, `events=["push"]`, i.e. a
+    // confident `false` with the `pull_request` never seen. End to end with such a `security.yml`:
+    // `{"state":"ok", "unjudged":[], "judgedWorkflows":["ci.yml"], "silentWorkflows":[], "detail":
+    // "every job `main` requires from ci.yml produced a check here"}` — round 3's `pull_request_target`
+    // defect character for character, detail string included, with that workflow's whole guard set
+    // gone. `pull_request_v2` on the continuation line was equally invisible, so the `events` guard
+    // added in round 4 could not have caught it either.
+    // Refusing an unbalanced `inlineRest` turns the confident `false` into `unknown`, which
+    // `coverageOf` blocks on by name. All 8 real workflows here take the BLOCK branch and are
+    // untouched; every balanced one-line flow is `depth === 0` and reads exactly as before.
+    if (inlineDepth !== 0) return unknown("`on:` uses a flow collection that does not close on its own line");
+    // `events` here is a TOKEN SWEEP, not a parse: `on: ['a #b', pull_request]` yields `a`, `b`,
+    // `pull_request`, because this branch never separates a flow scalar from a key — and
+    // `on: {push: {paths: ['pull_request_v2/**']}}` yields `paths` and `pull_request_v2`, a token
+    // swept out of a path glob rather than any event. Stated rather than hidden, and it is the safe
+    // direction for the only consumer — the unknown-PR-event guard in `ciPollFailClosed.test.ts` asks
+    // whether any name here looks PR-scoped and is not in `PR_EVENTS`, so an extra token reds a
+    // workflow that is fine rather than passing one that is not.
+    //
+    // THAT IS THE OVER-REPORTING DIRECTION ONLY, AND THE SWEEP IS TWO-SIDED. Until the refusal above
+    // it also UNDER-reported, and under-reporting is the fail-open kind: the continuation line's
+    // `pull_request` simply was not in the string being swept. The refusal removes that input from
+    // this branch rather than making the sweep see it, so the one-sided sentence is now true of what
+    // actually reaches here — not of flow collections in general.
+    return {
+      trigger: prEventRe.test(inlineRest) ? "pull-request" : "other",
+      prPathFiltered: false,
+      events: inlineRest.match(/[A-Za-z_][A-Za-z0-9_-]*/g) ?? [],
+      why: "",
+    };
+  }
+
+  // Block form. Children are every line indented deeper than `on:` itself, comments and blanks skipped.
+  /** @type {number[]} */ const body = [];
+  for (let i = onAt + 1; i < lines.length; i += 1) {
+    if (isBlank(lines[i]) || isComment(lines[i])) continue;
+    if (indentOf(lines[i]) === 0) break;
+    body.push(i);
+  }
+  if (body.length === 0) return unknown("`on:` has no block content");
+  const childIndent = indentOf(lines[body[0]]);
+
+  // Every PR-scoped trigger, not just the first. `prPathFiltered` is an EXCUSE for silence, so it may
+  // only be true when EVERY one of them is filtered: a workflow with a path-filtered `pull_request:`
+  // and an unfiltered `pull_request_target:` still runs on every diff, and stopping at the first key
+  // would have excused its silence.
+  /** @type {number[]} */ const prAts = [];
+  /** @type {string[]} */ const events = [];
+  for (const i of body) {
+    if (indentOf(lines[i]) !== childIndent) continue;
+    const split = splitInlineComment(lines[i]);
+    if (split.unterminated) return unknown(`unterminated quote in the \`on:\` block: ${lines[i].trim()}`);
+    const key = /^(?:-[\t ]*)?(["']?)([A-Za-z_][A-Za-z0-9_-]*)\1[\t ]*(:.*)?$/.exec(split.rest);
+    if (!key) return unknown(`unrecognised line in the \`on:\` block: ${lines[i].trim()}`);
+    events.push(key[2]);
+    if (isPrEvent(key[2])) prAts.push(i);
+  }
+  if (prAts.length === 0) return { trigger: "other", prPathFiltered: false, events, why: "" };
+
+  const filtered = (/** @type {number} */ prAt) => {
+    for (const i of body) {
+      if (i <= prAt) continue;
+      if (indentOf(lines[i]) <= childIndent) break;
+      if (/^[\t ]*(["']?)paths(-ignore)?\1[\t ]*:/.test(lines[i])) return true;
+    }
+    return false;
+  };
+  return { trigger: "pull-request", prPathFiltered: prAts.every(filtered), events, why: "" };
+}
+
+/**
+ * Does this workflow run on `pull_request` at all? `null` = the `on:` block could not be classified,
+ * which the caller must fail closed on rather than read as "no".
+ *
+ * @param {string} source
+ * @returns {boolean|null}
+ */
+export function workflowTriggersPullRequest(source) {
+  const on = readOnBlock(source);
+  if (on.trigger === "unknown") return null;
+  return on.trigger === "pull-request";
+}
+
+/**
+ * Read `.github/workflows/*.yml` out of a GIT REVISION rather than off disk — by default
+ * `origin/main`, the branch the PR is going to be merged into.
+ *
+ * WHY NOT THE WORKING TREE, which `readWorkflowSources()` above already gives us for free. Because the
+ * working tree is exactly the stale copy this whole ticket is about. A Worker polls its own PR from its
+ * own worktree, and that worktree IS the PR branch: on PR #1056 it did not contain `ratchet-guard` at
+ * all, so a coverage check reading it would have computed a required-job set with no `ratchet-guard` in
+ * it, found nothing missing, and printed green — reproducing the defect from inside the guard built to
+ * catch it. The question is "what does **main** require of this PR", and only main can answer it.
+ *
+ * NO FETCH. A poll must not have side effects on the repo, and a `git fetch` inside a bounded-wall-clock
+ * tool is one more thing that can hang. The consequence is stated rather than hidden: a locally STALE
+ * `origin/main` under-reports (it cannot see a guard landed since the last fetch), so the verdict line
+ * prints the ref and its short SHA and the runbook says to `git fetch origin main` before the last poll.
+ * Being stale here fails OPEN, which is why it is printed on every single verdict rather than mentioned
+ * in a comment.
+ *
+ * `CI_POLL_BASE_WORKFLOWS` is a TEST SEAM and nothing else, exactly like `CI_POLL_GH_SCRIPT`: it names a
+ * directory of workflow files to read instead of asking git, so the subprocess tests can drive a base
+ * that is deliberately ahead of the stubbed rollup (the #1056 shape) without depending on this repo's
+ * live history.
+ *
+ * @param {string} [ref] git revision to read the workflows out of
+ * @returns {{ref: string, sha: string|null, files: {file: string, text: string}[]}|null} null = could
+ *          not read; the caller must fail closed on it, never treat it as "nothing to check"
+ */
+export function readBaseWorkflowSources(ref = "origin/main") {
+  const seam = process.env.CI_POLL_BASE_WORKFLOWS;
+  if (seam) {
+    try {
+      const files = readdirSync(seam)
+        .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
+        .map((f) => ({ file: f, text: readFileSync(join(seam, f), "utf8") }));
+      return { ref: `seam:${seam}`, sha: null, files };
+    } catch {
+      return null;
+    }
+  }
+  // Resolve the repo out of this file's own location so the answer does not depend on where the caller
+  // stood — with a `process.cwd()` fallback because a bundler (Vitest/Vite transforms this module when a
+  // unit test imports it) can hand back an `import.meta.url` that is not a `file:` URL, and
+  // `fileURLToPath` throws on those. Measured: without the fallback every in-process call returned null,
+  // i.e. "could not read `main`" — the fail-closed direction, but wrong, and it would have made the
+  // derivation leg of this feature's own test suite unrunnable.
+  const cwd = (() => {
+    try {
+      return fileURLToPath(new URL("..", import.meta.url));
+    } catch {
+      return process.cwd();
+    }
+  })();
+  const git = (/** @type {string[]} */ args) =>
+    execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: GH_MIN_CALL_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  /** @type {string} */ let listing;
+  /** @type {string|null} */ let sha = null;
+  try {
+    listing = git(["ls-tree", "--name-only", `${ref}:.github/workflows`]);
+  } catch {
+    return null;
+  }
+  try {
+    sha = git(["rev-parse", "--short", ref]).trim() || null;
+  } catch {
+    sha = null;
+  }
+  /** @type {{file: string, text: string}[]} */ const files = [];
+  for (const file of listing.split(/\r?\n/).filter((f) => /\.ya?ml$/.test(f))) {
+    try {
+      files.push({ file, text: git(["show", `${ref}:.github/workflows/${file}`]) });
+    } catch {
+      // One unreadable file out of many is still a partial answer; an EMPTY answer is what fails closed.
+    }
+  }
+  return { ref, sha, files };
+}
+
+/**
+ * The check-name matcher for one workflow job, on the same rule `explainableSkipMatchers` settled: a
+ * PREFIX only when the `name:` is templated by a matrix expression (GitHub keeps the literal text before
+ * the first `${{` and appends the matrix values), otherwise an EXACT match.
+ *
+ * @param {string} label
+ * @returns {{text: string, prefix: boolean}}
+ */
+function jobNameMatcher(label) {
+  const templated = String(label).includes("${{");
+  return { text: (templated ? String(label).split("${{")[0] : String(label)).trim(), prefix: templated };
+}
+
+/**
+ * @typedef {object} Coverage
+ * @property {"ok"|"unjudged"|"unknown"|"n/a"} state
+ * @property {{file: string, label: string}[]} unjudged  jobs `main` requires that produced NO check here
+ * @property {string[]} judgedWorkflows  PR-triggered workflow files that contributed at least one check
+ * @property {string[]} silentWorkflows  PR-triggered workflow files that contributed none AND whose own
+ *                                       `pull_request:` trigger carries a path filter, so they were
+ *                                       ALLOWED to stay silent — named on stdout, not flagged
+ * @property {string} detail  one human sentence, always printed
+ */
+
+/**
+ * ANSWER THE QUESTION THE MERGE PROCEDURE ACTUALLY ASKS: is there a job `main` requires that never
+ * appeared on this PR's board at all?
+ *
+ * THE PRECISION CHOICE, AND WHY IT IS THIS ONE (CPE-1970). Three candidate rules were on the table.
+ *
+ *   (a) "`main` moved at all since the PR's checks ran." Cheap, and useless here. Measured on this
+ *       repo (`git rev-list --count origin/main --since=2026-08-14T00:00:00Z
+ *       --until=2026-08-28T11:05:17Z`): 589 commits landed on `main` in the window, ~41/day. A PR that
+ *       sits in the queue for an hour almost always sees `main` move, so this rule fires on nearly
+ *       every merge and trains the crew to wave it through — a worse outcome than the bug.
+ *   (b) "The PR's newest check run FINISHED before a guard landed." This is the rule the ticket's own
+ *       evidence rules out. PR #1056's run finished at 18:35:13Z and it merged at 18:36:20Z — one
+ *       minute later. A recency check on finish time would have passed it. Worse, it is an inference:
+ *       it says the guard *probably* did not judge the PR.
+ *   (c) "A job `main` requires produced no check on this board." Definite, not inferential — the guard
+ *       is not on the board, so it cannot have judged anything. It needs no clock reasoning, and it is
+ *       the instrument the ticket independently arrived at. This is the one implemented here.
+ *
+ * WHAT IT MISSES, said plainly because a guard whose blind spot is undocumented reads as coverage.
+ *   · **A guard added INSIDE an existing job.** A new `src/lib/anything.test.ts` runs under the same
+ *     `Frontend — type-check and test` check; a new ratchet registered in `ratchet-baselines.mjs` runs
+ *     under the same `Ratchet guard` check; CPE-1936's `shellScriptLines` parser fix changed what every
+ *     workflow scan can see without touching a job name. The check IS on the board, so this verdict is
+ *     silent. That is the larger class by count and NO name-based instrument can see it — only
+ *     re-running the PR's checks against `main`'s head can, which is what branch protection's "require
+ *     branches to be up to date" buys and why `docs/design/CI-STALENESS.md` still asks for it.
+ *   · **A locally stale `origin/main`.** See `readBaseWorkflowSources` — under-reports, so the ref and
+ *     its SHA are printed on every verdict.
+ *   · **A workflow that contributed NOTHING** is excused ONLY when its own `pull_request:` trigger
+ *     carries a `paths:`/`paths-ignore:` filter, i.e. when GitHub was entitled not to run it on this
+ *     diff. ROUND 2 NARROWED THIS FROM A BLANKET CARVE-OUT, and the blanket version was justified by a
+ *     claim that is FALSE OF THIS REPO: `ci.yml`'s `paths-ignore` sits on its **`push:`** trigger only,
+ *     and neither PR-triggered workflow here (`ci.yml`, `gui-smoke.yml`) has any path filter on
+ *     `pull_request:` — `ci.yml` says so in its own words at `ci.yml:62-64`. So the blanket version
+ *     bought nothing and cost a WHOLE-GUARD-SET blind spot: a board with zero `ci.yml` checks returned
+ *     `ok`, exit 0, with every `ci.yml` guard absent (reproduced against the real `origin/main`).
+ *     Measured before narrowing it, over all 186 merges in the window via each PR's rollup grouped by
+ *     `checkSuite.workflowRun.workflow.name`: **0** boards were missing `CI` and **0** were missing
+ *     `GUI smoke`. The new rule therefore adds zero firings to the sweep below and closes the hole. The
+ *     excused (path-filtered) case is still real in general and still named on stdout, and the
+ *     `coverage=` token now says `ok(N-silent)` rather than a bare `ok`.
+ *   · **A job `main` deleted or renamed** looks the same as a job that did not run. Fail-closed
+ *     direction: it blocks, names itself, and is one line to read.
+ *
+ * THE NOISE, MEASURED RATHER THAN HOPED FOR — AND ROUND 1 MEASURED IT WITH THE WRONG INSTRUMENT.
+ * Swept over the 184 merged PRs (2026-08-14 → 2026-08-28) this rule could be evaluated on: **168 clean,
+ * 16 firings**. Round 1 called all 16 genuinely-new guards and claimed "zero deletion/rename noise" —
+ * but it tested whether the absent job still existed **by id**, while the matcher keys on the **label**.
+ * Wrong field, wrong conclusion. Re-classified by asking whether the absent job's id existed in that
+ * PR's OWN head tree (`gh api .../contents/.github/workflows/<file>?ref=<head>`): **15 genuinely new
+ * guards, 1 renamed by the PR being judged** — #921 (CPE-1753) kept the job id `gui-smoke-linux` and
+ * changed its `name:` from `GUI smoke (ubuntu-latest) — tauri-driver + WebdriverIO (CPE-1171)` to the
+ * templated `GUI smoke (ubuntu-latest) shard ${{ matrix.shard }} — …`; its board carried all four
+ * shards, the build job and the verdict, green. Nothing went unjudged there. True rename rate: **1 of
+ * 16 firings (6.3%), 1 of 184 merges (0.54%)** — the gate is right to block it (it cannot tell the two
+ * apart, and says so), but it is noise, not exposure. The argument for rule (c) over rule (a) is
+ * unchanged: (c) reds 9% of merges, (a) would have red essentially all 184. A gate that reds 9% is one
+ * people read; a gate that reds 95% is one they alias away.
+ *
+ * @param {string[]} checkNames every check name on the PR's rollup, verbatim
+ * @param {{file: string, text: string}[]|null} baseFiles workflow sources from `main`; null = could not
+ *        read, which is "did not run", not "found nothing"
+ * @returns {Coverage}
+ */
+export function coverageOf(checkNames, baseFiles) {
+  if (!Array.isArray(baseFiles) || baseFiles.length === 0) {
+    return {
+      state: "unknown",
+      unjudged: [],
+      judgedWorkflows: [],
+      silentWorkflows: [],
+      detail:
+        "could not read `main`'s workflow files, so the set of jobs that must judge this PR is unknown — " +
+        "this is 'did not run', not 'nothing to check'. Run the poll from inside the repo with an " +
+        "`origin/main` ref present (`git fetch origin main`).",
+    };
+  }
+  const names = (checkNames ?? []).map((n) => String(n));
+  /** @type {{file: string, label: string}[]} */ const unjudged = [];
+  /** @type {string[]} */ const judgedWorkflows = [];
+  /** @type {string[]} */ const silentWorkflows = [];
+  for (const { file, text } of baseFiles) {
+    const on = readOnBlock(text);
+    if (on.trigger === "unknown") {
+      // FAIL CLOSED, not quiet. A workflow whose `on:` we cannot classify might be the one carrying the
+      // guard, and returning "not PR-triggered" would drop its whole job set out of the required set
+      // with no trace — the exact fail-open round 2 found in `workflowTriggersPullRequest`.
+      return {
+        state: "unknown",
+        unjudged: [],
+        judgedWorkflows: [],
+        silentWorkflows: [],
+        detail:
+          `could not classify the \`on:\` block of ${file} (${on.why}), so whether its jobs must judge ` +
+          `this PR is unknown — 'did not run', not 'nothing to check'. Read that workflow's \`on:\` key.`,
+      };
+    }
+    if (on.trigger !== "pull-request") continue;
+    const jobs = scanWorkflowJobs(text);
+    if (jobs.size === 0) {
+      // Same reason: a PR-triggered workflow with no readable `jobs:` block is a required set we could
+      // not compute, and an empty required set is trivially satisfied by any board.
+      return {
+        state: "unknown",
+        unjudged: [],
+        judgedWorkflows: [],
+        silentWorkflows: [],
+        detail:
+          `${file} triggers on \`pull_request\` but no jobs could be read out of it, so the set of ` +
+          `guards it must contribute is unknown — 'did not run', not 'nothing to check'.`,
+      };
+    }
+    /** @type {{file: string, label: string}[]} */ const absent = [];
+    let present = 0;
+    for (const [id, job] of jobs) {
+      const m = jobNameMatcher(job.name ?? id);
+      if (!m.text) continue;
+      const hit = names.some((n) => (m.prefix ? n.startsWith(m.text) : n === m.text));
+      if (hit) present += 1;
+      else absent.push({ file, label: job.name ?? id });
+    }
+    // A workflow that contributed NO check at all is excused ONLY if EVERY one of its PR-scoped
+    // triggers (`PR_EVENTS`) carries a path filter — then GitHub was entitled not to run it on this
+    // diff. Without one there is no legitimate reason for its absence, so its jobs are exactly as
+    // unjudged as any other missing guard. See this function's header for why the blanket carve-out was
+    // wrong and what it measured.
+    // Red-proofed: restoring the blanket `if (present === 0)` reds exactly `a PR-triggered workflow
+    // with NO path filter that contributed nothing is UNJUDGED, not excused` — 1 failed / 4 passed /
+    // 70 skipped under `-t "narrow ON PURPOSE"`, re-measured in round 3 (round 2's `69 skipped` was
+    // taken when the file held 70 tests). ROUND 6: the file holds **76**, and that filter selects the
+    // same five tests — `5 of 76 / 71 skipped` (measured). Only the denominator moved.
+    if (present === 0 && on.prPathFiltered) silentWorkflows.push(file);
+    else {
+      if (present > 0) judgedWorkflows.push(file);
+      unjudged.push(...absent);
+    }
+  }
+  if (unjudged.length > 0) {
+    return {
+      state: "unjudged",
+      unjudged,
+      judgedWorkflows,
+      silentWorkflows,
+      detail:
+        `${unjudged.length} job(s) that \`main\` requires produced NO check on this board: ` +
+        `${unjudged.map((u) => `${u.label} (${u.file})`).join(", ")}. Those guards did not judge this ` +
+        `PR — its checks predate them. Rebase onto \`main\` and let CI re-run before merging.`,
+    };
+  }
+  return {
+    state: "ok",
+    unjudged,
+    judgedWorkflows,
+    silentWorkflows,
+    detail:
+      `every job \`main\` requires from ${judgedWorkflows.join(", ") || "(no workflow)"} produced a check here` +
+      (silentWorkflows.length > 0
+        ? `; ${silentWorkflows.join(", ")} contributed none and is path-filtered on every PR trigger it declares, so it was allowed to`
+        : ""),
+  };
+}
+
+/**
+ * The one token the `coverage=` field on the totals line carries. Always printed — including
+ * `n/a`, because "the coverage check did not run" must never look the same as "it ran and found
+ * nothing", which is the house rule this whole file is built around.
+ *
+ * `ok(N-silent)` is the same rule one notch finer: a clean board where N PR-triggered workflows
+ * legitimately contributed nothing is NOT the same fact as a clean board where every workflow reported,
+ * and a bare `ok` for both is the shape that let a whole missing workflow read as coverage.
+ *
+ * @param {Coverage|null|undefined} coverage
+ * @returns {string}
+ */
+export function formatCoverage(coverage) {
+  const c = coverage ?? { state: "unknown", unjudged: [], silentWorkflows: [], detail: "" };
+  if (c.state === "unjudged") return `coverage=${c.unjudged.length}-unjudged`;
+  if (c.state === "unknown") return "coverage=unknown";
+  if (c.state === "n/a") return `coverage=n/a${c.detail ? `(${c.detail})` : ""}`;
+  const silent = c.silentWorkflows?.length ?? 0;
+  return silent > 0 ? `coverage=ok(${silent}-silent)` : "coverage=ok";
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────────────────────────────
@@ -768,6 +1548,7 @@ export function readFromRunJson(json, nowMs = Date.now()) {
     totalCount: jobs.length,
     pending: pendingJobs.length,
     sha: json?.headSha ?? null,
+    checkNames: jobs.map((/** @type {any} */ j) => String(j?.name ?? "(unnamed job)")),
     skippedNames,
     failedNames,
     ranCount: jobs.filter(
@@ -846,6 +1627,7 @@ export function readFromPrJson(json, nowMs = Date.now()) {
     pending: pendingChecks.length,
     mergeable: json?.mergeable ?? null,
     sha: json?.headRefOid ?? null,
+    checkNames: rollup.map(nameOf),
     skippedNames,
     failedNames,
     ranCount: ran.length,
@@ -860,14 +1642,22 @@ export function readFromPrJson(json, nowMs = Date.now()) {
 /**
  * @param {CiRead|null} latest
  * @param {number} [ghFailures] total failed `gh` reads this invocation — appended, never inserted
+ * @param {Coverage|null} [coverage] CPE-1970 guard-coverage state — appended after `gh_failures`
  */
-function totalsOf(latest, ghFailures = 0) {
+function totalsOf(latest, ghFailures = 0, coverage = null) {
   // CPE-1906 round 2: `gh_failures` is APPENDED at the end, after `sha=`. The interface pin asserts the
   // presence and RELATIVE ORDER of the pre-existing keys, so a new key may only ever go on the end.
   // Why it exists: a poll could take one good read, then fail two more (below the bail threshold), hit
   // the deadline and print a plain `pending` verdict that said nothing at all about the failures —
   // "still pending" and "still pending, and I stopped being able to ask" are different situations.
-  const tail = ` gh_failures=${Number.isFinite(ghFailures) ? ghFailures : 0}`;
+  //
+  // CPE-1970 appends `coverage=` after it under the same rule. It is printed on EVERY verdict, including
+  // the ones where the check did not apply, because a coverage check that goes quiet when it could not
+  // run is indistinguishable from one that ran and found nothing — the exact defect family this file
+  // exists to close, and the reason `n/a` carries its own parenthesised reason.
+  const tail =
+    ` gh_failures=${Number.isFinite(ghFailures) ? ghFailures : 0}` +
+    ` ${formatCoverage(coverage ?? { state: "unknown", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "" })}`;
   if (!latest) {
     return (
       "total_count=n/a pending=n/a oldest_pending_min=n/a skipped=n/a neutral=n/a mergeable=n/a sha=unknown" + tail
@@ -915,12 +1705,25 @@ function totalsOf(latest, ghFailures = 0) {
  *   unclear      done, nothing failed, and no positive evidence of success. Not a pass. Exit 4 with a
  *                DIFFERENT prefix, because "I do not recognise this board" is not "a job did not run".
  *
+ * CPE-1970 inserted TWO rungs between `did-not-run` and `success`, and the placement is the argument:
+ *   stale-checks      every check that ran passed, but a job `main` requires produced no check at all,
+ *                     so a guard that exists on `main` never judged this PR. Below `failure` and
+ *                     `did-not-run` because those are more specific facts about the board and the
+ *                     caller's next move for them (read the logs / find out why nothing ran) outranks
+ *                     "rebase and re-run". Above `success` because it is emphatically not a pass.
+ *   coverage-unknown  the coverage check could not be computed. "Did not run" is not "found nothing";
+ *                     fail closed. Same exit code, different prefix, because the caller's move differs
+ *                     (rebase vs. fix your checkout).
+ * Both sit AFTER the `pending` rung on purpose: jobs enter a rollup in waves, so "absent" only means
+ * anything once `decideFromReads` has seen the board hold quiet across two reads.
+ *
  * @param {{done: boolean, reason: string}} decision
  * @param {CiRead|null} latest
  * @param {string[]} [unexplainedSkips]
- * @returns {{kind: "pending"|"failure"|"did-not-run"|"success"|"unclear", code: number, why: string}}
+ * @param {Coverage|null} [coverage]
+ * @returns {{kind: "pending"|"failure"|"did-not-run"|"stale-checks"|"coverage-unknown"|"success"|"unclear", code: number, why: string}}
  */
-export function verdictClass(decision, latest, unexplainedSkips = []) {
+export function verdictClass(decision, latest, unexplainedSkips = [], coverage = null) {
   if (!decision?.done) return { kind: "pending", code: 2, why: "the budget ran out before CI finished" };
   const failed = latest?.failedNames ?? [];
   if (failed.length > 0) return { kind: "failure", code: 1, why: "a check reported a hard failure" };
@@ -935,6 +1738,41 @@ export function verdictClass(decision, latest, unexplainedSkips = []) {
   }
   if (typeof latest?.ranCount === "number" && latest.ranCount === 0) {
     return { kind: "did-not-run", code: 4, why: "every check that finished was SKIPPED — nothing ran" };
+  }
+  // CPE-1929's two green sabotages, run by hand on 2026-08-28 because a new refusal is exactly where a
+  // shadowed guard hides, and the numbers belong here rather than in a PR body. Suite:
+  // `src/lib/ciPollFailClosed.test.ts`. Round 1, at 63 tests:
+  //   · disable the rung (`if (false && …)`)             → 3 failed / 60 passed
+  //   · force the predicate to lie (`coverageOf` always returning `ok`) → 7 failed / 56 passed
+  // RE-RUN in round 2, at 70 tests, because the round-2 fixes changed both this rung's inputs and the
+  // suite around it — a sabotage number carried forward unchanged is the same stale-evidence defect
+  // this PR is about:
+  //   · disable the rung                                 → 3 failed / 67 passed
+  //   · force `coverageOf` to always answer `ok`         → 11 failed / 59 passed
+  // RE-RUN AGAIN in round 3, at 75 tests, for the same reason — round 3 widened what `coverageOf`
+  // classifies as PR-triggered, which is one of this rung's inputs:
+  //   · disable the rung                                 → 3 failed / 72 passed
+  //   · force `coverageOf` to always answer `ok`         → 12 failed / 63 passed
+  // RE-RUN AGAIN in round 6, at 76 tests, AND THE ARITHMETIC ANSWER WOULD HAVE BEEN WRONG — which is
+  // why they are re-run rather than adjusted. Round 5 added one `it`, so "12 failed / 64 passed" is the
+  // obvious carry-forward; measured, it is:
+  //   · disable the rung                                 → 3 failed / 73 passed
+  //   · force `coverageOf` to always answer `ok`         → 13 failed / 63 passed
+  // The new test (`a multi-line flow \`on:\` was a confident \`false\` …`) lands in the SECOND set, not
+  // the passed column: it drives a `security.yml` through `coverageOf`, so forcing `ok` reds it too.
+  // Both red. The 3 are a STRICT SUBSET of the 13 (`REFUSES the #1056 board`, `names the guard that did
+  // not judge it`, `counts the gap on the machine-readable totals line`), which is the shape that says
+  // the rung is reached rather than shadowed: sabotaging only the rung still reds, so no earlier check
+  // in the ladder is answering this question first.
+  if (coverage?.state === "unjudged") {
+    return {
+      kind: "stale-checks",
+      code: 5,
+      why: `${coverage.unjudged.length} job(s) \`main\` requires produced no check on this board`,
+    };
+  }
+  if (coverage?.state === "unknown") {
+    return { kind: "coverage-unknown", code: 5, why: "the guard-coverage check could not be computed" };
   }
   if (latest?.conclusion === "success" || latest?.conclusion === "skipped") {
     return { kind: "success", code: 0, why: "every check that ran concluded success" };
@@ -954,17 +1792,26 @@ export function verdictClass(decision, latest, unexplainedSkips = []) {
  * @param {{done: boolean, reason: string}} decision
  * @param {CiRead|null} latest
  * @param {{ticks: number, elapsedMs: number, target: string}} run
- * @param {{unexplainedSkips?: string[], explainedSkips?: string[], ghFailures?: number}} [skips]
+ * @param {{unexplainedSkips?: string[], explainedSkips?: string[], ghFailures?: number, coverage?: Coverage|null, baseRef?: string|null}} [skips]
  * @returns {string}
  */
 export function formatVerdict(decision, latest, run, skips = {}) {
-  const totals = totalsOf(latest, skips.ghFailures ?? 0);
+  const coverage = skips.coverage ?? null;
+  const totals = totalsOf(latest, skips.ghFailures ?? 0, coverage);
   const timing = `after ${run.ticks} tick(s) / ${Math.round(run.elapsedMs / 1000)}s`;
   const unexplained = skips.unexplainedSkips ?? [];
   const explained = skips.explainedSkips ?? [];
   const byDesign = explained.length > 0 ? ` Skipped by design: ${explained.join(", ")}.` : "";
+  // CPE-1970 round 2: appended to EVERY branch below, not just `stale-checks` and `success`. The doc
+  // claimed "the ref and its short SHA are printed on every verdict line" while two branches printed it
+  // — a claim about output that the output did not make. `src/lib/ciPollFailClosed.test.ts` now pins it
+  // across the whole stub matrix rather than on the two lines someone remembered. Red-proofed: dropping
+  // `${against}` from the `failure` branch alone reds that test, naming `failure-and-skips` and printing
+  // the offending line. It is appended wherever the guard set was actually READ — `--run` mode and a
+  // still-pending board never read it, and both say so with `coverage=n/a(…)`.
+  const against = skips.baseRef ? ` Guard set read from ${skips.baseRef}.` : "";
   // ONE predicate, shared with main()'s exit code. Never re-derive "is this red" here.
-  const klass = verdictClass(decision, latest, unexplained);
+  const klass = verdictClass(decision, latest, unexplained, coverage);
   if (klass.kind === "failure") {
     const failed = latest?.failedNames ?? [];
     const detail =
@@ -972,7 +1819,7 @@ export function formatVerdict(decision, latest, run, skips = {}) {
         ? `Failed: ${failed.join(", ")}.`
         : `No individual check reported a failure, but the run-level conclusion is \`failure\` — ` +
           `treat it as red and read the run's own log.`;
-    return `CI VERDICT: completed failure — ${totals} ${timing} — ${decision.reason}. ${detail} Do not merge.`;
+    return `CI VERDICT: completed failure — ${totals} ${timing} — ${decision.reason}. ${detail} Do not merge.${against}`;
   }
   if (klass.kind === "did-not-run") {
     const detail =
@@ -982,17 +1829,31 @@ export function formatVerdict(decision, latest, run, skips = {}) {
         : `${klass.why} — so nothing here verified this commit.${byDesign}`;
     return (
       `CI VERDICT: completed did-not-run — ${totals} ${timing} — ${decision.reason}. ${detail} ` +
-      `This is neither red nor green. Do not merge; find out why they did not run.`
+      `This is neither red nor green. Do not merge; find out why they did not run.${against}`
+    );
+  }
+  if (klass.kind === "stale-checks") {
+    return (
+      `CI VERDICT: completed stale-checks — ${totals} ${timing} — ${decision.reason}. ` +
+      `Nothing on this board is red, and that is the problem: ${coverage?.detail ?? klass.why}` +
+      `${against} This PR's checks CANNOT have judged those guards. Do not merge on this board.`
+    );
+  }
+  if (klass.kind === "coverage-unknown") {
+    return (
+      `CI VERDICT: completed coverage-unknown — ${totals} ${timing} — ${decision.reason}. ` +
+      `Nothing failed, but ${coverage?.detail ?? klass.why} — so this poll cannot say whether ` +
+      `\`main\`'s guards judged this PR. That is "did not run", not "nothing to check". Do not merge.${against}`
     );
   }
   if (klass.kind === "unclear") {
     return (
       `CI VERDICT: completed unclear — ${totals} ${timing} — ${decision.reason}. ${klass.why} — a shape ` +
-      `this poll has never seen, so it is NOT a pass. Do not merge; read the board by hand.${byDesign}`
+      `this poll has never seen, so it is NOT a pass. Do not merge; read the board by hand.${byDesign}${against}`
     );
   }
   if (klass.kind === "success") {
-    return `CI VERDICT: completed success — ${totals} ${timing} — ${decision.reason}.${byDesign}`;
+    return `CI VERDICT: completed success — ${totals} ${timing} — ${decision.reason}.${byDesign}${against}`;
   }
   const sha = latest?.sha ?? "unknown";
   const age =
@@ -1003,7 +1864,7 @@ export function formatVerdict(decision, latest, run, skips = {}) {
       : "";
   return (
     `CI VERDICT: pending — ${totals} ${timing} — ${decision.reason}. ` +
-    `CI still pending on ${sha} — re-invoke this poll or hand CI to the Foreman.${age}`
+    `CI still pending on ${sha} — re-invoke this poll or hand CI to the Foreman.${age}${against}`
   );
 }
 
@@ -1264,18 +2125,48 @@ async function main() {
   const matchers = sources.length === 0 ? null : explainableSkipMatchers(sources);
   const { explained, unexplained } = classifySkips(latest?.skippedNames ?? [], matchers);
 
+  // CPE-1970 — guard coverage. Three reasons it may not apply, and each one is PRINTED rather than
+  // implied, because a check that goes quiet reads as a check that passed:
+  //   · `--run` mode polls ONE workflow run, whose job list cannot answer "did every job main requires
+  //     across ALL workflows appear". Out of scope, not a pass.
+  //   · a board that is still pending has jobs yet to be scheduled, so "absent" means nothing yet.
+  //   · a `gh` that never answered leaves no check names to compare (handled above by the exit-3 path).
+  /** @type {Coverage} */
+  let coverage;
+  /** @type {string|null} */ let baseRef = null;
+  if (opts.mode !== "pr") {
+    coverage = { state: "n/a", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "run-mode" };
+  } else if (!decision.done) {
+    coverage = { state: "n/a", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "board-pending" };
+  } else {
+    const base = readBaseWorkflowSources();
+    baseRef = base ? `${base.ref}${base.sha ? `@${base.sha}` : ""}` : null;
+    coverage = coverageOf(latest?.checkNames ?? [], base?.files ?? null);
+    if (coverage.silentWorkflows.length > 0) {
+      console.log(
+        stamp(
+          `ci-poll: coverage — ${coverage.silentWorkflows.join(", ")} contributed no check to this ` +
+            `board and is path-filtered on every PR trigger it declares, so GitHub was entitled not to run it; ` +
+            `not treated as missing`,
+        ),
+      );
+    }
+  }
+
   console.log(
     formatVerdict(decision, latest, run, {
       explainedSkips: explained,
       unexplainedSkips: unexplained,
       ghFailures: totalFailures,
+      coverage,
+      baseRef,
     }),
   );
 
   // ONE predicate for the line above and the code below — see `verdictClass`. There used to be two, and
   // they disagreed: a board of nothing but by-design skips printed `completed skipped` and exited 1
   // ("at least one check FAILED") with zero failures.
-  process.exit(verdictClass(decision, latest, unexplained).code);
+  process.exit(verdictClass(decision, latest, unexplained, coverage).code);
 }
 
 // Only run the poll when this file is the process entry point — importing it (as the unit tests do)

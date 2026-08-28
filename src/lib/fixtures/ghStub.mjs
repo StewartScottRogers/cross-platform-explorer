@@ -186,6 +186,19 @@ switch (mode) {
     }
     break;
   }
+  // ── CPE-1970: the #1056 shape — a board on which nothing is red and a guard is simply not present ──
+  case "guard-gap": {
+    // Every check green. That is the whole difficulty: this board is indistinguishable from a healthy
+    // one by any predicate that looks only at what IS on it. #1056 merged on exactly this — 22 checks,
+    // zero failures, the last one finished 67 seconds before the merge — and `ratchet-guard`, which had
+    // landed on `main` 53 minutes earlier, was not among them.
+    //
+    // The SAME payload is driven against two base-workflow fixtures (`workflows-base` and
+    // `workflows-base-ahead`) and must come out green against one and exit 5 against the other. Holding
+    // the board fixed and moving only `main` is what makes that a both-directions proof.
+    process.stdout.write(JSON.stringify(prPayload([ok("Frontend — type-check and test")])));
+    break;
+  }
   case "failure-and-skips": {
     // A red build that also cascaded. Failure outranks skips: the caller's next move is the logs.
     process.stdout.write(

@@ -1,0 +1,23 @@
+# CPE-1970 test fixture — "what `main` requires" as it stood BEFORE the new guard landed.
+#
+# Paired with `../workflows-base-ahead/`, which is this file plus one job. The two dirs are the same
+# board seen from two `main`s, which is what makes the red-proof a real both-directions proof rather
+# than one assertion and a hope: the stubbed PR rollup does not change between them, only `main` does.
+#
+# Deliberately ONE PR-triggered job whose name matches what every `ghStub.mjs` mode puts on its board,
+# so the pre-existing CPE-1906 subprocess tests keep measuring what they were written to measure
+# instead of all turning into coverage tests.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    name: Frontend — type-check and test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"

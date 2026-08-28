@@ -202,8 +202,13 @@ establishing CI outcomes, the Foreman must actually pick them up:
   supervisor. Sweep the open PRs at 45 s apiece, dispatch in between, and come back round. Re-check the
   current head by **SHA**, not PR number alone: a stale PR-number check can pass against a superseded
   head, and `--watch` exits 0 when the branch moves under it rather than only when checks pass.
-- **Read the exit code, not just the line (CPE-1906).** `ci-poll.mjs` has five outcomes and only one of
-  them means merge:
+- **`git fetch origin main` before the poll you intend to merge on (CPE-1970).** The staleness verdict
+  below compares the PR's board against the job set on **`origin/main` as your clone last saw it**. The
+  poll deliberately does not fetch — a merge gate must not have side effects or one more thing that can
+  hang — so a clone that has not fetched since the guard landed reports `coverage=ok` on exactly the
+  board it exists to refuse. One `git fetch origin main` at the top of each sweep is the whole cost.
+- **Read the exit code, not just the line (CPE-1906, CPE-1970).** `ci-poll.mjs` has six outcomes and
+  only one of them means merge:
   `0` green · `1` a check FAILED · `2` still pending — the normal outcome, re-invoke or come back round ·
   **`3` COULD NOT ASK** — `gh` errored, hung, returned garbage, **or answered 200 with JSON that is not
   a board** (a REST `{"message":"Not Found"}`, a GraphQL partial with a null `statusCheckRollup`).
@@ -214,12 +219,29 @@ establishing CI outcomes, the Foreman must actually pick them up:
   `needs: lockfile-preflight`, so a preflight failure skips the entire Rust suite; before CPE-1906 that
   reported as `completed success`. Exit 4 also covers a board where **nothing ran at all** (every
   finished check was a by-design skip) and one that finished in a shape the poll cannot call. Not red,
-  not green — do not merge; find out why.
+  not green — do not merge; find out why. ·
+  **`5` THE CHECKS ARE STALE** — nothing on the board is red, and that is the problem: a job `main`
+  already requires produced **no check at all** on this PR, so a guard that exists on `main` never
+  judged it. `main` has no branch protection (`branches/main/protection` → 404, `rulesets` → `[]`), so
+  nothing else stops this. Measured over the 186 PRs merged 2026-08-14 → 2026-08-28: **15 merged this
+  way** — `ratchet-guard` ×5 (including #1056, the merge that found it), `ci-verdict` ×5,
+  `lockfile-preflight` ×2, `msrv` ×2, `ffmpeg-pin-guard` ×1. (A sixteenth board, #921, also tripped the
+  rule, but that PR had renamed the job itself — the one measured false positive, 0.54% of merges.)
+  The fix is a rebase
+  onto `main` and a re-run, not an `--admin` merge. Exit 5 also covers `completed coverage-unknown` —
+  the poll could not read `main`'s workflows, which is "did not run", not "nothing to check".
   **The prefix and the code agree, one-to-one** — `completed success`→0, `completed failure`→1,
-  `pending`→2, `unknown`→3, `completed did-not-run` / `completed unclear`→4. Grep either; they cannot
+  `pending`→2, `unknown`→3, `completed did-not-run` / `completed unclear`→4,
+  `completed stale-checks` / `completed coverage-unknown`→5. Grep either; they cannot
   disagree, which they used to: a board of nothing but by-design skips printed `completed skipped` and
   exited **1** ("a check FAILED") with zero failures, and `completed skipped` was simultaneously the
   exit-4 prefix.
+  Every verdict line — including the green ones — now carries **`coverage=`**: `ok`, `ok(N-silent)`,
+  `N-unjudged`, `unknown`, or `n/a(<reason>)`. It is printed even where the check did not apply, because a coverage
+  check that goes quiet is indistinguishable from one that ran and found nothing. What it does **not**
+  see: a guard added *inside* an existing job (a new `.test.ts` under the same `Frontend` check, a new
+  ratchet under the same `Ratchet guard` check). Only branch protection's *require branches to be up to
+  date* closes that — see [docs/design/CI-STALENESS.md](../../docs/design/CI-STALENESS.md).
   A `pending` line also carries **`gh_failures=N`** — reads that failed without reaching the bail
   threshold. `pending` with a non-zero count there means the board is stale as well as unfinished.
   The pending line also now carries **`oldest_pending_min`** and the name of the longest-running
