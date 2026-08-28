@@ -1351,7 +1351,16 @@ mod tests {
     ///
     /// Red-proof, run by hand: emptying the `create_dirs` loop in `apply_backup_plan_walk` (the
     /// pre-CPE-1925 behaviour) fails this test on the first `assert!` with the directory missing on
-    /// disk — measured, not assumed.
+    /// disk — measured, not assumed. **It reds FOUR tests, not three** (round-1's note undercounted):
+    /// this one, `a_restore_run_reproduces_the_directory_structure_not_just_the_files`,
+    /// `a_directory_entry_that_cannot_be_created_is_reported_per_entry`, and
+    /// `a_directory_entry_cannot_be_redirected_out_of_the_destination_by_a_planted_link` — the last on
+    /// its `results.len()` assertion, not on its harm assertion.
+    ///
+    /// The one test that survived that sabotage **vacuously** was
+    /// `a_directory_entry_naming_the_root_or_walking_up_is_refused_by_the_textual_filter`, whose
+    /// `results.iter().all(|r| !r.ok)` is trivially true over an empty vec. It now asserts its length
+    /// first; see the note there.
     #[test]
     fn apply_backup_plan_creates_the_planned_empty_directories_on_disk() {
         let d = scratch("createdirs");
@@ -1535,6 +1544,12 @@ mod tests {
     /// The cheap textual filter still refuses the obvious spellings, and — as [`safe_join`]'s own doc
     /// insists — it is a filter, not the guarantee. Kept separate from the test above precisely so
     /// that neither is mistaken for the other's coverage.
+    ///
+    /// **The length assertion comes first, and it is load-bearing.** `all(|r| !r.ok)` is `true` over an
+    /// empty vec, so without it this test passes **vacuously** the moment nothing runs at all — which
+    /// is precisely what the round-1 sabotage (emptying the `create_dirs` loop) produces. It was the
+    /// one test in this file that stayed green under a sabotage that removed the entire feature, and it
+    /// stayed green for a reason that had nothing to do with the refusal it claims to cover.
     #[test]
     fn a_directory_entry_naming_the_root_or_walking_up_is_refused_by_the_textual_filter() {
         let d = scratch("createdirs-textual");
@@ -1554,6 +1569,7 @@ mod tests {
         )
         .expect("the run as a whole still succeeds");
 
+        assert_eq!(results.len(), 2, "both entries must have been ATTEMPTED — `all(!ok)` is true over an empty vec, so this assertion is what stops the test passing vacuously: {results:?}");
         assert!(results.iter().all(|r| !r.ok), "both spellings must be refused: {results:?}");
         assert!(!d.join("outside").exists(), "nothing may be created outside the destination root");
         let _ = fs::remove_dir_all(&d);

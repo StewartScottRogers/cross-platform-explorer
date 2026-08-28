@@ -33,9 +33,14 @@ export interface BackupPlan {
   /**
    * Source directories this plan **deliberately does not carry**, each with the reason (CPE-1925).
    *
-   * The scan reports a directory as childless for three different reasons and only one of them means
-   * "empty": `read_dir` failed on it, or the scan's depth cap stopped at it, or there is genuinely
-   * nothing inside. Creating an empty directory in the destination for either of the first two would
+   * The scan reports a directory's children short for seven different reasons and only one of them
+   * means "empty" — the table lives on `TreeNode` in `crates/server/src/compare.rs`, which is the code
+   * that decides them. Reduced to what this consumer must act on: the scan could not read all of it
+   * (`unreadable`), or the depth cap stopped at it (`depth-limit`), or the list is complete. Note the
+   * first of those does **not** imply the children list is empty — a partial listing sets it too, and
+   * a partial listing is the dangerous one, because the files that are missing from it diff as
+   * "removed" and a mirror run would delete the destination's only copy. Creating an empty directory
+   * in the destination for either of the two unknowns would
    * be **asserting a fact the scan never established** — a directory whose contents could not be read
    * would arrive at the destination looking deliberately empty. So those are excluded from
    * `createDirs` and named here instead, for the preview and the run summary to show. Silence is the
@@ -91,19 +96,24 @@ function walk(nodes: DiffNode[], prefix: string, mirror: boolean, plan: BackupPl
       //  1. It gets no `createDirs` entry. The directory itself is real, but a directory placed in the
       //     destination *looking deliberately empty* asserts something this scan never established,
       //     and a restored tree carrying that lie is worse than one visibly missing the folder.
-      //  2. Nothing under it may be mirror-deleted. Its children came back as an empty list, so every
-      //     file the DESTINATION holds under that path diffs as "removed", and a mirror run would
-      //     delete the very copies it exists to protect because one directory could not be read.
-      //     Passing `mirror = false` down makes that impossible; the deletes it suppresses are exactly
-      //     the ones derived from an unknown, and a later run that CAN read the directory will still
-      //     remove anything genuinely extraneous.
+      //  2. Nothing under it may be mirror-deleted. Its children list is short — often empty, and in
+      //     the partial case (`scan_children` case 5, an entry that failed to read among others that
+      //     did not) short in a way that looks entirely ordinary. Every file the DESTINATION holds
+      //     under that path but the scan did not list diffs as "removed", and a mirror run would delete
+      //     the very copies it exists to protect because one directory could not be fully read. Passing
+      //     `mirror = false` down makes that impossible; the deletes it suppresses are exactly the ones
+      //     derived from an unknown, and a later run that CAN read the directory will still remove
+      //     anything genuinely extraneous.
       //
       // Either way the directory is named in `skippedDirs` rather than passed over in silence.
       const unknown = n.unreadable ? "unreadable" : n.truncated ? "depth-limit" : null;
       if (unknown) {
         plan.skippedDirs.push({ path, reason: unknown });
-        walk(n.children ?? [], path, false, plan);
-        if (inDest) materialised = true;
+        // The children that WERE listed are still classified — a partial listing's known files are
+        // copied like any others; it is only the deletes derived from the unlisted ones that are
+        // unsafe. And if one of them creates this directory on its way in, that counts: `walk` runs
+        // first either way (it has the side effects), so the `||` never skips it.
+        if (walk(n.children ?? [], path, false, plan) || inDest) materialised = true;
         continue;
       }
 

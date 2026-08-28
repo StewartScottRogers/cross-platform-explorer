@@ -90,9 +90,11 @@ describe("planBackup carries empty directories (CPE-1925)", () => {
 });
 
 describe("planBackup tells an empty directory from an unseen one (CPE-1925)", () => {
-  // `scan_tree` reports a childless directory for three different reasons and only one of them means
-  // "empty". Creating a directory in the destination because the source one LOOKED childless would be
-  // asserting something the scan never established.
+  // `scan_tree` reports a directory's children short for SEVEN different reasons and only one of them
+  // means "empty" — the enumeration lives on `TreeNode` in `crates/server/src/compare.rs`. Creating a
+  // directory in the destination because the source one LOOKED childless would be asserting something
+  // the scan never established. Note `unreadable` does not imply the children list is EMPTY: case 5 (an
+  // entry that failed to read among others that did not) sets it on a PARTIAL list, covered below.
   const unreadable = (name: string, children: CompareNode[] = []): CompareNode => ({ name, isDir: true, children, unreadable: true });
   const truncated = (name: string, children: CompareNode[] = []): CompareNode => ({ name, isDir: true, children, truncated: true });
 
@@ -126,6 +128,51 @@ describe("planBackup tells an empty directory from an unseen one (CPE-1925)", ()
     const withoutAccess = planBackup([unreadable("locked")], dest, true);
     expect(withoutAccess.delete).toEqual([]); // unknown, so untouched
     expect(withoutAccess.skippedDirs).toEqual([{ path: "locked", reason: "unreadable" }]);
+  });
+
+  // CPE-1925 round 2, case 5 — the PARTIAL listing, and the worst-behaved of the seven because it is
+  // the only one whose `children` is non-empty. `read_dir` succeeded, some entries were read and some
+  // errored, and the result looks like an entirely ordinary directory that happens to hold two files.
+  // The files that never made the list diff as "removed from the source", which in a mirror run means
+  // *delete the backup's only copy of them*.
+  //
+  // There is no portable filesystem fixture for it — you cannot make `readdir` fail an entry on demand
+  // — so it is pinned HERE, at the layer where the damage would happen, on the exact node shape
+  // `scan_children` emits for it. The Rust side covers the flag-setting arm via case 4, which shares
+  // the same three lines of code.
+  //
+  // Red-proof, run: putting the round-1 line back (`walk(...); if (inDest) materialised = true;`, which
+  // discards whether a copy under the partial directory materialises it) reds the third test below with
+  // `expected [ 'outer' ] to deeply equal []` — a `createDirs` entry for a folder a real file copy was
+  // already going to create. It was the only red of the 28.
+  describe("a PARTIAL listing (case 5) is treated as unknown, not as the whole truth", () => {
+    const partly = (name: string, children: CompareNode[]): CompareNode =>
+      ({ name, isDir: true, children, unreadable: true });
+
+    it("copies the files it did see", () => {
+      const plan = planBackup([partly("half", [f("seen.txt", 1, 1)])], []);
+      expect(plan.copy).toEqual(["half/seen.txt"]);
+    });
+
+    it("does NOT delete the destination's copies of the files it did not see", () => {
+      const dest = [d("half", [f("seen.txt", 1, 1), f("unseen.txt", 9, 9)])];
+      const source = [partly("half", [f("seen.txt", 1, 1)])];
+      const plan = planBackup(source, dest, true);
+      expect(plan.delete).toEqual([]); // `half/unseen.txt` is unknown, not gone
+      expect(plan.skippedDirs).toEqual([{ path: "half", reason: "unreadable" }]);
+      // The control: with a listing the scan CAN vouch for, the same shape does delete it.
+      expect(planBackup([d("half", [f("seen.txt", 1, 1)])], dest, true).delete).toEqual(["half/unseen.txt"]);
+    });
+
+    it("does not create the directory in its own right, even though a copy below it will", () => {
+      // `half` reaches the destination as a side effect of copying `half/seen.txt` — which is honest,
+      // because that is a real file. What it must not get is a `createDirs` entry asserting the folder
+      // is deliberately as the scan found it. And the enclosing folder must not be double-listed.
+      const plan = planBackup([d("outer", [partly("half", [f("seen.txt", 1, 1)])])], []);
+      expect(plan.createDirs).toEqual([]);
+      expect(plan.copy).toEqual(["outer/half/seen.txt"]);
+      expect(plan.skippedDirs).toEqual([{ path: "outer/half", reason: "unreadable" }]);
+    });
   });
 });
 

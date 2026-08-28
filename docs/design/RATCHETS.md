@@ -110,7 +110,7 @@ already makes for `sectionDocs.test.ts` and `keymap.test.ts`.
 | `invoke-optout-allowlist` | `src/lib/invoke.guard.test.ts` | modules bypassing the busy-cursor `invoke` wrapper | 0 |
 | `mojibake-allowlist` | `src/lib/mojibakeGuard.test.ts` | lines allowed to look like mojibake (CPE-1723) | 5 |
 | `pwsh-encoding-allowed-lines` | `src/lib/workflowPwshFileEncoding.test.ts` | workflow pwsh writes with no explicit encoding (CPE-1842) | 1 |
-| `bidi-render-registry` | `src/lib/bidiEscape.guard.test.ts` | component render sites showing a raw filesystem name (CPE-1757/1885) | 1553 |
+| `bidi-render-registry` | `src/lib/bidiEscape.guard.test.ts` | component render sites showing a raw filesystem name (CPE-1757/1885) | 1555 |
 | `bidi-app-markup-offenders` | `src/lib/bidiEscape.guard.test.ts` | the same, in `App.svelte`'s markup | 31 |
 | `bidi-app-script-basename-allowlist` | `src/lib/bidiEscape.guard.test.ts` | `App.svelte` `<script>` `baseName()` calls skipping `displaySafeName` | 2 |
 | `manual-test-mvd` | `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` | still-manual verification surfaces (MVD) | 14 — **enumerated, not gated** |
@@ -187,14 +187,14 @@ A row here is what makes a raise legal. Two conditions, both required:
 `from` is an integer, or `new` when the baseline has no value at the base revision at all (a
 brand-new guard, or a rename git could not follow).
 
-**Why this table is still empty when the recount above records a `1552 → 1553` movement.** A row
+**Why this table carries no row for the `1552 → 1553` movement the recount above records.** A row
 here is a **licence**, not a history entry. The two conditions directly above make a row meaningful
 only inside the diff that performs the raise, and rows are counted against the base revision rather
 than looked up — so a row added after the fact satisfies neither condition: it licenses a movement
 that has already merged and can therefore never be consumed, and it would be the only row on the page
-that is false by the page's own definition of a row. It would also cost the reading that makes an
-empty ledger worth anything — *no raise got past the guard* — because once rows can appear
-retroactively, their absence stops meaning that.
+that is false by the page's own definition of a row. It would also cost the reading that makes this
+ledger worth anything — *every row here licensed a raise from inside the diff that made it* — because
+once rows can appear retroactively, a row stops meaning that.
 
 The `bidi-render-registry` movement is not unrecorded; it is recorded where it belongs, in the recount
 above. PR #1056 (CPE-1928) added a real render site and never declared it, because `ratchet-guard`
