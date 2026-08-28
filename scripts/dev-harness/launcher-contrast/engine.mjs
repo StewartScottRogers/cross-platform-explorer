@@ -54,12 +54,44 @@
 // blanket opacity at all: see its comment in launcher.html.
 //
 // ── Validation, per CPE-1933 rule 3 ──────────────────────────────────────────────────────────────
-// `validateAnchors()` runs BEFORE any measurement and refuses to continue unless this file's own WCAG
+// `validateAnchors()` runs BEFORE any measurement and refuses to continue unless the WCAG
 // implementation reproduces the three standard anchors — #000/#fff = 21.00, #767676/#fff = 4.54,
 // #949494/#fff = 3.03 (the two grey anchors are the WCAG-defined boundary greys for 4.5:1 and 3:1 on
-// white) — plus two compositing anchors that a text-only model gets wrong. `--verify-pixels` adds the
-// second, independent path: a real PNG screenshot, decoded, with the painted pixel at a site's own
-// centre compared against the computed-style prediction.
+// white) — plus two compositing anchors that a text-only model gets wrong. It validates the ONLY
+// implementation there is: `COLOR_MATH_SOURCE` below is a single source string that Node evaluates
+// and that `probeExpr` pastes into the page, after round 1 shipped a second copy inside the probe
+// that no anchor touched and that the Reviewer multiplied by 1.6 to a green, `PASS`, exit-0 run with
+// every number 60% wrong. `--verify-pixels` adds a genuinely independent second path — see its
+// LIMITS note at `verifyAgainstPixels`, which is narrower than "the two paths agree".
+//
+// ── What this harness does NOT see (the limits, kept here so they are read with the numbers) ──────
+//  1. THE RATIO MATHS IS CROSS-CHECKED BY NOTHING EXTERNAL. `--verify-pixels` checks GROUNDS only,
+//     and only for `role === "text"`, `state === "base"`; the arithmetic that turns two colours into
+//     a ratio is anchored (five known values) but never independently recomputed. That is precisely
+//     the gap round 1's duplicate probe maths slipped through, and it is why there is now one copy.
+//  2. NON-ANCESTOR PAINTERS ARE INVISIBLE. `groundOf` composites the ancestor chain. An element that
+//     OVERLAPS a site without containing it — the boot overlay is the worked example, which is why
+//     `verifyAgainstPixels` has to hide it — contributes nothing to the model's ground. A site that
+//     something else paints over is measured against the ground it would have if nothing did.
+//  3. ROUGHLY HALF THE SITES ARE NON-TEXT AND NON-CHROMATIC, and none of them is enforced; most of
+//     those sit under the 3:1 they would face if they were. They are the neutral hairlines and hover
+//     washes SC 1.4.11 excludes as decorative (`var(--line)` = rgba(128,128,128,0.26) and friends),
+//     and enforcing them would bury the real findings — but "not enforced" is a judgement, not an
+//     absence, so `run.mjs` prints both counts every run (2026-08-28: 390 of 786 dropped, ~350 of
+//     those under bar — the second number moves by one or two between runs, which is itself worth
+//     knowing) and `--all` lists every one. Read the counts from the report, not from this comment.
+//  4. INLINE-ASSIGNED COLOURS ARE MEASURED, NOT ENFORCED — the readings the report names under
+//     "MEASURED, NOT ENFORCED", from the session-identity palette shared with the main app
+//     (CPE-1977).
+//  5. COLOURS ASSIGNED INLINE FROM JS TABLES THE FIXTURES NEVER MOUNT ARE NOT MEASURED AT ALL.
+//     `STATE_META` (launcher.html) sets `.state-dot`'s background to #d08a1a / #3a72b5 / #3a9d4a in
+//     `renderState()`; the fixtures mount `.state-dot` at its CSS default #7a7a7a, which is
+//     non-chromatic and therefore dropped, so those three never appear anywhere in the report — not
+//     even under "MEASURED, NOT ENFORCED". Measured by hand: #d08a1a on a light tab is 2.38:1 (the
+//     number that retired that hex from `.tab.blocked`) and #3a9d4a is 2.86:1 (retired from
+//     `.badge.yes`). They are not a 1.4.11 failure — each dot carries a `title=` and `.pane-state`
+//     spells the state out in words, so the colour is not the only carrier — but they ARE unmeasured,
+//     and they are in CPE-1977's scope alongside the chip palette.
 //
 // Run:  node scripts/dev-harness/launcher-contrast/run.mjs
 //   or: npm run harness:launcher-contrast
@@ -100,54 +132,85 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── WCAG 2.1 relative luminance + contrast ratio ─────────────────────────────────────────────────
 // https://www.w3.org/TR/WCAG21/#dfn-relative-luminance / #dfn-contrast-ratio
-export function luminance([r, g, b]) {
-  const lin = [r, g, b].map((c) => {
-    const s = c / 255;
-    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+//
+// ── ONE IMPLEMENTATION, TWO EXECUTIONS (round-2 review, and the reason this is a source string) ───
+// Every number this harness prints is a contrast ratio. Round 1 had TWO independent implementations
+// of that arithmetic: this module's, which `validateAnchors()` exercised, and a SECOND COPY inside
+// `PROBE_SOURCE` that computed every measured site ratio and that no anchor ever touched. The
+// Reviewer multiplied the probe's copy by 1.6: all five anchors green, both pixel cross-checks clean,
+// `PASS`, exit 0 — and every printed number 60% wrong. The validator guarded a copy.
+//
+// So the maths exists exactly ONCE now, as the source string below, and is executed twice:
+//   1. HERE, by Node, via `new Function(...)`. `validateAnchors()` therefore runs against the real
+//      thing and `sweep` calls it BEFORE spawning Chrome — sabotaging `ratio`/`over`/`luminance`
+//      still exits 2 without spending a browser, which is the property round 1 got right and this
+//      keeps.
+//   2. IN THE PAGE, because `probeExpr` pastes this same string in front of the probe body, so the
+//      site loop calls the same `ratio` the anchors just validated. `sweep` additionally re-runs
+//      `validateAnchors` inside the page and requires byte-identical JSON back — that leg pins the
+//      string against arriving MANGLED (a bad escape, a truncated evaluate), which is the only
+//      failure mode left once there is nothing to diverge from.
+// A second validator would be a second thing to drift; a second execution of the same one is not.
+export const COLOR_MATH_SOURCE = String.raw`
+function luminance(c) {
+  var l = [c[0], c[1], c[2]].map(function (v) { var s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); });
+  return 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
 }
-export function ratio(a, b) {
-  const la = luminance(a);
-  const lb = luminance(b);
-  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+function ratio(a, b) { var x = luminance(a), y = luminance(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+/* "src" (alpha in src[3]) painted over opaque "dst". */
+function over(src, dst) {
+  var a = src[3];
+  return [src[0] * a + dst[0] * (1 - a), src[1] * a + dst[1] * (1 - a), src[2] * a + dst[2] * (1 - a)];
 }
-export const round2 = (n) => Math.round(n * 100) / 100;
-export const hex = ([r, g, b]) => "#" + [r, g, b].map((c) => Math.round(c).toString(16).padStart(2, "0")).join("");
-/** `src` (with alpha) painted over opaque `dst`. */
-export function over([r, g, b, a], [dr, dg, db]) {
-  return [r * a + dr * (1 - a), g * a + dg * (1 - a), b * a + db * (1 - a)];
-}
+function round2(n) { return Math.round(n * 100) / 100; }
+function hex(c) { return "#" + [c[0], c[1], c[2]].map(function (v) { var h = Math.round(v).toString(16); return h.length < 2 ? "0" + h : h; }).join(""); }
+/* Author-chosen colour (rather than a neutral hairline/wash) at this max-min channel spread. */
+function chromatic(c, min) { return Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) >= min; }
 
-/**
- * Refuses to let the sweep run unless this file's WCAG implementation reproduces known values.
- * The first three are the standard anchors CPE-1921's Reviewer validated its independent
- * implementation against; the last two pin the COMPOSITING model, which is the half that was wrong
- * once already (dimming an element's text without dimming its own background).
+/*
+ * Refuses to let the sweep run unless THIS source reproduces known values. The first three are the
+ * standard anchors CPE-1921's Reviewer validated its independent implementation against; the last
+ * two pin the COMPOSITING model, which is the half that was wrong once already (dimming an
+ * element's text without dimming its own background).
  */
-export function validateAnchors() {
-  const fails = [];
-  const check = (label, got, want, tol = 0.005) => {
-    if (Math.abs(got - want) > tol) fails.push(`${label}: got ${got.toFixed(4)}, want ${want}`);
-  };
+function validateAnchors() {
+  var fails = [];
+  function check(label, got, want, tol) {
+    if (Math.abs(got - want) > (tol === undefined ? 0.005 : tol)) fails.push(label + ": got " + got.toFixed(4) + ", want " + want);
+  }
   check("#000 on #fff", ratio([0, 0, 0], [255, 255, 255]), 21);
   check("#767676 on #fff (WCAG's 4.5:1 boundary grey)", round2(ratio([118, 118, 118], [255, 255, 255])), 4.54);
   check("#949494 on #fff (WCAG's 3:1 boundary grey)", round2(ratio([148, 148, 148], [255, 255, 255])), 3.03);
-  // Compositing anchor A: black text at 50% over white is exactly mid-grey, not black.
-  // rgb(127.5) is NOT "half the contrast of black on white": sRGB is gamma-encoded, so the answer is
-  // 1.05 / (((127.5/255 + 0.055) / 1.055) ^ 2.4 + 0.05) = 3.98, hand-derivable and not 10.5.
+  /* Compositing anchor A: black text at 50% over white is exactly mid-grey, not black.
+     rgb(127.5) is NOT "half the contrast of black on white": sRGB is gamma-encoded, so the answer is
+     1.05 / (((127.5/255 + 0.055) / 1.055) ^ 2.4 + 0.05) = 3.98, hand-derivable and not 10.5. */
   check("50% black over white composites to rgb(127.5)", round2(ratio(over([0, 0, 0, 0.5], [255, 255, 255]), [255, 255, 255])), 3.98);
-  // Compositing anchor B: the CPE-1921 round-2 mistake, stated as a number. `.area-help` is
-  // ButtonText on ButtonFace under opacity .75, dark. Dimming ONLY the text gives a wrong answer;
-  // dimming both (as the engine does) gives the right one. Both are computed here from the same
-  // primitives, and the point is that they DIFFER — if they ever stop differing this model is broken.
-  const dark = [18, 18, 18];
-  const buttonFace = [61, 61, 61];
-  const buttonText = [255, 255, 255];
-  const textOnly = ratio(over([...buttonText, 0.75], buttonFace), buttonFace);
-  const bothDimmed = ratio(over([...buttonText, 0.75], over([...buttonFace, 0.75], dark)), over([...buttonFace, 0.75], dark));
-  if (round2(textOnly) === round2(bothDimmed)) {
-    fails.push("compositing anchor B: text-only and both-dimmed models agree — the opacity model is not being applied to backgrounds");
+
+  /* Compositing anchor B — a VALUE check on both models, on constants that are a stated worked
+     example and NOTHING ELSE. Round 1 called these numbers "the CPE-1921 round-2 mistake, stated as
+     a number" while (a) only asserting that the two models DIFFER and (b) using buttonFace = 61,
+     which matches no engine — this Chrome resolves dark ButtonFace to 107. Two corrections:
+       - both models are now checked against their arithmetic value, so "differ" is not the whole
+         claim and a model that drifts by a constant factor no longer sails through;
+       - the constants are declared to be a hypothetical white-on-mid-grey-over-near-black stack,
+         hand-derivable from over()/ratio() above, NOT any engine's system colours. The real
+         engine-resolved version of this same comparison is computed in sweep() from the values the
+         browser actually reports and printed in the report under "engine-resolved".
+     text-only  : over(#fff@.75, [61,61,61]) = rgb(206.5) against rgb(61)                 -> 6.94
+     both dimmed: surface first, over(#fff@.75, over([61,61,61]@.75, [18,18,18]))
+                  = rgb(203.81) against rgb(50.25)                                        -> 7.94
+     Dimming only the text UNDERSTATES the surface's own loss, so it is the lower of the two; that
+     direction is engine-independent and is asserted as well. */
+  var base = [18, 18, 18];
+  var surface = [61, 61, 61];
+  var white = [255, 255, 255];
+  var textOnly = ratio(over([white[0], white[1], white[2], 0.75], surface), surface);
+  var dimmedSurface = over([surface[0], surface[1], surface[2], 0.75], base);
+  var bothDimmed = ratio(over([white[0], white[1], white[2], 0.75], dimmedSurface), dimmedSurface);
+  check("opacity .75, text-only model (white on rgb(61) worked example)", round2(textOnly), 6.94);
+  check("opacity .75, both-dimmed model (same stack over rgb(18))", round2(bothDimmed), 7.94);
+  if (!(bothDimmed > textOnly)) {
+    fails.push("compositing anchor B: the both-dimmed model is not above the text-only one — the opacity model is not being applied to backgrounds");
   }
   if (fails.length) throw new Error("WCAG anchor validation FAILED — every number below would be untrustworthy:\n  " + fails.join("\n  "));
   return {
@@ -158,6 +221,38 @@ export function validateAnchors() {
     "opacity .75 text-only (WRONG model)": round2(textOnly),
     "opacity .75 both dimmed (engine model)": round2(bothDimmed),
   };
+}
+`;
+
+const MATH = new Function(
+  COLOR_MATH_SOURCE +
+    "\nreturn { luminance: luminance, ratio: ratio, over: over, round2: round2, hex: hex, chromatic: chromatic, validateAnchors: validateAnchors };",
+)();
+export const luminance = MATH.luminance;
+export const ratio = MATH.ratio;
+export const over = MATH.over;
+export const round2 = MATH.round2;
+export const hex = MATH.hex;
+export const chromatic = MATH.chromatic;
+export const validateAnchors = MATH.validateAnchors;
+
+/**
+ * The same `validateAnchors`, run by the ENGINE on the source string the probe is about to use, with
+ * its result required to match Node's exactly. Not a second validator — a second execution of the
+ * one validator, which is what catches the string being mangled in transit rather than being wrong.
+ */
+export async function validateAnchorsInPage(client, nodeAnchors) {
+  const inPage = await client.evaluate(
+    `(function () { ${COLOR_MATH_SOURCE}\nreturn JSON.stringify(validateAnchors()); })()`,
+  );
+  const want = JSON.stringify(nodeAnchors);
+  if (inPage !== want) {
+    throw new Error(
+      "WCAG anchor validation FAILED IN THE PAGE — the maths Node validated is not the maths the probe will run.\n" +
+        `  node: ${want}\n  page: ${inPage}`,
+    );
+  }
+  return JSON.parse(inPage);
 }
 
 // ── The launcher, prepared for measurement ───────────────────────────────────────────────────────
@@ -172,10 +267,91 @@ export function preparedLauncherHtml() {
   return raw.replace(/<script\b[\s\S]*?<\/script>/g, "<!-- script removed by the CPE-1966 contrast harness -->");
 }
 
+/**
+ * Comments and their contents removed from JavaScript source, quote- and regex-aware.
+ *
+ * CPE-1933 rule 2, "anchor on code, never on prose", in the file that cites it. Round 1's
+ * `checkFixtureProvenance` ran `scripts.includes(claim)` over the RAW script bodies. Renaming the
+ * launcher's Close-all class to `closeAllBtn` reds correctly (exit 2, before any measurement) — but
+ * the same rename PLUS `// historical note: this used to read b.className = "close-all-btn"` passed
+ * green, exit 0, counts unchanged, with vitest 15/15 alongside it: both layers vouching for a button
+ * whose class the stylesheet does not style, while the harness measured a `.close-all-btn` fixture
+ * the app no longer renders. A comment is prose; the provenance claim is about code.
+ *
+ * A whole-line-comment filter is not enough (a trailing `//` walks straight through it), so this is
+ * a character scanner in the shape `src/lib/shellScriptLines.ts` uses for shell and
+ * `src/lib/rustSource.ts` uses for Rust: it tracks string and template literals so a `//` inside a
+ * URL or a `/*` inside a message is not mistaken for a comment, and it replaces each comment with a
+ * space rather than deleting it so `includes` cannot be satisfied by two fragments joining up.
+ * Division vs. regex is the one genuinely ambiguous case in JS; a `/` after a value-shaped token is
+ * treated as division, which is the conservative reading here — misreading it can only ever make a
+ * claim FAIL to match (a false red that names the fixture), never silently pass.
+ */
+export function stripJsComments(src) {
+  let out = "";
+  let i = 0;
+  let prevSignificant = "";
+  while (i < src.length) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === "/" && d === "/") {
+      const nl = src.indexOf("\n", i);
+      out += " ";
+      i = nl === -1 ? src.length : nl;
+      continue;
+    }
+    if (c === "/" && d === "*") {
+      const end = src.indexOf("*/", i + 2);
+      out += " ";
+      i = end === -1 ? src.length : end + 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === c) break;
+        j++;
+      }
+      out += src.slice(i, Math.min(j + 1, src.length));
+      prevSignificant = c;
+      i = j + 1;
+      continue;
+    }
+    if (c === "/" && !/[\w$)\]]/.test(prevSignificant)) {
+      // A regex literal in a value position: consume it whole so a `//` or `/*` inside it is not
+      // read as a comment (`/\/\*/` is legal source).
+      let j = i + 1;
+      let inClass = false;
+      while (j < src.length) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === "[") inClass = true;
+        else if (src[j] === "]") inClass = false;
+        else if (src[j] === "/" && !inClass) break;
+        else if (src[j] === "\n") { j = i; break; }   // unterminated: treat the `/` as itself
+        j++;
+      }
+      if (j > i) {
+        out += src.slice(i, Math.min(j + 1, src.length));
+        prevSignificant = "/";
+        i = j + 1;
+        continue;
+      }
+    }
+    out += c;
+    if (!/\s/.test(c)) prevSignificant = c;
+    i++;
+  }
+  return out;
+}
+
 /** CPE-1933: a fixture claiming to mirror the launcher's own JS must be checked against that JS. */
 export function checkFixtureProvenance() {
   const raw = readFileSync(LAUNCHER, "utf8");
-  const scripts = [...raw.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+  // Comments stripped FIRST: a claim must be found in code, never in a comment quoting the old value.
+  const scripts = stripJsComments(
+    [...raw.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n"),
+  );
   if (scripts.length < 2000) throw new Error("launcher.html: no <script> body found — the fixture provenance check is broken, not passing");
   const missing = [];
   for (const f of FIXTURES) {
@@ -198,7 +374,9 @@ export function checkFixtureProvenance() {
  * measuring one sampled colour would measure the luck of the sample.
  */
 export function sessionChipColours() {
-  const raw = readFileSync(LAUNCHER, "utf8");
+  // Comments stripped for the same reason `checkFixtureProvenance` strips them: a commented-out
+  // older palette earlier in the file would otherwise be the one this parse finds.
+  const raw = stripJsComments(readFileSync(LAUNCHER, "utf8"));
   const m = raw.match(/const SESSION_CHIP_COLORS = \[([^\]]*)\]/);
   if (!m) throw new Error("launcher.html: SESSION_CHIP_COLORS not found — the chip fixture cannot be derived");
   const colours = [...m[1].matchAll(/"(#[0-9a-fA-F]{3,8})"/g)].map((x) => x[1]);
@@ -315,6 +493,14 @@ async function waitForHttp(url, timeoutMs) {
 // closure over Node state — the same discipline layout-guard/engine.mjs's `buildProbeExpression` uses.
 const PROBE_SOURCE = String.raw`
 (function (cfg) {
+  /* The splice point below receives luminance / ratio / over / hex / chromatic / round2 /
+     validateAnchors from COLOR_MATH_SOURCE, pasted in by probeExpr(). There is no second copy: it is
+     the same text Node evaluated and ran validateAnchors() against before Chrome was even started.
+     (Deliberately NOT naming the placeholder in this comment — the splice replaces the first
+     occurrence, and the pasted source contains block comments whose own terminator would end this
+     one early. Measured: it did, and the page threw "Invalid or unexpected token".) */
+  __COLOR_MATH__
+
   function parseColor(s) {
     if (!s || s === "transparent" || s === "none") return null;
     var m = s.match(/^rgba?\(([^)]+)\)$/);
@@ -329,17 +515,10 @@ const PROBE_SOURCE = String.raw`
     }
     return null;
   }
-  function over(src, dst) {
-    var a = src[3];
-    return [src[0] * a + dst[0] * (1 - a), src[1] * a + dst[1] * (1 - a), src[2] * a + dst[2] * (1 - a)];
-  }
-  function lum(c) {
-    var l = [c[0], c[1], c[2]].map(function (v) { var s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); });
-    return 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
-  }
-  function ratio(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
-  function chromatic(c) { return Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) >= cfg.chromaMin; }
-  function hx(c) { return "#" + [c[0], c[1], c[2]].map(function (v) { var h = Math.round(v).toString(16); return h.length < 2 ? "0" + h : h; }).join(""); }
+  /* Thin wrappers so the site loop below reads the way it always did, while the arithmetic itself
+     comes from the shared source above. hx() and chrom() add no maths — a rename and a bound arg. */
+  function hx(c) { return hex(c); }
+  function chrom(c) { return chromatic(c, cfg.chromaMin); }
 
   /* The ground under an element, composited in real paint order: every ancestor background in turn,
      each dimmed by the PRODUCT of the opacities of it and everything above it. Returns the ground the
@@ -466,7 +645,7 @@ const PROBE_SOURCE = String.raw`
         role: "border", prop: "border-" + side.toLowerCase() + "-color", declared: key, painted: hx(painted),
         against: hx(g.inside), ratio: partOfFill ? null : ratio(painted, g.inside), partOfFill: partOfFill,
         againstOutside: hx(g.outside), ratioOutside: ratio(over([bc[0], bc[1], bc[2], bc[3] * g.alpha], g.outside), g.outside),
-        bar: 3, chromatic: chromatic(bc),
+        bar: 3, chromatic: chrom(bc),
       }));
     });
 
@@ -478,7 +657,7 @@ const PROBE_SOURCE = String.raw`
         var op2 = over([oc[0], oc[1], oc[2], oc[3] * g.alpha], g.outside);
         sites.push(Object.assign({}, base, {
           role: "outline", prop: "outline-color", declared: cs.outlineColor, painted: hx(op2),
-          against: hx(g.outside), ratio: ratio(op2, g.outside), bar: 3, chromatic: chromatic(oc),
+          against: hx(g.outside), ratio: ratio(op2, g.outside), bar: 3, chromatic: chrom(oc),
         }));
       }
     }
@@ -490,7 +669,7 @@ const PROBE_SOURCE = String.raw`
       var painted = over([s.colour[0], s.colour[1], s.colour[2], s.colour[3] * g.alpha], dst);
       sites.push(Object.assign({}, base, {
         role: s.inset ? "shadow-inset" : "shadow", prop: "box-shadow[" + k + "]", declared: "rgba(" + s.colour.join(",") + ")",
-        painted: hx(painted), against: hx(dst), ratio: ratio(painted, dst), bar: 3, chromatic: chromatic(s.colour),
+        painted: hx(painted), against: hx(dst), ratio: ratio(painted, dst), bar: 3, chromatic: chrom(s.colour),
       }));
     });
 
@@ -500,7 +679,7 @@ const PROBE_SOURCE = String.raw`
       var pf = over([ownBg[0], ownBg[1], ownBg[2], ownBg[3] * g.alpha], g.outside);
       sites.push(Object.assign({}, base, {
         role: "fill", prop: "background-color", declared: cs.backgroundColor, painted: hx(pf),
-        against: hx(g.outside), ratio: ratio(pf, g.outside), bar: 3, chromatic: chromatic(ownBg),
+        against: hx(g.outside), ratio: ratio(pf, g.outside), bar: 3, chromatic: chrom(ownBg),
       }));
     }
   }
@@ -516,8 +695,14 @@ const PROBE_SOURCE = String.raw`
 })
 `;
 
+/** The probe, with the ONE copy of the colour maths spliced in. Refuses to build an expression that
+ *  did not receive it — a probe with the placeholder still in it would be a `ReferenceError` at best
+ *  and, if the name ever resolved to something else, a silent second implementation at worst. */
 function probeExpr(cfg) {
-  return `(${PROBE_SOURCE})(${JSON.stringify(cfg)})`;
+  if (!PROBE_SOURCE.includes("__COLOR_MATH__")) {
+    throw new Error("probe source no longer has the __COLOR_MATH__ splice point — it would run its own maths");
+  }
+  return `(${PROBE_SOURCE.replace("__COLOR_MATH__", COLOR_MATH_SOURCE)})(${JSON.stringify(cfg)})`;
 }
 
 // ── Page setup run inside the browser ────────────────────────────────────────────────────────────
@@ -649,6 +834,36 @@ export function pixelAt(png, x, y) {
   return [png.data[i], png.data[i + 1], png.data[i + 2]];
 }
 
+/**
+ * Serves `html` on 127.0.0.1, walking a short list of candidate ports rather than betting the run on
+ * one derived from the pid. `EADDRINUSE`/`EACCES` on a given port is an environment fact, not a
+ * finding, and retrying is the difference between a flaky red and a green run.
+ */
+async function listenWithRetry(html, requested) {
+  const candidates = requested !== undefined
+    ? [requested]
+    : Array.from({ length: 12 }, (_, k) => 30000 + ((process.pid * 7 + k * 1013) % 20000));
+  const tried = [];
+  for (const httpPort of candidates) {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(html);
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(httpPort, "127.0.0.1", () => { server.removeAllListeners("error"); resolve(); });
+      });
+      return { server, httpPort };
+    } catch (err) {
+      tried.push(`${httpPort} (${err.code || err.message})`);
+      await new Promise((r) => server.close(r));
+      if (requested !== undefined) throw err;
+    }
+  }
+  throw new Error(`could not bind a local port for the launcher fixture; tried ${tried.join(", ")}`);
+}
+
 // ── The sweep ────────────────────────────────────────────────────────────────────────────────────
 /**
  * Serves the prepared launcher, drives one headless Chrome through both colour schemes, and returns
@@ -660,16 +875,13 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
   const { classNames } = styledSelectorsFromCss();
   const html = preparedLauncherHtml();
 
-  const httpPort = port ?? 30000 + (process.pid % 20000);
+  // `30000 + pid % 20000` with no retry is a flaky red waiting to happen: the Reviewer hit
+  // `EACCES 127.0.0.1:49668` once locally, on a port this process does not get to choose. So the
+  // listen is retried across a short walk of candidates and only gives up — loudly, naming every
+  // port it tried — when all of them are taken, which is a real environment problem rather than
+  // noise. A port passed in explicitly is honoured exactly once: the caller asked for that one.
+  const { server, httpPort } = await listenWithRetry(html, port);
   const debugPort = cdpPort ?? 20000 + ((process.pid + 7919) % 20000);
-  const server = http.createServer((req, res) => {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    res.end(html);
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(httpPort, "127.0.0.1", resolve);
-  });
 
   const userDataDir = path.join(REPO_ROOT, ".claude", "dev-harness-chrome-profiles", `launcher-contrast-${debugPort}-${Date.now()}`);
   const chrome = spawn(
@@ -681,10 +893,26 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
     ],
     { stdio: ["ignore", "ignore", "ignore"] },
   );
+  // Without this, `CHROME_PATH=/nonexistent/chrome.exe` is an UNHANDLED 'error' event: Node exits 1
+  // with an ENOENT stack, the `finally` below never runs (Chrome unkilled, server open, profile dir
+  // left on disk), and exit 1 is indistinguishable from "a colour regressed". Capturing it turns the
+  // same input into the intended exit 2 with the path named, and lets the cleanup run.
+  // Raced against the endpoint wait below rather than merely recorded, so a bad path fails in
+  // milliseconds with the right message instead of after the full 40s endpoint timeout.
+  const spawnFailed = new Promise((_, reject) => {
+    chrome.once("error", (err) =>
+      reject(new Error(`could not start Chrome at ${chromePath}: ${err.message}\n` +
+        "Set CHROME_PATH to an installed Chrome/Chromium binary.")));
+  });
+  spawnFailed.catch(() => {});   // never an unhandled rejection if the race is already settled
 
   const schemes = {};
   try {
-    if (!(await waitForHttp(`http://127.0.0.1:${debugPort}/json/version`, CDP_ENDPOINT_TIMEOUT_MS))) {
+    const up = await Promise.race([
+      waitForHttp(`http://127.0.0.1:${debugPort}/json/version`, CDP_ENDPOINT_TIMEOUT_MS),
+      spawnFailed,
+    ]);
+    if (!up) {
       throw new Error(`chrome CDP endpoint on ${debugPort} never came up within ${CDP_ENDPOINT_TIMEOUT_MS}ms`);
     }
     const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
@@ -710,6 +938,10 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
       });
       await client.send("Page.navigate", { url: `http://127.0.0.1:${httpPort}/launcher.html?scheme=${scheme}` });
       await loaded;
+
+      // The anchors again, this time executed BY THE ENGINE on the same source string the probe is
+      // about to run, with the result required to match Node's exactly (see COLOR_MATH_SOURCE).
+      await validateAnchorsInPage(client, anchors);
 
       await client.evaluate(`window.__CLASS_NAMES__ = ${JSON.stringify(classNames)};`);
       const setup = JSON.parse(await client.evaluate(`(${SETUP_SOURCE})(${JSON.stringify(expandFixtures())})`));
@@ -765,6 +997,15 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
 
       schemes[scheme] = {
         canvas: base.canvas, field: base.field, buttonFace: base.buttonFace, canvasText: base.canvasText,
+        // The compositing comparison again, on the colours THIS engine actually resolved rather than
+        // the worked example's constants — `.area-help`'s old `opacity: .75` ButtonText-on-ButtonFace
+        // stack. Recorded per scheme because it is the number that MOVES between Chrome builds: the
+        // dark figures are 3.81 (text-only) / 5.07 (both dimmed) at ButtonFace rgb(107,107,107), and
+        // were 4.24/4.28 on the build CPE-1966 was filed against, which resolved it near rgb(120).
+        // Reported rather than asserted for exactly that reason — a hard expected value here would
+        // pin the harness to one Chrome build, and the point is to make the drift legible.
+        composite: engineResolvedComposite(base),
+        systemColours: { Canvas: base.canvas, CanvasText: base.canvasText, Field: base.field, ButtonFace: base.buttonFace },
         sites: all, matched: setup.matched, mounted: setup.mounted, forced, animations: animMeta.count, pixels,
       };
     }
@@ -778,6 +1019,35 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
   }
 
   return { anchors, scriptBytes, classNames, schemes, unreachable: UNREACHABLE };
+}
+
+/** `rgb(r, g, b)` / `rgba(...)` as a triple; the two forms Chrome serialises system colours in. */
+function rgbTriple(s) {
+  const p = String(s).match(/-?[\d.]+/g);
+  return p && p.length >= 3 ? [parseFloat(p[0]), parseFloat(p[1]), parseFloat(p[2])] : null;
+}
+
+/**
+ * The two opacity models applied to the system colours the browser REPORTED, so the report carries a
+ * real value against a real resolved colour rather than only against a worked example's constants.
+ * `.area-help` was `ButtonText` on `ButtonFace` under one `opacity: .75`; dimming only the text
+ * understates the surface's own loss, so the both-dimmed figure is the higher of the two.
+ */
+export function engineResolvedComposite(base) {
+  const face = rgbTriple(base.buttonFace);
+  const text = rgbTriple(base.canvasText);   // ButtonText tracks CanvasText in both of Chrome's schemes
+  const page = rgbTriple(base.canvas);
+  if (!face || !text || !page) return null;
+  const a = 0.75;
+  const textOnly = ratio(over([...text, a], face), face);
+  const dimmedFace = over([...face, a], page);
+  const bothDimmed = ratio(over([...text, a], dimmedFace), dimmedFace);
+  return {
+    stack: `opacity .75, ${hex(text)} on ButtonFace ${hex(face)} over Canvas ${hex(page)}`,
+    textOnly: round2(textOnly),
+    bothDimmed: round2(bothDimmed),
+    modelsDiffer: round2(textOnly) !== round2(bothDimmed),
+  };
 }
 
 /** The distinct (base selector, pseudo-class) pairs the launcher's own stylesheet declares. */
@@ -803,6 +1073,16 @@ export function pseudoRulesFromCss() {
  * Agreement between "what the cascade says" and "what the compositor painted" is what makes the
  * computed-style numbers trustworthy — CPE-1921's Reviewer ran the same two paths and required them
  * to agree within 1/255.
+ *
+ * LIMITS, stated precisely because round 1's PR body claimed more than this does. The two paths are
+ * genuinely independent — a from-scratch PNG decode versus the cascade — but they are compared for
+ * GROUNDS ONLY, only where `role === "text"`, and only in `state === "base"`. Nothing here checks a
+ * border's, fill's or shadow's painted colour, no forced state is screenshot, no animation frame is,
+ * and the RATIO ARITHMETIC is cross-checked by neither path (see limit 1 in this file's header —
+ * that is the gap the duplicate probe maths slid through). Disagreements FAIL the run in `run.mjs`,
+ * as does a pass that verified nothing: a screenshot leg that measures zero grounds prints "0
+ * verified, 0 disagreeing", which reads as success and is the repo's "did not run ≠ found nothing"
+ * rule, so it is a floor rather than a shrug.
  */
 async function verifyAgainstPixels(client, textSites) {
   // The boot overlay is `position: fixed; inset: 0; z-index: 9999; background: Canvas` and covers the

@@ -451,10 +451,23 @@ describe("AI Console launcher — the browser half is still connected (CPE-1966)
     const yml = readFileSync(WORKFLOW, "utf8");
     expect(yml, "no `launcher-contrast:` job in gui-smoke.yml").toMatch(/^ {2}launcher-contrast:$/m);
     const job = yml.slice(yml.search(/^ {2}launcher-contrast:$/m));
-    const body = job.slice(0, job.indexOf("\n  ", 40) === -1 ? undefined : job.length);
+    // Bound the slice to THIS job. The first draft wrote
+    // `job.slice(0, cond ? undefined : job.length)`, which returns `job` either way — dead code, and
+    // harmless only because `launcher-contrast` happens to be the last job in the file today. The
+    // next job appended below it would have let a sibling's `run:` satisfy this assertion.
+    const nextJob = job.slice(1).search(/^ {2}[\w-]+:$/m);
+    const body = nextJob === -1 ? job : job.slice(0, nextJob + 1);
     expect(
       /run:\s*npm run harness:launcher-contrast/.test(body),
       "the `launcher-contrast` job no longer runs `npm run harness:launcher-contrast`",
+    ).toBe(true);
+    // ...and it must pass --verify-pixels, which is the flag that turns on the second, independent
+    // measurement path. Round 1's runner exited 0 on total pixel disagreement; that is fixed in
+    // run.mjs, but a CI job that stops passing the flag switches the whole leg off just as quietly.
+    expect(
+      /run:\s*npm run harness:launcher-contrast\b[^\n]*--verify-pixels/.test(body),
+      "the `launcher-contrast` job no longer passes `--verify-pixels`, so the screenshot cross-check " +
+        "(the independent second path this PR's claim rests on) does not run in CI at all",
     ).toBe(true);
   });
 });

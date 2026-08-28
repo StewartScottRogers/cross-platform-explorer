@@ -1,6 +1,6 @@
 ---
 id: CPE-1977
-title: the session-identity chip palette fails white-text contrast — measured in the AI Console, and the same array drives the main app's Agents leaf
+title: the launcher's two inline colour palettes — session-identity chips (fail white-text contrast, and the same array drives the main app's Agents leaf) and STATE_META's status dots
 type: bug
 priority: Medium
 status: Open
@@ -46,8 +46,38 @@ Two reasons, both worth keeping straight:
    app-wide visual-identity decision with its own tests (`src/lib/sessionChip.test.ts`), not a
    line-item inside a launcher contrast fix.
 
+## The second palette: `STATE_META`'s status dots (added in CPE-1966's round-2 review)
+
+This ticket originally said "the session-chip palette", singular. There are **two** inline palettes
+in that one file, and the second one is worse off than the first because the harness does not even
+*report* it.
+
+`STATE_META` (`launcher.html`) assigns `.state-dot`'s background inline in `renderState()`:
+`#d08a1a` blocked / `#3a72b5` working / `#3a9d4a` done / `#7a7a7a` idle. CPE-1966's fixtures mount
+`.state-dot` but never run `renderState()`, so the harness measures the CSS default `#7a7a7a`,
+drops it as non-chromatic, and prints **nothing** — not a failure, and not a line under "MEASURED,
+NOT ENFORCED" either. Measured by hand:
+
+| pairing | measured | note |
+|---|---|---|
+| `#d08a1a` dot on a light tab | **2.38:1** | the same number that made CPE-1966 retire this hex from `.tab.blocked` |
+| `#3a9d4a` dot on a light tab | **2.86:1** | the hex CPE-1966 retired from `.badge.yes` |
+
+**Not a hard SC 1.4.11 failure**, and that is why it is scoped here rather than fixed in CPE-1966:
+each dot carries a `title=` ("Agent blocked" / "working" / "done") and the grid pane's `.pane-state`
+spells the same word out in text, so colour is not the only carrier of the information. But two of
+the four values are hexes this repo has already decided are too weak to carry meaning on their own,
+and they are unmeasured by the sweep that is supposed to see everything.
+
 ## Acceptance criteria
 
+- [ ] Re-tune `STATE_META`'s four values against both tab grounds in both schemes, to the same 3:1
+      the rest of the launcher's chromatic non-text is held to.
+- [ ] Give CPE-1966's harness a fixture that actually exercises them, so they stop being invisible:
+      either mount `.state-dot` with each `STATE_META` colour applied inline (derived from the array
+      in `launcher.html`, the way `sessionChipColours()` already derives the chip palette — never
+      copied), or have `renderState()` be callable from the fixture. Then the numbers appear in the
+      report and this class of miss cannot recur silently.
 - [ ] Re-tune the eight values so the white numeral clears 4.5:1 on every one of them, and every
       fill clears 3:1 against **both** tab states in **both** schemes (the hovered tab is the harder
       ground in light: `#e2e2e2`, not `#eaeaea`).

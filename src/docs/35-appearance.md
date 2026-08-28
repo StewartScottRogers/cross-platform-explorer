@@ -84,10 +84,19 @@ other, and one was hard to see in both:
 - **Inactive session tabs, the ✕ close buttons, the "Close all" hover, the installed/not-installed
   badges and the "Starting the Agent Deck…" message** all sat under the 4.5:1 readable-text bar in at
   least one scheme, several of them only while hovered or mid-animation. All now clear it.
+- **The context-size caption beside each model in the model menu** ("200k ctx") was dimmed to the
+  point of sitting two hundredths above the bar. It is still visibly secondary — the smaller type does
+  that job — but it is no longer borderline.
 
-One thing is knowingly still out: the small coloured chip carrying each session's number picks from a
-shared palette that the explorer's Agents list uses too, and two of its colours are too light for the
-white numeral on them. Changing that palette affects both windows at once, so it is tracked separately.
+Two things are knowingly still out, and both are tracked separately because both are shared with the
+main explorer window rather than local to the Agent Deck:
+
+- The small coloured **chip carrying each session's number** picks from a palette the explorer's
+  Agents list uses too, and two of its colours are too light for the white numeral on them.
+- The small **status dot** on each session tab and pane header (amber "blocked", blue "working",
+  green "done") uses two colours that are too weak to carry meaning by colour alone. They are not
+  the only signal — hovering a dot names the state, and the grid view spells it out in words beside
+  it — but they will be re-tuned with the chip palette.
 
 ## What's next
 

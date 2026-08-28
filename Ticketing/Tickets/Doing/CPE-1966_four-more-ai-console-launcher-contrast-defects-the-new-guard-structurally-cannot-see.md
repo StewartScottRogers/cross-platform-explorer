@@ -247,3 +247,155 @@ every author colour there. And any ratio that depends on how a particular browse
 - **GUI verification would need a host rebuild, not a launcher swap.** `launcher.html` is
   `include_str!`'d into the ai-console host, so seeing these colours in the real app means rebuilding
   the sidecar-enabled host and installing that. Not done here.
+
+---
+
+## Work Log — round 2 (review response)
+
+The Reviewer returned CHANGES REQUESTED with three blocking findings, and they were all the same
+shape: **a safeguard that stayed green while permitting exactly the failure it existed to prevent.**
+All three are closed, each with the Reviewer's own sabotage re-run against the fix.
+
+### Blocker 1 — the anchor validator guarded a *copy*
+
+`validateAnchors()` exercised the module-level `luminance`/`ratio`/`over` in `engine.mjs`. Every
+measured site ratio was computed by a **second, independent implementation** inside `PROBE_SOURCE`
+(`lum`/`ratio`/`over`/`chromatic`/`hx`) that no anchor ever touched. The Reviewer multiplied the
+probe's `ratio()` by 1.6 and got: five green anchors, both pixel cross-checks clean, `PASS`, exit 0
+— with every number in the report 60% wrong.
+
+**Fix: there is now one implementation.** `COLOR_MATH_SOURCE` is a single source string holding
+`luminance`, `ratio`, `over`, `round2`, `hex`, `chromatic` and `validateAnchors`. Node evaluates it
+via `new Function` (so `sweep` still refuses **before Chrome is spawned**, which was the good half of
+round 1), and `probeExpr` splices the *same string* into the probe, which now calls it directly —
+`hx`/`chrom` are a rename and a bound argument, no arithmetic of their own. `probeExpr` throws if
+the splice point is missing rather than shipping a probe that would find its own `ratio`.
+A second execution of the one validator runs **inside the page** (`validateAnchorsInPage`) and
+requires byte-identical JSON, which covers the only remaining failure mode — the string arriving
+mangled. Chose one implementation over a second validator, as the Reviewer preferred: a second
+validator is a second thing to drift.
+
+Red-proofs:
+
+| sabotage | result |
+|---|---|
+| probe `ratio()` × 1.6 (the Reviewer's exact sabotage) | **exit 2 before Chrome launches**, all six anchors named: `#000 on #fff: got 33.6000, want 21` … `both-dimmed: got 12.7000, want 7.94` |
+| `0.2126` → `0.2100` in the copy handed to the page only | **exit 2**, in-page leg: `#000 on #fff: got 20.9480, want 21` — proves the second execution is live, not decorative |
+
+**Compositing anchor B, two corrections.** It was a *"they differ"* check whose
+`buttonFace = [61,61,61]` matched no engine (this Chrome resolves dark `ButtonFace` to **107**), so
+its printed 6.94/7.94 corresponded to nothing, and the comment calling it *"the CPE-1921 round-2
+mistake, stated as a number"* was not accurate. Now: both models are checked **by value** (6.94 and
+7.94) on constants **declared to be a hypothetical worked example** and nothing else, plus a
+direction assertion (`bothDimmed > textOnly`) that is engine-independent. The **real** version is
+computed in `sweep` from the colours the browser actually reported and printed per scheme:
+`dark … ButtonFace #6b6b6b over Canvas #121212: 3.81 text-only / 5.07 both dimmed` — the 3.81 the
+narrative has been quoting all along, now derived rather than asserted. Reported rather than
+asserted, because a hard expected value there would pin the harness to one Chrome build.
+
+### Blocker 2 — `--verify-pixels` disagreements never failed the run
+
+`run.mjs` exited on `failures.length || unmatched.length` only, so forcing every prediction to
+`#ff00ff` gave 59/59 disagreeing in both schemes and still exited 0 — in the exact shape the
+**blocking** CI job runs.
+
+**Fix:** the exit condition now counts `pixelBad` **and** a `rows.length === 0` floor per scheme,
+and `PASS` is printed only when all four conditions are clean.
+
+| sabotage | before | after |
+|---|---|---|
+| every prediction forced to `#ff00ff` | PASS, exit 0 | **exit 1**, `PIXEL CROSS-CHECK FAILED — 118 ground(s)`, no PASS |
+| pixel leg made to measure nothing | would print "0 verified, 0 disagreeing", exit 0 | **exit 1**, `PIXEL CROSS-CHECK DID NOT RUN — … verified ZERO grounds` |
+
+The floor is the repo's **"did not run" ≠ "found nothing"** rule. The vitest CI-job test additionally
+asserts the job still passes `--verify-pixels`, so the leg cannot be switched off from the workflow
+side either.
+
+### Blocker 3 — the fixture-provenance check was prose-anchored (CPE-1933 rule 2, in the file that cites it)
+
+`checkFixtureProvenance` ran `scripts.includes(claim)` over the **raw** concatenated `<script>`
+bodies. An honest rename red correctly; the same rename *plus a comment quoting the old value* went
+green, exit 0, counts unchanged, vitest 15/15 — both layers vouching for a Close-all button carrying
+a class the stylesheet does not style, while the harness measured a `.close-all-btn` fixture the app
+no longer renders.
+
+**Fix:** a new `stripJsComments()` — quote-, template- and regex-aware, replacing each comment with a
+space so two fragments cannot join up — runs **before** the `includes`. `sessionChipColours()` reads
+the stripped source too, so a commented-out older palette cannot be the one that parse finds.
+
+| input | result |
+|---|---|
+| control: honest rename to `b.className = "closeAllBtn"` | **exit 2** (unchanged, still correct) |
+| attack: same rename + `// historical note: this used to read b.className = "close-all-btn"` | **exit 2** — was exit 0 / PASS |
+| attack, block-comment variant `/* … */` | **exit 2** |
+
+### Item 4 — the +0.02 margin, and engineering the system-colour hazard
+
+`.model-opt .mo-sub { opacity: 0.55 }` was a blanket opacity over engine-resolved `CanvasText` —
+the exact defect class this ticket removed from `.area-help`, `.sw-empty`, `.tab-usage` and
+`.tab.ended` — left in place, and enforced and blocking at **4.52 against a 4.5 bar**. Nudged to
+`0.8` like its siblings: paints `#2e2e2e` for **11.0:1**, still visibly subordinate (the hierarchy
+is carried by the smaller font-size anyway). It is out of the thin-margin list entirely now.
+
+And the hazard is engineered rather than named:
+
+- **Resolved system colours are printed as a baseline every run** — `Canvas`, `CanvasText`, `Field`,
+  `ButtonFace` per scheme, plus the engine-resolved compositing pair. A runner disagreement is now
+  diagnosable from the log rather than mysterious. This job has never run on a GitHub runner.
+- **`THIN_MARGIN = 0.25` is a declared threshold with a stated reason.** Any enforced site clearing
+  its bar by less than that is printed, pass or fail, grouped by rule the way failures are, with the
+  state named. Today: **28 readings in 7 rules**, worst `+0.05` (white on `#2f6fed`), none of them
+  `.mo-sub`.
+
+### The corrected limits list
+
+Printed by `run.mjs` every run (`── what this sweep does NOT see ──`) and stated at length in
+`engine.mjs`'s header, so it is read *with* the numbers:
+
+1. **The ratio arithmetic is cross-checked by nothing external.** `--verify-pixels` is genuinely two
+   independent paths (from-scratch PNG decode vs. the cascade) but **only for grounds, only
+   `role === "text"`, only `state === "base"`.** No border, fill or shadow is screenshot; no forced
+   state is; no animation frame is. That is precisely the gap blocker 1 slid through.
+2. **Non-ancestor painters are invisible.** `groundOf` composites the ancestor chain only. An element
+   that *overlaps* a site without containing it — the boot overlay is the worked example, which is
+   why `verifyAgainstPixels` has to hide it — contributes nothing to the model's ground.
+3. **~390 of 786 sites are non-text and non-chromatic and are not enforced**, ~350 of them under the
+   3:1 they would face if they were. Sound (SC 1.4.11 excludes decorative separators; the Reviewer
+   spot-checked the worst) but a *judgement*, so both counts are now printed and `--all` lists them.
+   Round 1 accounted for 384 of 786 and was silent on the rest.
+4. **Inline-assigned colours are measured but not enforced** — the 9 readings from the shared
+   session-identity palette (CPE-1977).
+5. **Colours assigned inline from JS tables no fixture mounts are not measured at all.** `STATE_META`
+   paints `.state-dot` `#d08a1a` / `#3a72b5` / `#3a9d4a` in `renderState()`; the fixtures mount
+   `.state-dot` at its CSS default `#7a7a7a`, which is non-chromatic and therefore dropped, so those
+   three appear **nowhere** — not even under "MEASURED, NOT ENFORCED". By hand: `#d08a1a` is
+   **2.38:1** on a light tab (the number that retired that hex from `.tab.blocked`) and `#3a9d4a` is
+   **2.86:1** (retired from `.badge.yes`). Not a hard 1.4.11 failure — each dot carries a `title=`
+   and `.pane-state` spells the state out — so this is a limits-completeness finding, and it is now
+   **in CPE-1977's scope**, whose title and acceptance criteria say "two palettes" rather than "the
+   session-chip palette", singular.
+
+### Robustness nits, all taken
+
+- `CHROME_PATH=/nonexistent/chrome.exe` was an **unhandled `spawn` `'error'` event**: exit 1, the
+  `finally` skipped (Chrome unkilled, server open, profile dir left on disk), indistinguishable from
+  "a colour regressed". Now `chrome.once("error", …)` **raced against** the endpoint wait, so it
+  fails in milliseconds with the path named — verified: **exit 2**, `could not start Chrome at …
+  ENOENT`, cleanup runs.
+- Port `30000 + pid % 20000` with no retry (the Reviewer hit `EACCES 127.0.0.1:49668`) → a
+  `listenWithRetry` walk of 12 candidates, failing loudly and naming every port tried. An explicitly
+  passed `port` is still honoured exactly once.
+- The vitest job test's `job.slice(0, cond ? undefined : job.length)` returned `job` either way —
+  dead code, harmless only because `launcher-contrast` is currently the last job in the file. Now
+  bounded on the next `^  <name>:` job header.
+
+### Round-2 gates
+
+- `npm run check`: **0 errors, 0 warnings**.
+- `npm test`: **356 files / 5,232 passed**, 2 skipped, on the branch rebased onto `origin/main` —
+  i.e. the merged state, and **identical to the merged-state figure the Reviewer measured in round 1**
+  (356 / 5,232). Delta **0**: round 2's extra assertion (the CI job must still pass `--verify-pixels`)
+  lives inside an existing `it`, so it strengthens a test rather than adding one.
+- `node scripts/ratchet-baselines.mjs compare origin/main`: all 12 **unchanged**.
+- `npm run harness:launcher-contrast -- --verify-pixels`: **exit 0**, PASS, 1306 raw readings → 786
+  distinct sites → 384 enforced, 59 grounds screenshot-verified per scheme with 0 disagreeing.

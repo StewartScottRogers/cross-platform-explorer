@@ -276,7 +276,15 @@
                color: inherit; cursor: pointer; padding: 5px 9px; font-size: 12px; white-space: nowrap;
                overflow: hidden; text-overflow: ellipsis; }
   .model-opt:hover, .model-opt.active { background: rgba(128,128,128,0.18); }
-  .model-opt .mo-sub { opacity: 0.55; font-size: 11px; margin-left: 6px; }
+  /* CPE-1966 round 2. `opacity: 0.55` over engine-resolved `CanvasText` is the same defect class this
+     ticket removed from `.area-help`, `.sw-empty`, `.tab-usage` and `.tab.ended` — and it was the
+     harness's thinnest ENFORCED margin at +0.02 (4.52 against a 4.5 bar, black painting #686868 on
+     the #e8e8e8 that `.model-opt.active`'s wash makes of `Canvas`). Enforced AND blocking AND two
+     hundredths clear of red, on a ground the engine chooses: a runner resolving `Canvas` a shade
+     differently flips it and the author goes hunting for a regression that is not there. The
+     hierarchy here is already carried by the smaller font-size, so the opacity only has to read as
+     secondary: 0.8 paints #2e2e2e for 11.0:1 and stays visibly subordinate. */
+  .model-opt .mo-sub { opacity: 0.8; font-size: 11px; margin-left: 6px; }
   .model-msg { padding: 8px 10px; font-size: 12px; opacity: 0.7; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
   .model-msg button { font-size: 11px; padding: 2px 8px; cursor: pointer; }
   #terms { flex: 1; min-height: 0; position: relative; background: #0d0d0d; }
