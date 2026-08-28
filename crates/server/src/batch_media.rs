@@ -2247,19 +2247,33 @@ pub(crate) const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
 /// covers both the attribute bit and the tag.
 ///
 /// **Returns `Option`, and the `None` is the point.** `None` means *the description could not be read*,
-/// which is a different answer from "not a surrogate" — and the two callers need **opposite** defaults,
-/// so neither default can live in here:
+/// which is a different answer from "not a surrogate". **Both callers now fail closed**
+/// (`unwrap_or(true)`), and the default still does not live in here, because the choice is the
+/// caller's to argue:
 ///
-/// - `fsutil::copy_file_onto_destination_handle` (the final component, where the bytes go) uses
-///   `unwrap_or(true)` — **fails closed**. "I could not tell whether this name stands for another
-///   name" is not a licence to write through it, and there is no later check to catch it.
-/// - `open_beneath::sys::name_surrogate_at` (a directory component of the walk) uses
-///   `unwrap_or(false)` — **fails open**. Containment there does not rest on this check: a genuine
-///   surrogate is caught one component later by NT itself (`ERROR_CANT_RESOLVE_FILENAME`, measured by
-///   neutering the check and re-running the CPE-1889 junction harm test, which still refused). All the
-///   check buys is naming the link one component earlier.
+/// - `fsutil::copy_file_onto_destination_handle` (the final component, where the bytes go) — "I could
+///   not tell whether this name stands for another name" is not a licence to write through it, and
+///   there is no later check to catch it.
+/// - `open_beneath::sys::name_surrogate_at` (a directory component of the walk) — **changed from
+///   `unwrap_or(false)` by CPE-1938 round 2.** It used to fail open, on the grounds that containment
+///   there did not rest on this check: a genuine surrogate was caught one component later by NT itself
+///   (`ERROR_CANT_RESOLVE_FILENAME`, measured by neutering the check and re-running the CPE-1889
+///   junction harm test, which still refused), so all the check bought was naming the link one
+///   component earlier.
 ///
-/// Putting a default in here would silently give one of those two the wrong one.
+/// **That justification was a claim about another site's control flow, and CPE-1938 is the change that
+/// falsified it** — which is [[derive-provenance-dont-claim-it]] (CPE-1933) landing on a doc comment
+/// rather than on a test. It was true while every caller's descent was followed by another NT open.
+/// `archive::entry_component_action` calls `create_dir_beneath` as a **verification-only** pass in
+/// front of a by-path third-party unpacker: for `sub/leaf.txt` the chain is one component, so
+/// `name_surrogate_at` is the only thing that can refuse and NT is never asked again. Forced to the
+/// old fail-open value on Windows 11, a junction at `dest/sub` restored the CPE-1938 defect silently
+/// (`Ok(done: 1, skipped: 0)`, payload in `dest/other`). The split is gone; see that function for the
+/// measurement.
+///
+/// The `None` arm's untestability is what makes fail-closed free here as well as correct: nothing can
+/// make `GetFileInformationByHandleEx` fail on a handle just opened successfully, so no shipping path
+/// changes behaviour.
 ///
 /// **Both defaults rest on reading, not on measurement, and in a module this heavily measured that is
 /// worth saying out loud.** The `None` arm is untestable by construction: no fixture can make
@@ -2267,8 +2281,9 @@ pub(crate) const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
 /// only state either caller reaches it from. Everything either caller does with a `Some` is pinned by
 /// sabotage-verified tests; the `None` arm has no test and cannot have one, so it is argued rather than
 /// demonstrated. If it ever becomes reachable in the field — a network redirector that opens a handle
-/// and then refuses to describe it — the leaf's refusal is the safe direction and the walk's allow is
-/// backstopped by NT, which is the whole reason the split is where it is.
+/// and then refuses to describe it — **both callers now refuse**, which is the safe direction at each
+/// of them. That sentence used to end "…and the walk's allow is backstopped by NT, which is the whole
+/// reason the split is where it is"; the split is gone, for the reason given above.
 #[cfg(windows)]
 pub(crate) fn reparse_name_surrogate(file: &std::fs::File) -> Option<bool> {
     use std::os::windows::io::AsRawHandle;
