@@ -142,6 +142,14 @@ export const STALL_PATTERNS = [
     // Stays SOFT, deliberately: "the lockfile already matches, so no further action is needed" is an
     // ordinary and correct thing for a worker to report. It is only damning next to a wait, and the
     // hard families above already catch those.
+    //
+    // CPE-1906 — BE PRECISE ABOUT THAT EXAMPLE, because the sentence above overstates it. Fed to
+    // `classifyReport` on its own, "the lockfile already matches, so no further action is needed" DOES
+    // trip this pattern; it is soft, so it classifies `accept` only once a HANDOFF_PATTERNS line is
+    // present — and in practice one always is, because the dispatch contract mandates the handoff tail
+    // on every report. So the example is clean *in context*, not in isolation. A reader who checks the
+    // claim by pasting that one sentence in will see it flagged and conclude the comment is wrong; it
+    // is not, it was just eliding the reason. `src/lib/sprintStallControls.test.ts` pins both halves.
     severity: "soft",
     // "no further action needed from me until…"
     re: /\bno further action\s+(is\s+)?(needed|required)\b/i,
@@ -259,6 +267,16 @@ export function classifyReport(report, opts = {}) {
   };
 }
 
+/** The one-line usage message every bad-input path prints. Never a stack trace (CPE-1906). */
+const USAGE = "usage: node scripts/stall-check.mjs [report.txt] [--prior <n>]   (reads stdin if no file)";
+
+/** @param {string} message */
+function usageError(message) {
+  console.error(`stall-check: ${message}`);
+  console.error(USAGE);
+  process.exit(64);
+}
+
 function main() {
   const argv = process.argv.slice(2);
   let priorStalls = 0;
@@ -268,18 +286,26 @@ function main() {
       priorStalls = Number(argv[i + 1]);
       i += 1;
       if (!Number.isFinite(priorStalls) || priorStalls < 0) {
-        console.error("stall-check: --prior needs a non-negative number");
-        process.exit(64);
+        usageError(`--prior needs a non-negative number, got ${argv[i] ?? "(nothing)"}`);
       }
     } else if (file === null) {
       file = argv[i];
     } else {
-      console.error(`stall-check: unexpected argument ${argv[i]}`);
-      process.exit(64);
+      usageError(`unexpected argument ${argv[i]}`);
     }
   }
 
-  const report = file ? readFileSync(file, "utf8") : readFileSync(0, "utf8");
+  // CPE-1906: a nonexistent path used to escape main() as a raw ENOENT stack trace with whatever exit
+  // code Node chose. Bad input is bad input — one line, exit 64, same as every other usage path here.
+  /** @type {string} */
+  let report;
+  try {
+    report = file ? readFileSync(file, "utf8") : readFileSync(0, "utf8");
+  } catch (err) {
+    const why = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    usageError(file ? `cannot read ${file} — ${why}` : `cannot read the report from stdin — ${why}`);
+    return;
+  }
   const verdict = classifyReport(report, { priorStalls });
   console.log(`stall-check: ${verdict.action.toUpperCase()} — ${verdict.message}`);
   for (const m of verdict.matches) {

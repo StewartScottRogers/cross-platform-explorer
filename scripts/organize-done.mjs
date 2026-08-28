@@ -83,21 +83,44 @@ if (!existsSync(DONE)) { console.log("no Ticketing/Tickets/Done — nothing to d
 processDir(DONE, 0);
 console.log(`RESULT moved=${moved} created=${created} skipped=${skipped} warned=${warned}`);
 
+// CPE-1906 — this block used to be the same fail-open family as `ci-poll.mjs`'s. Every `git` failure
+// (index.lock held, a failing pre-commit hook, `git` missing, a detached HEAD) landed in one catch that
+// printed "auto-commit skipped: …" to STDOUT and left the exit code at 0 — while `processDir` above had
+// ALREADY renamed the files. So the observable outcome of a broken commit was: files moved, nothing
+// committed, `RESULT moved=N` printed, exit 0. A caller (this runs from a SessionStart hook and from
+// `/ticketing-work`) cannot tell that from a clean archive, and the dirty tree surfaces later as
+// unrelated noise. "Did not run" now exits non-zero and says so on stderr.
+//
+// The `git diff --cached --quiet` exit code was a second instance of the same shape, and it is the exact
+// bug the sprint hit in bash: exit 1 means "there are staged differences" (proceed) but exit >1 means
+// "git failed", and a bare try/catch cannot tell them apart — so a broken git read as "there is
+// something to commit". `--exit-code` semantics are now read explicitly from `status`.
 if (process.argv.includes("--commit") && moved > 0) {
+  const gitTimeoutMs = 120_000;
   try {
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: REPO }).toString().trim();
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: REPO, timeout: gitTimeoutMs }).toString().trim();
     if (branch === "main") {
-      execSync("git add Ticketing/Tickets/Done", { cwd: REPO });
-      // Only commit if staging actually produced a change.
-      try { execSync("git diff --cached --quiet", { cwd: REPO }); }
-      catch {
-        execSync('git commit -m "chore: auto-archive done tickets"', { cwd: REPO });
+      execSync("git add Ticketing/Tickets/Done", { cwd: REPO, timeout: gitTimeoutMs });
+      let staged;
+      try {
+        execSync("git diff --cached --quiet", { cwd: REPO, timeout: gitTimeoutMs });
+        staged = false;
+      } catch (e) {
+        if (e?.status !== 1) throw e;
+        staged = true;
+      }
+      if (staged) {
+        execSync('git commit -m "chore: auto-archive done tickets"', { cwd: REPO, timeout: gitTimeoutMs });
         console.log("committed auto-archive on main");
       }
     } else {
       console.log(`not committing (on '${branch}', not main) — archive moves left for the next commit`);
     }
   } catch (e) {
-    console.log("auto-commit skipped: " + (e.message || e));
+    console.error(
+      `organize-done: AUTO-COMMIT FAILED after moving ${moved} file(s) — ${e?.message || e}. ` +
+        "The archive moves are on disk but NOT committed; commit them yourself before doing anything else.",
+    );
+    process.exitCode = 1;
   }
 }

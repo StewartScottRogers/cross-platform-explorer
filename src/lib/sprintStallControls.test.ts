@@ -44,6 +44,12 @@ import {
   readFromRunJson,
   readFromPrJson,
   shouldSleepAgain,
+  ghCallTimeoutMs,
+  boundedWallClockMs,
+  classifyGhFailure,
+  formatErrorVerdict,
+  GH_CALL_TIMEOUT_MS,
+  GH_MIN_CALL_TIMEOUT_MS,
 } from "../../scripts/ci-poll.mjs";
 import { classifyReport, stripQuoted, STALL_PATTERNS } from "../../scripts/stall-check.mjs";
 
@@ -209,7 +215,20 @@ describe("ci-poll mechanises the poll traps sprint.md states in prose (CPE-1880)
       { ticks: 3, elapsedMs: 96_000, target: "32672218824" },
     );
     expect(done).toMatch(/^CI VERDICT: completed success/);
-    expect(done).toMatch(/total_count=19 pending=0 mergeable=MERGEABLE sha=84d20517/);
+    // CPE-1906 ADDED to this line and did not reorder it: `oldest_pending_min`, `skipped` and `neutral`
+    // now sit between `pending` and `mergeable`. The keys the sprint runbooks quote are all still
+    // present and still in their original relative order, so a caller grepping any one of them is
+    // unaffected — which is the compatibility promise, asserted rather than asserted-to.
+    for (const key of ["total_count=19", "pending=0", "mergeable=MERGEABLE", "sha=84d20517"]) {
+      expect(done).toContain(key);
+    }
+    const order = ["total_count=", "pending=", "oldest_pending_min=", "skipped=", "neutral=", "mergeable=", "sha="];
+    let at = -1;
+    for (const key of order) {
+      const next = done.indexOf(key, at + 1);
+      expect(next, `${key} missing from the verdict line`).toBeGreaterThan(at);
+      at = next;
+    }
   });
 
   it("a budget-exhausted verdict is a real report — it carries the prescribed handoff line, not a promise", () => {
@@ -576,6 +595,145 @@ describe("S4 RED-PROOF: the no-backgrounding bound is ENFORCED at runtime, not m
     expect(src).toMatch(/const deadline = started \+ opts\.budgetMs;/);
     expect(src).toMatch(/Clamping the\s*\n?\s*\* BUDGET does not by itself bound the WALL CLOCK/);
   });
+
+  // ── CPE-1906: the matrix re-run the ticket asks for, plus the leg it was missing ────────────────────
+  it("re-runs CPE-1880's interval × gh-cost matrix and every combination still lands under the cap", () => {
+    const intervals = [5, 10, 15, 17, 20, 30, 45, 60, 90, 120].map((s) => s * 1000);
+    const ghCosts = [1_000, 5_000, 15_000, 30_000, 60_000];
+    const budgets = [30_000, 90_000, 300_000, MAX_BUDGET_MS];
+    let combinations = 0;
+    for (const budgetMs of budgets) {
+      for (const intervalMs of intervals) {
+        for (const ghCostMs of ghCosts) {
+          combinations += 1;
+          // THE BOUND is what must be under the cap for every combination — and note what it is NOT a
+          // function of: `ghCostMs` and `intervalMs` do not appear in it at all. That independence IS
+          // gap 1's fix. The per-call timeout means a slow or hung `gh` can no longer buy itself extra
+          // wall clock, so the guarantee stops being a guess about how fast the network is.
+          const bound = boundedWallClockMs(budgetMs);
+          expect(bound, `budget=${budgetMs} interval=${intervalMs} ghCost=${ghCostMs}`).toBeLessThan(
+            HARNESS_TOOL_TIMEOUT_MS,
+          );
+          // The model is still computed and still reported to the operator, but it is no longer load
+          // bearing.
+          expect(Number.isFinite(worstCaseWallClockMs(budgetMs, intervalMs, ghCostMs))).toBe(true);
+        }
+      }
+    }
+    expect(combinations).toBe(budgets.length * intervals.length * ghCosts.length);
+    // Sanity that the matrix is not vacuous: the old MODEL does cross the cap at a 60 s `gh` call on
+    // the shipped defaults, which is precisely the hole the structural bound closes.
+    expect(worstCaseWallClockMs(MAX_BUDGET_MS, DEFAULT_INTERVAL_MS, 60_000)).toBeGreaterThan(
+      HARNESS_TOOL_TIMEOUT_MS,
+    );
+  });
+
+  it("bounds ONE gh call by the smaller of its ceiling and the time left, never below the floor", () => {
+    const deadline = 1_000_000;
+    // Plenty of time left → the ceiling applies.
+    expect(ghCallTimeoutMs(deadline - 300_000, deadline)).toBe(GH_CALL_TIMEOUT_MS);
+    // Less than the ceiling left → the remaining time applies, so the call cannot cross the deadline.
+    expect(ghCallTimeoutMs(deadline - 20_000, deadline)).toBe(20_000);
+    // Past the deadline → the floor, which is the ONLY term by which the process can outlive its budget
+    // and therefore the only term `boundedWallClockMs` has to add.
+    expect(ghCallTimeoutMs(deadline + 5_000, deadline)).toBe(GH_MIN_CALL_TIMEOUT_MS);
+    expect(boundedWallClockMs(MAX_BUDGET_MS)).toBe(MAX_BUDGET_MS + GH_MIN_CALL_TIMEOUT_MS);
+  });
+
+  it("classifies a gh failure by what it means for the caller, not by its stack", () => {
+    const timedOut = Object.assign(new Error("Command failed"), { killed: true, signal: "SIGKILL" });
+    expect(classifyGhFailure(timedOut).kind).toBe("timed out");
+    const nonZero = Object.assign(new Error("Command failed"), { status: 1, stderr: "gh: not found\n" });
+    expect(classifyGhFailure(nonZero).kind).toBe("gh exited non-zero");
+    expect(classifyGhFailure(nonZero).message).toBe("gh: not found");
+    expect(classifyGhFailure(new SyntaxError("Unexpected token < in JSON")).kind).toBe("unparseable output");
+    expect(classifyGhFailure(Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" })).kind).toBe("gh not found");
+  });
+
+  it("the could-not-ask verdict never uses the vocabulary that tells a caller to wait", () => {
+    const line = formatErrorVerdict(
+      { kind: "timed out", message: "gh exceeded its per-call timeout", count: 3 },
+      null,
+      { ticks: 3, elapsedMs: 15_000, target: "1031" },
+    );
+    expect(line).toMatch(/^CI VERDICT: unknown —/);
+    // The two sentences that made an error read as "keep waiting". Neither may survive on this path.
+    expect(line).not.toMatch(/CI VERDICT: pending/);
+    expect(line).not.toMatch(/CI still pending on/);
+    expect(line).toContain("do not merge and do not wait on it");
+  });
+
+  it("a SKIPPED check is never folded into success, and the other three tokens keep their meaning", () => {
+    const rollup = (entries: unknown[]) => ({ statusCheckRollup: entries, mergeable: "MERGEABLE", headRefOid: "abc" });
+    const check = (name: string, conclusion: string) => ({
+      __typename: "CheckRun",
+      name,
+      status: "COMPLETED",
+      conclusion,
+    });
+    const read = readFromPrJson(rollup([check("Frontend", "SUCCESS"), check("MSRV check", "SKIPPED")]));
+    // The skip is visible as a NAME, which is what lets `classifySkips` adjudicate it. The old code
+    // discarded it entirely by matching `SKIPPED` inside the success test.
+    expect(read.skippedNames).toEqual(["MSRV check"]);
+    expect(read.failedNames).toEqual([]);
+    // NEUTRAL is kept as a pass — it RAN and GitHub treats it as non-blocking — but it is counted, so
+    // "how many checks declined to judge" is never invisible either.
+    const neutral = readFromPrJson(rollup([check("Frontend", "NEUTRAL")]));
+    expect(neutral.conclusion).toBe("success");
+    expect(neutral.neutralCount).toBe(1);
+    // CANCELLED / TIMED_OUT / a shape nobody has seen all fall through to failure. Fail closed.
+    for (const c of ["CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "SOMETHING_NEW"]) {
+      expect(readFromPrJson(rollup([check("X", c)])).conclusion, c).toBe("failure");
+    }
+    // The StatusContext arm is now gated on there being no `conclusion`, so it can never paper over a
+    // CheckRun after a `gh` upgrade that starts emitting both fields.
+    const ctx = readFromPrJson(rollup([{ __typename: "StatusContext", context: "vercel", state: "SUCCESS" }]));
+    expect(ctx.conclusion).toBe("success");
+    const both = readFromPrJson(
+      rollup([{ __typename: "CheckRun", name: "X", status: "COMPLETED", conclusion: "FAILURE", state: "SUCCESS" }]),
+    );
+    expect(both.conclusion).toBe("failure");
+  });
+
+  it("a run GitHub calls `success` with skipped jobs is downgraded, not believed", () => {
+    // `gh run view` reports a run whose jobs were skipped by a `needs:` cascade as `success`. Trusting
+    // that field is the same defect one level up from the rollup.
+    const read = readFromRunJson({
+      status: "completed",
+      conclusion: "success",
+      headSha: "deadbeef",
+      jobs: [
+        { name: "Lockfile pre-flight", status: "completed", conclusion: "success" },
+        { name: "Server crates (windows-latest)", status: "completed", conclusion: "skipped" },
+      ],
+    });
+    expect(read.conclusion).toBe("skipped");
+    expect(read.skippedNames).toEqual(["Server crates (windows-latest)"]);
+  });
+
+  it("reports the age and name of the longest-running pending check", () => {
+    const now = Date.parse("2026-08-27T12:00:00Z");
+    const read = readFromPrJson(
+      {
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "fast", status: "IN_PROGRESS", startedAt: "2026-08-27T11:55:00Z" },
+          {
+            __typename: "CheckRun",
+            name: "Server crates (windows-latest)",
+            status: "IN_PROGRESS",
+            startedAt: "2026-08-27T10:57:00Z",
+          },
+        ],
+      },
+      now,
+    );
+    expect(read.oldestPendingName).toBe("Server crates (windows-latest)");
+    expect(Math.round((read.oldestPendingAgeMs ?? 0) / 60_000)).toBe(63);
+    // A missing or unparseable timestamp degrades to null rather than to 0, which would read as "just
+    // started" — the wrong direction for a signal whose whole job is spotting a job that is stuck.
+    const undated = readFromPrJson({ statusCheckRollup: [{ __typename: "CheckRun", name: "x", status: "QUEUED" }] }, now);
+    expect(undated.oldestPendingAgeMs).toBeNull();
+  });
 });
 
 describe("the pattern table stays honest (CPE-1880)", () => {
@@ -590,6 +748,21 @@ describe("the pattern table stays honest (CPE-1880)", () => {
 
   it("at least one HARD pattern exists — otherwise a handoff line would excuse every stall", () => {
     expect(STALL_PATTERNS.some((p) => p.severity === "hard")).toBe(true);
+  });
+
+  // CPE-1906 item 4 — the `no-further-action` comment cited "the lockfile already matches, so no
+  // further action is needed" as a SAFE example. Bare, it is not: it trips the pattern. It classifies
+  // `accept` only because the pattern is soft and the mandated handoff tail excuses it. Both halves are
+  // asserted here, so the corrected comment is checked rather than taken on trust.
+  it("the `no-further-action` example is clean in context and NOT in isolation, exactly as documented", () => {
+    const bare = "The lockfile already matches, so no further action is needed.";
+    expect(classifyReport(bare).matches.map((m) => m.id)).toContain("no-further-action");
+    expect(classifyReport(bare).action).toBe("re-invoke");
+    const withHandoff = `${bare} CI VERDICT: completed success — total_count=19 pending=0.`;
+    expect(classifyReport(withHandoff).action).toBe("accept");
+    // …and the file must say so, rather than repeating the claim the review found overstated.
+    const src = readFileSync(join(process.cwd(), "scripts", "stall-check.mjs"), "utf8");
+    expect(src).toMatch(/clean \*in context\*, not in isolation/);
   });
 
   it("an empty or absent report is not silently accepted as a real one", () => {

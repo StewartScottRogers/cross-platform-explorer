@@ -57,8 +57,32 @@ describe("sprint.md dispatch contract states the no-background-notifications rul
   // (median 58.9 min). Every such call is auto-backgrounded, which parks the sub-agent on a notification
   // it cannot receive. So the guard was faithfully protecting the defect. It now asserts the opposite:
   // the contract must NOT hand a sub-agent an unbounded watch, and must name the bounded replacement.
+  // CPE-1906 re-keyed the negative assertion. It used to read
+  //   `expect(DISPATCH_CONTRACT).not.toMatch(/To watch CI:\s*`gh run watch/)`
+  // which pinned CPE-1848's EXACT SENTENCE rather than the command it prescribed — so any
+  // re-prescription phrased another way ("For CI status, run `gh run watch …`", "poll with
+  // `gh pr checks --watch`") sailed straight through a guard that reads as forbidding it. The assertion
+  // is now keyed to the COMMAND, which is the thing that stalls agents; the phrasing around it is
+  // incidental.
+  //
+  // Scoped to the BLOCKQUOTED lines, which are the text actually handed to a sub-agent. The prose around
+  // them recounts the history ("CPE-1848 … handed agents the blocking command to use instead:
+  // `gh run watch <run-id> --interval 30`") and MUST keep naming the command, or the reason the rule
+  // exists disappears with it. What must never happen is the command appearing in the instruction itself
+  // other than under a prohibition.
   it("does NOT prescribe an unbounded CI watch to sub-agents — that command is what caused the stalls", () => {
-    expect(DISPATCH_CONTRACT).not.toMatch(/To watch CI:\s*`gh run watch/);
+    const instructionLines = DISPATCH_CONTRACT.split(/\r?\n/).filter((l) => /^\s*>/.test(l));
+    expect(instructionLines.length, "the dispatch contract has no blockquoted instruction block").toBeGreaterThan(3);
+    const WATCH_COMMAND = /gh\s+run\s+watch|gh\s+pr\s+checks\s+[^`\n]*--watch/g;
+    for (const line of instructionLines) {
+      for (const m of line.matchAll(WATCH_COMMAND)) {
+        const before = line.slice(0, m.index ?? 0);
+        expect(
+          /\b(?:never|not|avoid|don't|do not)\b/i.test(before),
+          `sprint.md hands sub-agents \`${m[0]}\` outside a prohibition: ${line.trim()}`,
+        ).toBe(true);
+      }
+    }
     expect(DISPATCH_CONTRACT).toMatch(/Never run `gh run watch` or `gh pr checks --watch`/);
   });
 
