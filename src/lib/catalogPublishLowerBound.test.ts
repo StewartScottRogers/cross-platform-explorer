@@ -779,6 +779,37 @@ describe("every external tool the guard runs is one it refuses to run without (C
         `verdict. \`staleExemptions\` are declared but no longer used. All commands found: ${external.join(", ")}`,
     ).toEqual({ unchecked: [], staleExemptions: [] });
   });
+
+  it("...and that command scan reads code, not the prose in a log message", () => {
+    // ROUND 7, and it is column 3 of the enumeration above. `commandWords` was answered for only by
+    // the real script, where every command it finds is already in the tools loop — the same gap
+    // round 5 left on `flagPrintf`'s consumer, one function over. Sabotage says the coverage was
+    // PARTIAL and accidental rather than absent, which is why this test asserts an exact set rather
+    // than only the absences: dropping its `dropSingleQuoted` reds the real-script caller too (that
+    // script's prose is wordy enough to yield ~30 phantom commands), but disabling the
+    // `NAME=value`/`PREFIXES` strip reds NOTHING there — the caller merely stops seeing `read`, and
+    // `SHELL_WORDS` excuses it. **2 failed / 82 passed** and **1 failed / 83 passed** respectively.
+    // Synthetic lines, none of them in the script: three tool names appear ONLY inside a
+    // single-quoted `printf` format string (`awk` in backticks, a bare `xmlstarlet`, a `$(perl …)`)
+    // and must not be reported, while the real invocations behind an assignment prefix, a `while`
+    // body, a pipe, a process substitution and an `if !` must be.
+    const lines = logicalLines(
+      [
+        "printf 'run `awk` or xmlstarlet by hand, then $(perl -pe s/x/y/) it\\n' >&2",
+        "IFS= read -r line < <(jq -r .a x)",
+        'while :; do curl -sS "$url" | tee out; done',
+        "if ! command -v gh >/dev/null; then unzip -o f; fi",
+      ].join("\n"),
+    );
+    expect(lines.length, "the synthetic lines did not survive `logicalLines`").toBe(4);
+    expect(
+      [...commandWords(lines)].sort(),
+      "the command scan is reading prose out of a single-quoted `printf` format string as commands, " +
+        "or is missing a real invocation behind a prefix, a pipe or a substitution — an over-report " +
+        "here is a phantom `unchecked` tool, an under-report is the FAIL-OPEN the caller above exists " +
+        "to catch",
+    ).toEqual(["command", "curl", "jq", "printf", "read", "tee", "unzip"]);
+  });
 });
 
 // ── 5. Red-proofed fetch failures: four causes, four distinct messages ──────────────────────────
@@ -1211,6 +1242,69 @@ describe("the comparison cannot fail open on a value it cannot represent (CPE-19
 //     each time, on a different case: the anchor alone for the double-quoted mention, the
 //     `dropSingleQuoted`-first ordering alone for the unclosed `$(catalog_lb_log_safe` in prose.
 //     Neither fix is redundant, which is not what it looked like before the pair was run.
+//
+// ── ROUND 7: EVERY FUNCTION IN THIS FILE THAT SCANS A SHELL LINE, and the same three questions ──
+//
+// Three rounds running, the SAME defect landed in a SIBLING of the thing that round fixed: round 5
+// widened `ASSIGN` for two names on a line and left `FILLED` taking one; round 5 extracted
+// `flagPrintf` and left its consuming loop unguarded; round 6 applied `dropSingleQuoted` inside
+// `flagPrintf` and not inside `taintedVars` one function away, where its absence was a live
+// fail-OPEN. Each fix was correct. None PROPAGATED. So the enumeration is written down rather than
+// re-derived from memory next round — every function here that reads a shell line, against the
+// three questions the three defects were instances of. Derived by reading the file, not recalled:
+// these are the functions taking shell text and answering something about the shell in it.
+//
+//   fn               | 1. strips single-quoted prose first?  | 2. every name/word its construct binds?
+//   -----------------|---------------------------------------|----------------------------------------------
+//   commandWords     | YES, since round 4 —                  | n/a: it reports command WORDS, not bindings.
+//                    | `dropSingleQuoted(line)` at the head  | The analogous widening is its `NAME=value` /
+//                    | of its own loop                       | `PREFIXES` / `$( )`-splitting walk.
+//   taintedVars      | YES as of round 7 — round 6's gap,    | YES as of round 7 — `filledTargets` walks
+//                    | and it was fail-OPEN, not merely      | bash's documented option grammar; the four
+//                    | noisy                                 | shapes it used to mis-bind are rows below.
+//   flagPrintf       | YES, since round 5, and its ordering  | n/a: it matches names against an
+//   (+ scanLogSites) | vs `blankSanitiserCalls` is asserted   | already-derived taint set.
+//
+//   fn               | 3. its CONSUMER covered by a test that would red?
+//   -----------------|--------------------------------------------------------------------------------
+//   commandWords     | PARTLY, and by ACCIDENT, until round 7 — measured, not reasoned: its only
+//                    | caller was the real script, where every command found is already legal.
+//                    | Dropping its `dropSingleQuoted` DOES red there (this script's prose is wordy
+//                    | enough to produce ~30 phantom "commands"), but disabling the prefix strip
+//                    | reds NOTHING — the caller just loses `read`, which `SHELL_WORDS` excuses.
+//                    | `…that command scan reads code, not the prose…` below closes that.
+//   taintedVars      | YES — `…the taint pass follows the ordinary shell shapes…` below, fourteen
+//                    | rows, each a `printf … >&2` carrying remote bytes that was classified clean.
+//   flagPrintf       | YES — `…that scan can actually SEE…` drives `flagPrintf` AND `scanLogSites`
+//   (+ scanLogSites) | with six synthetic lines; round 5 covered only the former and the mutant moved.
+//
+// `dropSingleQuoted` / `endsInsideSingleQuote` are not rows: they are the stripper itself and its
+// self-check, so question 1 is what they ARE. Adding a fourth line-scanning function means adding a
+// fourth row and answering all three, and a "no" in column 3 is the shape that has now bitten twice.
+// Note what column 3 cost to answer honestly: the first draft of this table wrote a flat YES for
+// `commandWords` and a red-proof that had not been run. Running it produced a DIFFERENT number
+// (2 tests, not 1) and a different conclusion. Answer these three by sabotage, never by reading.
+//
+// ROUND 7's red-proofs, same machine, jq 1.7.1 on PATH, baseline **84 passed / 0 skipped** (round
+// 6's 83 plus the new `commandWords` test). All of them run, numbers as the runner printed them:
+//   * remove `dropSingleQuoted` from `taintedVars`' loop (`const line = raw`) -> **1 failed /
+//     83 passed**, the ordinary-shapes test naming the two new rows and NOTHING else:
+//     `"a remedy MESSAGE naming the sanitiser marks a tainted name clean": []` (want `["safe"]`)
+//     and `"prose inside a single-quoted printf is not a `read`": ["release"]` (want `[]`).
+//   * revert `filledTargets` to round 6's `FILLED` regex, `dropSingleQuoted` left in place so this
+//     isolates the grammar fix from the prose fix -> **1 failed / 83 passed**, the same test naming
+//     exactly the four shapes — `read --`, `read -p`, bare `read` (REPLY), `mapfile -C` — with the
+//     `read -a` row staying GREEN, which is the measurement behind that row's "only by luck" note.
+//   * `if (false && cmd === "read" && w[k] === "a" …)` -> **1 failed / 83 passed**, only the
+//     `read -a` row, `[]` against `["arr"]`.
+//   * `commandWords` sabotaged TWO ways, and the pair is the informative part (CPE-1929). Removing
+//     its `dropSingleQuoted` reds **2 failed / 82 passed** — the real-script caller reds too, with
+//     ~30 English words in `unchecked` — so that stripper was already covered, accidentally, by this
+//     script's prose being wordy. Disabling the `NAME=value` / `PREFIXES` strip instead reds **only
+//     the new test**, **1 failed / 83 passed**: the real caller merely loses `read` from `invoked`,
+//     `read` is in `SHELL_WORDS`, and nothing notices. The SECOND is the boundary this test actually
+//     closes. The draft of this note claimed the first sabotage was green before round 7; it is not,
+//     and it was corrected by running it rather than by rereading it.
 
 /** Every line that a runner would read as a workflow command, i.e. `::…` after leading blanks. */
 function commandLines(text: string): string[] {
@@ -1255,9 +1349,15 @@ function guardLogicalLines(): string[] {
  * noticing, because `jq_err` comes from `mktemp` (so it is not tainted) and the loop iterated
  * variables, never substitutions. Closed in round 5: several assignments on one line, `+=`, a
  * substitution running a non-tool command, and `read`/`printf -v`/`mapfile` targets — see the
- * `ASSIGN` and `FILLED` comments in the body. Closed in round 6: the SECOND and later targets of
- * one `read`, which round 5's `FILLED` dropped while widening `ASSIGN` for the identical
- * several-names-on-one-line shape in the same diff.
+ * `ASSIGN` and `filledTargets` comments in the body. Closed in round 6: the SECOND and later targets
+ * of one `read`, which round 5's `FILLED` dropped while widening `ASSIGN` for the identical
+ * several-names-on-one-line shape in the same diff. Closed in round 7, and both are the SAME defect
+ * a third time — a fix applied at one instance of a pattern while a sibling instance keeps it:
+ * this pass reading PROSE (`dropSingleQuoted` ran in `flagPrintf` and not here, which was fail-OPEN
+ * in one direction — a REMEDY MESSAGE naming `catalog_lb_log_safe` marked a genuinely tainted
+ * variable `sanitised` — and fail-closed noise in the other, four English words out of one message
+ * standing in the live taint set), and `read`/`mapfile` option parsing, now bash's documented
+ * grammar in `filledTargets` rather than a regex that mis-bound four shapes bash accepts.
  *
  * ### READ THE FORM OF THIS SECTION BEFORE ADDING TO IT
  *
@@ -1278,12 +1378,101 @@ function guardLogicalLines(): string[] {
  *     for the scan to read, so it goes green.
  *   * Any channel that is not a `printf … >&2` at the end of a logical line: `echo … >&2`,
  *     `>&2 printf …`, a heredoc, a `{ …; } >&2` group, or stdout (out of scope by design — see the
- *     `logPrintfs` filter's own comment).
+ *     `logSites` filter's own comment inside `scanLogSites`; round 6 renamed `logPrintfs` and moved
+ *     that comment, and this line was the one reference left pointing at the old name).
  *   * Indirection that never names the variable: `printf … "${!ref}" >&2`, `eval`, `${arr[@]}`.
  * These are caught by the EXECUTED leg instead, which reads the real process's stdout+stderr and
  * cannot be fooled by how the bytes got there — but only for a path some case already drives. That
  * asymmetry is the reason both legs exist.
  */
+/**
+ * Every name one logical shell line BINDS without an `=` — `read`, `mapfile`/`readarray`,
+ * `printf -v` — per bash's documented option grammar rather than a regex approximation of it.
+ *
+ * WHY A WORD WALK. Round 6's regex allowed `-x` and `-x arg` option runs and then took the trailing
+ * run of identifiers. That is not the grammar: WHICH short options consume the following word is a
+ * fixed, documented, per-builtin list, and without it four shapes bash accepts came out wrong while
+ * the comment at the regex said "EVERY name after the options, not the first … UNCONDITIONALLY".
+ * Measured at round 6's head, and each is now a row in the ordinary-shapes table below:
+ *     read -- name                -> []        (bash: name=hello)   -- end-of-options unhandled
+ *     read -p "Enter: " x         -> []        (bash: x=hello)      -- the option argument has a
+ *                                                                      space, so `\S+` stopped
+ *     read / read -r              -> []        (bash: REPLY=hi)     -- the implicit target
+ *     mapfile -C mycb -c 2 arr    -> ["mycb"]  (bash: arr=a b)      -- the CALLBACK, not the array
+ * and `read -r -- name` answered `["name"]` only by luck: the regex read `-r` as an option whose
+ * argument was `--`. Dropping the `-r` broke it.
+ *
+ * The grammar (bash(1), `read` and `mapfile`), which is the whole content of this function:
+ *   read [-ers] [-a aname] [-d delim] [-i text] [-n n] [-N n] [-p prompt] [-t sec] [-u fd] [name…]
+ *   mapfile [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c n] [array]
+ * so `adinNptu` / `dnOsuCc` are the argument-taking options, `read` binds a LIST of names and
+ * `mapfile` exactly one array, `-a aname` is the one option ARGUMENT that is itself a target, and
+ * with no name at all the defaults are `REPLY` / `MAPFILE`. Short options bundle (`-ra`), `--` ends
+ * them, and the command ends at the first shell metacharacter so `read -r a b; then` binds `a` and
+ * `b` rather than `then`, and `mapfile -t lines < <(jq . f)` does not bind `f`.
+ *
+ * AT LEAST these are still not bound, and the list is split by whether a wider walk could catch it
+ * (CLAUDE.md's round-9 rule: never a count, and say which half each shape is in):
+ *   * NOT CAUGHT TODAY, catchable — an array subscript target (`read -r 'arr[$i]'` binds `arr`;
+ *     the operand is taken whole, so `arr[$i]` is reported verbatim and matches no `$arr` use);
+ *     `local`/`declare`/`typeset -n` nameref binding; `getopts optstring name`.
+ *   * CANNOT be caught by any walk of this line — the builtin reached through a variable or an
+ *     alias (`$RD -r x`), `eval "read $names"`, and a name computed at run time. Those are the
+ *     executed leg's job, not this one's.
+ * Red-proofed at the site, both run rather than reasoned: `if (false && cmd === "read" && w[k] ===
+ * "a" …)` takes `read -r -a arr` from `["arr"]` to `[]` and reds ONLY the `read -a` row
+ * (1 failed / 83 passed); putting round 6's `FILLED` regex back in place of this walk reds ONLY the
+ * four mis-bound shapes, including the bare-`read`/`REPLY` one (1 failed / 83 passed). The `-a`
+ * clause and the `REPLY`/`MAPFILE` fallback are therefore each load-bearing on their own.
+ */
+function filledTargets(line: string): string[] {
+  const out: string[] = [];
+  // `printf -v var` binds exactly one name — bash's `printf` has no other name-binding option, so
+  // this branch is single-capture on purpose rather than by omission.
+  for (const m of line.matchAll(/(?:^|[\s!(){};|&])printf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)/g)) out.push(m[1]);
+  // Words, with a double-quoted span held together so `-p "Enter: "` is ONE option argument and a
+  // `read` inside a double-quoted message is not a word at all.
+  const words = line.match(/(?:"(?:\\.|[^"])*"|[^\s"])+/g) ?? [];
+  for (let i = 0; i < words.length; i += 1) {
+    const cmd = words[i] === "readarray" ? "mapfile" : words[i];
+    if (cmd !== "read" && cmd !== "mapfile") continue;
+    const takesArg = cmd === "read" ? "adinNptu" : "dnOsuCc";
+    const names: string[] = [];
+    let operands = false; // set by `--`
+    let j = i + 1;
+    for (; j < words.length; j += 1) {
+      const w = words[j];
+      if (!operands && w === "--") {
+        operands = true;
+        continue;
+      }
+      if (!operands && w.length > 1 && w.startsWith("-")) {
+        for (let k = 1; k < w.length; k += 1) {
+          if (!takesArg.includes(w[k])) continue;
+          // The argument is the rest of the bundle if there is one (`-dX`), else the next word.
+          const inline = w.slice(k + 1);
+          const arg = inline !== "" ? inline : words[(j += 1)];
+          // `read -a aname` is the one option argument that IS the target.
+          if (cmd === "read" && w[k] === "a" && arg) names.push(arg);
+          break;
+        }
+        continue;
+      }
+      // An operand, ending at the first shell metacharacter — which also ends the command.
+      const cut = (/^[^\s;|&<>)}]*/.exec(w) as RegExpExecArray)[0];
+      if (cut !== "") names.push(cut);
+      if (cut !== w) break;
+      if (cmd === "mapfile") break; // mapfile binds ONE array name
+    }
+    const bound = names
+      .map((n) => /^[A-Za-z_][A-Za-z0-9_]*/.exec(n)?.[0])
+      .filter((n): n is string => Boolean(n));
+    out.push(...(bound.length > 0 ? bound : [cmd === "read" ? "REPLY" : "MAPFILE"]));
+    i = j;
+  }
+  return out;
+}
+
 function taintedVars(lines: string[]): { tainted: Set<string>; sanitised: Set<string> } {
   const tainted = new Set<string>();
   const sanitised = new Set<string>();
@@ -1297,29 +1486,40 @@ function taintedVars(lines: string[]): { tainted: Set<string>; sanitised: Set<st
   // `\+?=` picks up append, and every match is classified from the text that FOLLOWS it, so a
   // second assignment on the same line is judged on its own right-hand side.
   const ASSIGN = /(?:^|[\s!(){};])([A-Za-z_][A-Za-z0-9_]*)(\+?)=/g;
-  // A variable filled WITHOUT an `=` on its left. Round 4 listed these as "still blind … none of
-  // them present in the script today" — and `while IFS= read -r asset_name` was added by that very
-  // round, one line from a live hole, receiving remote asset names. So they are followed rather
-  // than listed: the target of a `read`/`printf -v`/`mapfile` is tainted UNCONDITIONALLY, because
-  // unlike an `=` there is no right-hand side to judge and the fail-closed answer is the only one
+  // A variable filled WITHOUT an `=` on its left — `read`, `mapfile`/`readarray`, `printf -v`.
+  // Round 4 listed these as "still blind … none of them present in the script today" — and
+  // `while IFS= read -r asset_name` was added by that very round, one line from a live hole,
+  // receiving remote asset names. So they are followed rather than listed, in `filledTargets`
+  // below, which walks bash's DOCUMENTED option grammar for those three builtins instead of
+  // approximating it with a regex. Every name it reports is tainted with no right-hand side
+  // consulted: unlike an `=` there is nothing to judge, and fail-closed is the only answer
   // available. On this script that taints `asset_name` (remote, correct) and
   // `catalog_lb_log_safe`'s own `line` (which never reaches a `printf … >&2`).
   //
-  // EVERY name after the options, not the first — `read` takes a LIST of targets and splits the
-  // input across them. Round 5 widened `ASSIGN` from one match per line to all of them, wrote the
-  // "UNCONDITIONALLY" sentence above, and left the sibling defect standing in `FILLED` in the same
-  // diff: `IFS=: read -r name size` tainted `name` and not `size`, so `printf … "$size" >&2`
-  // carrying remote bytes read as clean while the comment claimed otherwise. Same shape as
-  // `local a="$tag" b="$tag"`, which that round DID fix — a fix applied at one instance of a
-  // pattern while a sibling instance in the same diff keeps the defect. The `IFS=: read with TWO
-  // targets` case below is the one that reds. (`printf -v` really does take one target, so its
-  // branch is single-capture on purpose.)
-  const FILLED =
-    /(?:^|[\s!(){};|])(?:read|mapfile|readarray)\s+(?:-[A-Za-z]+\s+|-[A-Za-z]\s*\S+\s+)*([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)|printf\s+-v\s*([A-Za-z_][A-Za-z0-9_]*)\b/g;
-  for (const line of lines) {
-    FILLED.lastIndex = 0;
-    for (let f = FILLED.exec(line); f; f = FILLED.exec(line))
-      for (const target of ((f[1] ?? f[2]) as string).trim().split(/\s+/)) tainted.add(target);
+  // ROUND 7 replaced the regex, and the sentence that stood here, together — see `filledTargets`
+  // for the four shapes bash accepts that the regex bound wrongly or not at all, each now a row in
+  // the ordinary-shapes table below. Round 5's `FILLED` captured one target per `read`; round 6
+  // widened it to "EVERY name after the options" and wrote that as a universal; four shapes
+  // (`read -- name`, `read -p "…" x`, bare `read`, `mapfile -C cb -c 2 arr`) falsified it the same
+  // day. A regex cannot express "this option consumes the next word", which is the whole grammar.
+  for (const raw of lines) {
+    // PROSE FIRST, exactly as `flagPrintf` does — round 6 applied `dropSingleQuoted` there and not
+    // here, one function away, and the omission ran in BOTH directions. Over-taint, visible:
+    // `catalog-lower-bound.sh`'s "Refusing to read an unenumerable release as …" is a single-quoted
+    // `printf` format string, and `read an unenumerable release as` fed FOUR English words to the
+    // name list, taking the live taint set to 16. Fail-OPEN, the one that matters, reproduced by
+    // the round-7 reviewer:
+    //     printf 'remedy: wrap it as safe=$(catalog_lb_log_safe "$VAR") before logging\n' >&2
+    // put `safe` into `sanitised` from PROSE, so the real `safe="$tag"` two lines later and its
+    // `printf … "$safe" >&2` came back `flagged: []` — a variable carrying remote bytes reported
+    // clean because a REMEDY MESSAGE named the sanitiser. That is the same bypass-by-rewording that
+    // synthetic cases (3)/(4) record round 4 as closing for `blankSanitiserCalls`, still standing
+    // in the sibling scan. Stripping is exact, not merely safer: the shell expands nothing inside
+    // `'…'`, so `msg='$tag'` is a literal and NOT tainting it is the correct answer, not a
+    // loosening. The one input on which this hides text — an unterminated `'` — is measured away
+    // for the real script by the `fail-OPEN branch` test below, which now covers this scan too.
+    const line = dropSingleQuoted(raw);
+    for (const target of filledTargets(line)) tainted.add(target);
     ASSIGN.lastIndex = 0;
     for (let m = ASSIGN.exec(line); m; m = ASSIGN.exec(line)) {
       const name = m[1];
@@ -1574,9 +1774,23 @@ function flagPrintf(
  *     expected { logSites: 6, …(3) } to deeply equal { logSites: 6, …(3) }
  *     - "subs": 4   + "subs": 0
  *
- * so the mutant is dead rather than moved again. The boundary this leaves open is one level further
- * out still — `guardLogicalLines()` and `RAW_OK` are supplied by the caller and only the real source
- * answers for those — and that is stated rather than claimed closed.
+ * so the mutant is dead rather than moved again. One level further out still are `guardLogicalLines()`
+ * and `RAW_OK`, supplied by the caller — and round 6 left those described as simply open, which
+ * overstates it in both cases. NEITHER is a silent boundary, and round 7 says which, because
+ * "still open" and "covered by a different mechanism" are not the same report:
+ *   * `guardLogicalLines()` NARROWING is caught by the parser self-check in the assertion below
+ *     (`expect(tainted).toEqual(arrayContaining(["api_out", "assets", "bound", "gh_err", "tag"]))`
+ *     plus `lines.length > 80`), which exists precisely so a parse that stops finding what the
+ *     script visibly assigns reds instead of going vacuous. What it does NOT catch is a parse that
+ *     returns those five and drops some sixth line.
+ *   * `RAW_OK` cannot quietly GROW: `stale` reports every entry the scan no longer finds and the
+ *     assertion is exact-match, so an exemption added without a matching raw site reds on the spot.
+ *     What it does not do is stop a diff adding an entry ALONGSIDE the raw site it excuses — which
+ *     is the reviewable-diff trade `RAW_OK`'s own docblock already states, not a hidden gap.
+ * The genuinely uncovered boundary is the mutant one level out from BOTH: the assertion body itself.
+ * That is the natural terminus — the reviewer's round-7 note, kept because it is the answer to the
+ * next person who runs the sabotage chain — since mutating an expected literal there is just
+ * deleting the assertion, which no test can be asked to notice on its own behalf.
  *
  * `rawOk` is a parameter rather than a reach for the module-level `RAW_OK` so the synthetic test can
  * drive the bookkeeping with its own (empty) exemption list; the real scan passes `RAW_OK`.
@@ -1789,8 +2003,14 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     //     expected { …(6) } to deeply equal { …(6) }
     //     received every one of the six as `Array []`
     // i.e. "laundered through a non-tool substitution" and "append onto a SANITISED name" were
-    // walked through too. The seventh case (`IFS=: read` with two targets) is round 6's, and reds
-    // against round 5's own `FILLED`, which captured one target per `read`.
+    // walked through too. The `IFS=: read with TWO targets` case is round 6's, and reds against
+    // round 5's own `FILLED`, which captured one target per `read`. The rows from
+    // `a remedy MESSAGE naming the sanitiser` down are round 7's: the first two are the two
+    // directions of `taintedVars` not stripping single-quoted prose (one fail-OPEN, one a false
+    // positive), and the rest are the shapes bash's `read`/`mapfile` grammar accepts that round 6's
+    // regex bound wrongly or not at all. They are rows and not a widened sentence on purpose —
+    // three rounds running, a universal written at this pass was falsified by an ordinary shape
+    // within a day, so the next widening gets scored against a table rather than asserted in prose.
     const cases: { label: string; lines: string[]; want: string[] }[] = [
       {
         label: "two assignments on one line, second one ignored",
@@ -1838,6 +2058,71 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
           "printf '%s\\n' \"$safe\" >&2",
         ],
         want: ["safe"],
+      },
+      {
+        // Round 7, and the reason the round exists: `flagPrintf` ran `dropSingleQuoted` and
+        // `taintedVars` did not, one function away. The sanitiser is named in PROSE, inside a
+        // single-quoted `printf` format string offering the remedy — and that put `safe` into
+        // `sanitised`, so the real `safe="$tag"` below it and its log site came back clean. The
+        // same bypass-by-rewording that cases (3)/(4) above record round 4 as closing for
+        // `blankSanitiserCalls`. Reproduced by the round-7 reviewer, verbatim.
+        label: "a remedy MESSAGE naming the sanitiser marks a tainted name clean",
+        lines: [
+          "tag=$(jq -r .t x)",
+          "printf 'remedy: wrap it as safe=$(catalog_lb_log_safe \"$VAR\") before logging\\n' >&2",
+          'safe="$tag"',
+          "printf '%s\\n' \"$safe\" >&2",
+        ],
+        want: ["safe"],
+      },
+      {
+        // The other direction of the same omission — a FALSE POSITIVE, so it reds as a name the
+        // scan reports rather than one it misses. `catalog-lower-bound.sh:383` says "Refusing to
+        // read an unenumerable release as …" in a single-quoted format string, and round 6's
+        // widened name list read `an unenumerable release as` as four `read` targets. Measured on
+        // the real script: the live taint set was 12 real names at round 5 and at round 7, and 14
+        // / 16 in between (round 5 spuriously held `an` and `as`; round 6 added `release` and
+        // `unenumerable`). A local literal reported as carrying remote bytes.
+        label: "prose inside a single-quoted printf is not a `read`",
+        lines: [
+          "printf 'Refusing to read an unenumerable release as \"publishes no catalog\"\\n' >&2",
+          "release=v1.2.3",
+          "printf 'built %s\\n' \"$release\" >&2",
+        ],
+        want: [],
+      },
+      // ── Round 7: the four shapes bash accepts that round 6's `FILLED` regex bound wrongly or not
+      // at all, while the comment at it said "EVERY name after the options … UNCONDITIONALLY". They
+      // are rows rather than a widened sentence so the NEXT widening is scored rather than asserted.
+      {
+        label: "`read --` ends the options",
+        lines: ["read -- name < <(jq -r .n x)", "printf '%s\\n' \"$name\" >&2"],
+        want: ["name"],
+      },
+      {
+        label: "`read -p` takes a QUOTED prompt, so the target is two words along",
+        lines: ['read -p "Enter release: " x', "printf '%s\\n' \"$x\" >&2"],
+        want: ["x"],
+      },
+      {
+        label: "a `read` with no name at all binds the implicit REPLY",
+        lines: ['read -r <<< "$(jq -r .n x)"', "printf '%s\\n' \"$REPLY\" >&2"],
+        want: ["REPLY"],
+      },
+      {
+        // Round 6 reported `["mycb"]` here — the CALLBACK, not the array. Both halves wrong: the
+        // real target untainted, a function name tainted instead.
+        label: "`mapfile -C cb -c n arr` binds the array, not the callback",
+        lines: ["mapfile -C mycb -c 2 arr < f", "printf '%s\\n' \"${arr[0]}\" >&2"],
+        want: ["arr"],
+      },
+      {
+        // Not a round-6 miss — it answered `["arr"]`, but only because it read `-a` as an option
+        // and `arr` as a trailing name. `-a aname` is the one option ARGUMENT that is itself a
+        // target, so `filledTargets` says so explicitly; this row is that clause's red-proof.
+        label: "`read -a` takes the array as its option ARGUMENT",
+        lines: ['read -r -a arr <<< "$(jq -r .n x)"', "printf '%s\\n' \"${arr[0]}\" >&2"],
+        want: ["arr"],
       },
     ];
     const got = cases.map(({ lines }) => {
