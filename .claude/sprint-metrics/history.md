@@ -4286,3 +4286,41 @@ Also worth noting for the record: `read -a` was passing before this round **only
 regex-revert red-proof stays green on that row while the other four go red. **A row that passes for the
 wrong reason is indistinguishable from one that passes for the right reason until something changes
 underneath it**, which is the whole argument for pinning shapes you have just widened past.
+
+## 2026-08-29 — the red-proof patched its own documentation, and the green read as a coverage gap
+
+#1093's round 5 re-ran nine sabotages. One came back **13 passed / 0 failed** — a red-proof that had
+reddened in round 4 now proving nothing.
+
+The cause is new tonight and worth every word. The sabotage was scripted as a `replace` of the bare
+string `prAts.every(filtered)`. **That string also appears four lines above the code, in the header's own
+list of red-proof recipes.** The script hit the comment. The code was never touched. The test correctly
+reported that nothing was wrong.
+
+**CLAUDE.md's rule 2 — anchor on code, never on prose — applies to the sabotage as much as to the
+scanner**, and here it fails in the direction that looks safe. A red-proof that reds tells you the guard
+works. A red-proof that *stays green* is ambiguous between **"the test does not cover this"** and **"the
+test was never given anything to notice"** — and only the first is a finding. The author would have been
+entirely reasonable to write down "round 4's count no longer reproduces"; the true statement is that its
+automation was wrong and round 4's number was honest. Anchored on `prPathFiltered: prAts.every(filtered)`
+it reds at 1/12 exactly as recorded.
+
+**So the check is one line and it belongs in every scripted sabotage: assert the patched file differs in
+code.** Not that it differs — a comment edit differs. Diff the file with comments stripped, or anchor the
+replacement on syntax that cannot occur in prose. **A harness that silently edits nothing is the same
+defect class as a guard that silently runs nothing**, which this shift has now found eleven times in
+eleven different costumes — and this is the first instance where the thing that failed to run was *the
+sabotage itself*.
+
+Two other things from the round, both the right shape.
+
+**It counted the bracket depth inside the existing quote-aware loop rather than over the returned
+string**, because `rest` still carries its quotes and a naive count answers 1 for `on: ["a[b",
+pull_request]` — refusing a line the classifier reads correctly today. **A fix that buys a new false
+positive is not a fix**, and it red-proofed the naive version to prove the distinction.
+
+**And it corrected my expected outcome with an argument rather than diverging quietly.** I asked for the
+multi-line flow to land in `unjudged`; it lands in `unknown`, because round 3 could *widen* a class for a
+well-understood event, whereas here **nothing read the continuation line at all** — so *"did not run"* is
+the honest state, and it happens to be the louder one. **Naming where you departed from the brief and why
+is what makes a divergence reviewable instead of a surprise.**
