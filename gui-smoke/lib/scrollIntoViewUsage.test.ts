@@ -2,12 +2,48 @@
 //
 // That command does not call the DOM API: it injects a real mouse wheel through the driver. Since
 // webdriverio 9.31.4 (pulled in by CPE-1945's `npm audit fix`, PR #1065) the wheel carries NO `origin`,
-// so it lands at viewport (0, 0) with a real delta computed from the element's rect — measured against
-// Chrome 151 with that exact build, scrolling an already-on-screen `.ctx .flyout .row` emits
-// `{"type":"scroll","x":0,"y":0,"deltaX":560,"deltaY":222}`. On WebKitGTK that stray wheel relocates the
-// webview's hover target; `Submenu.svelte`'s `on:mouseleave` closes the flyout the spec was about to
-// click, and `macro-param-prompt.smoke.ts` died with `element (".ctx .flyout .row") still not existing
-// after 5000ms` on every completed shard-2 run — a permanent red on `gui-smoke-linux-verdict`.
+// so it lands at viewport (0, 0) with a real delta computed from the element's rect. On WebKitGTK that
+// stray wheel relocates the webview's hover target; `Submenu.svelte`'s `on:mouseleave` closes the
+// flyout the spec was about to click, and `macro-param-prompt.smoke.ts` died with
+// `element (".ctx .flyout .row") still not existing after 5000ms` — the standing red on
+// `gui-smoke-linux-verdict` that CPE-1960 fixed.
+//
+// ONSET AND RATE — measured, not inferred. THE DISCRIMINATOR IS LOCKFILE CONTENT, NOT MERGE TIME.
+// Fingerprint each shard-2 job by what `npm ci` installed: `added 479 packages` = webdriverio 9.30.0,
+// `added 489 packages` = 9.31.4 (both confirmed against `git show <sha>:gui-smoke/package-lock.json`).
+// Over the 32 shard-2 jobs from 2026-08-27T19:12Z to 2026-08-28T00:42Z:
+//
+//     9.30.0 (479 pkgs)   13 complete (14/14) runs    0 failed this case
+//     9.31.4 (489 pkgs)   11 complete (14/14) runs   10 failed this case
+//
+// First failure: job `98661503323`, 2026-08-27T20:33Z, on the CPE-1945 BRANCH (`c33a9609`) — about two
+// hours BEFORE `48aa8697` merged to main at 22:27Z. Job `98669198175` (21:00Z) failed the same way,
+// also pre-merge. An earlier draft of this comment placed the onset at the merge and called the failure
+// 100% deterministic; both were wrong, and the second is the dangerous one:
+//
+// JOB `98681871872` IS A CLEAN, COMPLETE RUN *ON* 9.31.4. It checked out `f656f36` (PR #1065's own
+// merge commit), installed 489 packages, and reported `14/14 … 24 passed, 0 failed`. Its rect probe is
+// byte-identical to the failing run's (`elemRect {x:553.296875, y:589, width:178, height:32}`, viewport
+// 1000x700, scroll 0,0) and it dispatched the same `wheel3` — the flyout simply survived that once.
+// Same wheel, racy outcome, ~90% not 100%. SO: ONE GREEN CI RUN DOES NOT VERIFY THIS FIX. A green run
+// already happened on the broken version.
+//
+// THE MECHANISM, derived from 9.31.4's installed source plus the failing run's own log (job
+// `98705756557`, 23:37:02): the call was `scrollIntoView({ block: "center" })`, so
+// `deltaY = 589 - (700 - 32) / 2 = 255`; `inline` was undefined, so `deltaX` kept its initial value
+// `targetByOption.start.x = 553.296875`; rounded, `(553, 255)`. Non-zero, so the
+// `if (deltaX === 0 && deltaY === 0) return` guard does not fire and the wheel lands at viewport (0, 0).
+// `isVisibleY`/`isVisibleX` ARE computed, but they are consulted ONLY inside the `nearest` branches, so
+// `block: "center"` bypasses the already-visible check entirely. In the log the row was present 250 ms
+// before the wheel (`findElements` -> 1 element; `getHTML` -> `… CPE-1190 Ask Macro`) and gone 208 ms
+// after (`findElements` -> [], and on every retry for 5 s). Only the 9.30.0 payload is in the CI logs
+// verbatim (`{"type":"scroll","x":-249,"y":-334,"deltaX":0,"deltaY":0,"origin":{…element…}}`, job
+// `98686079109`) — Node's inspector elides 9.31.4's as `actions: [Array]`, which is why the numbers
+// above are derived from the log's own rect probe instead of quoted from a payload.
+//
+// `48aa8697` also carried `expect-webdriverio` 5.7.0 -> 6.0.9, a semver-major. Considered and excluded:
+// the wheel trace accounts for the failure end to end, and `expect-webdriverio` is not on the
+// `scrollIntoView` path at all.
 //
 // `lib/scrollIntoView.ts`'s `scrollIntoViewCentered()` is the replacement: the page's own
 // `Element.scrollIntoView()`, run inside `element.execute`. It is a no-op for the fixed-position menu
@@ -21,6 +57,18 @@
 // unbroken element expression and then `.scrollIntoView(`; a DOM call always sits inside an `execute`
 // callback, where a space/arrow intervenes. `sanity check` below pins both directions of that so this
 // guard cannot rot into one that matches nothing.
+//
+// SCOPE — narrower than "no `scrollIntoView` command anywhere", said here rather than implied. Because
+// the regex requires a literal `await` immediately before an unbroken element expression, it catches
+// `await el.scrollIntoView(…)` and `await Promise.all([row.scrollIntoView(…)])` but MISSES these,
+// checked by hand against this exact regex rather than assumed:
+//   * `const p = el.scrollIntoView(…); await p;`   — the `await` is detached from the expression
+//   * `return el.scrollIntoView();`                 — returned rather than awaited
+//   * `await (await $(".x")).scrollIntoView();`     — the expression starts with `(`
+// It also enumerates `specs/` and `lib/` NON-RECURSIVELY. Both are flat today (`git ls-files` shows no
+// subdirectory under either), so nothing is missed now, but a future subdirectory would go unscanned.
+// None of these can produce a false red; they can only let a bad call through. Widening the regex is a
+// code change and was out of scope for the prose round that wrote this note.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";

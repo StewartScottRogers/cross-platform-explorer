@@ -79,6 +79,10 @@ reported, 26 case(s) — 23 passed, 1 failed, 2 skipped/pending`, same case, `in
 
 So it has now been seen on **three unrelated branches** — `373ee259`, #1068, #1066.
 
+*(Superseded — the hypothesis below was **measured false** in round 2: 13 complete shard-2 runs on
+webdriverio 9.30.0 reported no such failure. See "The discriminator is LOCKFILE CONTENT" in the Work
+Log. Kept as the reasoning that prompted the enumeration.)*
+
 **Reconsider the "intermittent" framing.** Every shard-2 run that *actually completed* has reported
 this failure. The runs that appeared clean are the ones that died at spec #2 and never reached spec
 #6 (CPE-1955's transport death), which reported `0 new failing cases` and were re-run. If that holds,
@@ -94,42 +98,64 @@ background defect, it is the thing standing between the queue and green.
 
 ## Work Log — 2026-08-27/28
 
-### It is neither intermittent nor "always failing on completed runs" — it has a commit boundary
+### The discriminator is LOCKFILE CONTENT, not merge time — and the failure is racy, ~90%
 
-The ticket's own first check (*"find any shard-2 run with `14/14 reported` and no `macro-param-prompt`
-failure"*) **found two**, so the "every completed run shows it" theory in the *Raised to High* section
-is wrong — but so is "intermittent". Every shard-2 run that completed sits on one side or the other of a
-single merge:
+*(Corrected in round 2. Round 1 sampled five shard-2 jobs, saw them sort cleanly around the CPE-1945
+merge, and wrote "100 % deterministic on either side of `48aa8697`". Enumerating **all 32** shard-2 jobs
+in the window falsifies that. Both the earlier "intermittent" framing and the *Raised to High* section's
+"every completed run shows it" are also wrong. The measured version is below.)*
 
-| shard-2 job | time (Z) | branch | ratchet line | this case |
-|---|---|---|---|---|
-| `98681871872` | 21:44 | `cpe-1945-gui-smoke-npm-audit` | `14/14 … 24 passed, 0 failed, 2 skipped` | passed |
-| `98686079109` | 22:02 | `worktree-agent-add93db74672448c3` | `14/14 … 24 passed, 0 failed, 2 skipped` | passed |
-| — | **22:27:49** | **`48aa8697` — CPE-1945 (PR #1065) merges to main** | | |
-| `98697809924` | 22:45 | `worktree-agent-add93db74672448c3` (`373ee259`) | `14/14 … 23 passed, 1 failed, 2 skipped` | FAILED |
-| `98705756557` | 23:35 | `cpe-1955-gui-smoke-shard-death` (#1068) | `14/14 … 23 passed, 1 failed, 2 skipped` | FAILED |
-| (#1066) | 23:47 | `worktree-agent-add93db74672448c3` | `14/14 … 23 passed, 1 failed, 2 skipped` | FAILED |
+Fingerprint each shard-2 job by what `npm ci` actually installed: **`added 479 packages` = webdriverio
+9.30.0, `added 489 packages` = 9.31.4**, both confirmed against
+`git show <sha>:gui-smoke/package-lock.json`. Over the **32** shard-2 jobs from 2026-08-27 19:12Z to
+2026-08-28 00:42Z (every shard-2 job in that span; 5 were cancelled before `npm ci` and 3 died
+incomplete at spec #2 on CPE-1955's transport death):
 
-It is **100 % deterministic on either side of `48aa8697`**. "Three unrelated branches" was the tell that
-this was not a race: they were unrelated branches that had all rebased past the same commit.
+| webdriverio | complete (14/14) runs | failed `macro-param-prompt` |
+|---|---|---|
+| **9.30.0** (479 pkgs) | 13 | **0** |
+| **9.31.4** (489 pkgs) | 11 | **10** |
 
-`48aa8697` is CPE-1945's audit pass, and the only functional change in it is
-`gui-smoke/package-lock.json`: **webdriverio 9.30.0 → 9.31.4**.
+**Onset: 2026-08-27 20:33Z, job `98661503323`, on the `cpe-1945-gui-smoke-npm-audit` branch**
+(`c33a9609`) — `14/14 … 23 passed, 1 failed`, `NEW GUI REGRESSION: macro-param-prompt…`. That is about
+**two hours before** `48aa8697` merged to main at 22:27:49Z. Job `98669198175` (21:00Z, `92ddf70e`)
+failed identically, also pre-merge. The branch had carried the bump since `c33a9609` at 20:12Z.
+
+**Job `98681871872` — cited in round 1 as a clean *pre-bump* run — is nothing of the kind.** It checked
+out `f656f36` (PR #1065's own merge commit), installed **489** packages, and reported
+`14/14 … 24 passed, 0 failed, 2 skipped`. It is a clean, complete run **ON 9.31.4**. It only looks
+pre-boundary if you sort by merge time.
+
+**Why this is not pedantry.** At ~90% rather than 100%, **one green CI run does not verify this fix** —
+a green run already happened on the broken version. Saying "100 % deterministic" inside a permanent
+guard file, where a passing test reads as vouching for it, is exactly the CPE-1933 failure mode.
+
+`48aa8697` is CPE-1945's audit pass; the only change in it that reaches gui-smoke is
+`gui-smoke/package-lock.json`, and the relevant entry is **webdriverio 9.30.0 → 9.31.4**. That same
+lockfile diff also carried **`expect-webdriverio` 5.7.0 → 6.0.9**, a semver-major. Considered and
+**excluded**: the wheel trace below accounts for the failure end to end, and `expect-webdriverio` is not
+on the `scrollIntoView` path at all.
 
 ### The defect is in THE SPEC (the harness helper), not the app
 
 `macro-param-prompt.smoke.ts`'s `pointByText()` called WebdriverIO's `element.scrollIntoView()`
 **command** on `.ctx .flyout .row` — a popup-menu row. That command does not call the DOM API; it
 computes a delta and injects a real mouse wheel through the driver. The two versions differ exactly
-here, and both payloads are in the CI logs verbatim:
+here. **Only the 9.30.0 payload is in the CI logs verbatim** — Node's inspector elides 9.31.4's as
+`actions: [Array]` — so the 9.31.4 side is read out of its installed source and the log's own rect
+probe, which is a stronger claim anyway:
 
-* **9.30.0** (job `98686079109`, the passing run):
+* **9.30.0** (job `98686079109`, a passing run, logged verbatim):
   `{"type":"scroll","x":-249,"y":-334,"deltaX":0,"deltaY":0,"origin":{"element-…":"node-C660…"}}`
-  — origin *on the element*, delta **zero**. A harmless no-op.
+  — the deltas were assigned to the origin **offset** fields and `deltaX`/`deltaY` were omitted,
+  defaulting to 0. A no-op anchored on the element.
 * **9.31.4** (`node_modules/webdriverio/build/index.js`, `scrollIntoView`):
   `await browser.action('wheel').scroll({ duration: 0, x: 0, y: 0, deltaX, deltaY }).perform()`
   — **no `origin`**, so the wheel lands at viewport **(0, 0)**, nowhere near the element, carrying a
   real non-zero delta computed from the element's rect.
+
+So **9.31.4 did not break `scrollIntoView`**: it fixed a wrong-field bug and thereby made the command
+actually scroll for the first time. The suite had been calling a no-op and relying on it.
 
 On WebKitGTK that stray wheel relocates the webview's hover target; `Submenu.svelte`'s
 `on:mouseleave={() => closeMenu(false)}` fires, the flyout unmounts, and the next command on the row
@@ -146,34 +172,55 @@ family either — nothing was slow; something was actively closed.
 
 The app is behaving correctly: a pointer leaving a hover-opened submenu should close it.
 
-### Reproduction + red-proof
+### The wheel, derived from CI's own log (round 2 — this replaces the local-Chrome repro)
 
-Reproducing the WebKit *hover relocation* needs WebKitGTK, which is Linux-only — so the end-to-end
-failure does not reproduce on this Windows box, and it does not reproduce under Chromium at all (Chrome
-does not move hover for a driver wheel that scrolls nothing, which is also why the Windows gui-smoke leg
-never saw this). Said plainly rather than papered over.
-
-What **does** reproduce locally, deterministically, is the trigger — the unrequested wheel. Driving the
-**same webdriverio 9.31.4** out of `gui-smoke/node_modules` against real Chrome 151 (headless,
-off-screen, non-focused) over a static page mirroring `ContextMenu.svelte` + `Submenu.svelte`, with
-`performActions` instrumented to record what the helper emits:
+Round 1 reproduced the *trigger* locally, by driving the same webdriverio 9.31.4 against real Chrome 151
+over a static page mirroring the menus. That worked, but it carried a caveat — a hand-built page, a
+different browser engine — and it is unnecessary, because the whole derivation is already in the failing
+CI run's log. From job `98705756557` (the real WebKitGTK shard, times as logged):
 
 ```
-[old] flyout open; row rect {"top":556,"height":32,"viewportH":700}
-[old] stray wheel action sequences dispatched by the helper: 1
-[old]   [{"type":"scroll","x":0,"y":0,"deltaX":560,"deltaY":222,"duration":0}]
-RESULT[old]: FAILED — resolved the row, but dispatched 1 unrequested wheel scroll(s) into the open menu
-
-[new] stray wheel action sequences dispatched by the helper: 0
-RESULT[new]: PASSED — resolved the macro row at {"x":620,"y":572}, no stray wheel
+23:37:02.858  findElements(".ctx .flyout .row")  -> 1 element  (node-C4C10110)
+23:37:02.903  getHTML on it                      -> "… CPE-1190 Ask Macro"   (present, populated)
+23:37:02.908  rect probe -> elemRect {x:553.296875, y:589, width:178, height:32}
+                            viewport {1000x700}, scroll {0,0}
+23:37:02.908  performActions  wheel3             <-- the stray wheel
+23:37:03.116  findElements(".ctx .flyout .row")  -> []   (and on every retry for 5s)
 ```
 
-A wheel of **(560, 222)** fired at the viewport origin, into an open menu, for an element that was
-already fully on screen — and zero after the fix.
+Through 9.31.4's installed `scrollIntoView`, for the call `scrollIntoView({ block: "center" })`:
 
-The guard test was red-proofed the same way: `git stash push -- specs/` (restoring the pre-fix specs)
-makes `lib/scrollIntoViewUsage.test.ts` name all **seven** offending call sites and fail; with the fix
-in place `npm run test:unit` is 133/133.
+* `deltaY = targetByOption.center.y = 589 − (700 − 32) / 2 = **255**`
+* `inline` is **undefined**, so `deltaX` keeps its initial value `targetByOption.start.x` = 553.296875
+* `Math.round` → **`(553, 255)`**, non-zero, so `if (deltaX === 0 && deltaY === 0) return` does **not**
+  fire and the wheel is dispatched at viewport **(0, 0)**
+* `isVisibleY` / `isVisibleX` *are* computed, but are consulted **only** inside the `block === "nearest"`
+  / `inline === "nearest"` branches — so `block: "center"` bypasses the already-visible check entirely.
+
+The row existed **250 ms before** the wheel and was gone **208 ms after**, with nothing in between. That
+is in-CI, on the real driver, and it removes the WebKitGTK-repro caveat almost entirely. (The end-to-end
+*hover relocation* is still WebKitGTK-specific — Chrome does not move hover for a driver wheel that
+scrolls nothing, which is why the Windows gui-smoke leg never saw this. Said plainly rather than papered
+over.)
+
+**The intermittency is explained rather than explained away.** The *passing* 9.31.4 run
+(`98681871872`) has a **byte-identical** rect probe — `elemRect {x:553.296875, y:589, width:178,
+height:32}`, viewport 1000x700, scroll 0,0 — and dispatches the same `wheel3`. Same wheel, racy outcome:
+the flyout simply survived that once. The mechanism predicts ~90%, and ~90% is what the 32-job
+enumeration measures. "100 % deterministic" would have contradicted it.
+
+### Red-proof
+
+`git stash push -- specs/` (restoring the pre-fix specs) makes `lib/scrollIntoViewUsage.test.ts` name
+all **seven** offending call sites and fail; with the fix in place `npm run test:unit` is 133/133.
+
+The guard's regex was also probed by hand rather than assumed. It catches
+`await el.scrollIntoView(…)` and `await Promise.all([row.scrollIntoView(…)])`, but **misses**
+`const p = el.scrollIntoView(…); await p;`, `return el.scrollIntoView();`, and
+`await (await $(".x")).scrollIntoView();` — it requires a literal `await` immediately before an unbroken
+element expression. It also scans `specs/` and `lib/` **non-recursively** (both are flat today). None of
+these can produce a false red; they can only let a bad call through. All of it is now stated in the
+guard's own header rather than left implied by a comment claiming more than the regex does.
 
 ### The fix
 
@@ -214,5 +261,59 @@ warning came from this same command; removing the command removes that noise cla
 ### Checks
 
 * `gui-smoke`: `npm run typecheck` clean, `npm run test:unit` **133/133**.
-* root: `npm run check` — 0 errors / 0 warnings; `npm test` — **345 files / 4926 tests passed**,
+* root: `npm run check` — 0 errors / 0 warnings; `npm test` — **345 files / 4932 tests passed**,
   2 skipped.
+
+## Work Log — round 2 (2026-08-28) — prose correction only, no code change
+
+An independent Reviewer verified the code, helper, guard and call-site enumeration as correct and
+shippable, then falsified round 1's **diagnosis narrative**. Round 1 sampled **5** shard-2 jobs; the
+Reviewer enumerated **32**. I re-derived all of it from the GitHub Actions logs before writing any of it
+down (the numbers below are mine, measured, not transcribed):
+
+* **Fingerprint verified both ways.** `added 479 packages` ↔ `webdriverio 9.30.0` (checked at
+  `aa6a0378:gui-smoke/package-lock.json`); `added 489 packages` ↔ `9.31.4` (checked at
+  `9965f366:gui-smoke/package-lock.json`).
+* **Onset re-measured.** Job `98661503323` started 20:30:36Z, checked out `eb3bf53` (merge of `c33a9609`
+  into main), installed **489** packages, and at **20:33:30Z** printed `14/14 spec file(s) reported,
+  26 case(s) — 23 passed, 1 failed` with `NEW GUI REGRESSION: "macro-param-prompt…"`. That is **two
+  hours before** `48aa8697` merged at 22:27:49Z. Round 1's boundary was an artefact of sorting by merge
+  time instead of by lockfile.
+* **The counterexample confirmed.** Job `98681871872`: `HEAD is now at f656f36 Merge 9965f366… into
+  7e03957…`, `added 489 packages`, `14/14 … 24 passed, 0 failed, 2 skipped`. Clean, complete, **on
+  9.31.4**.
+* **Rate re-measured over the full window** — the 32 shard-2 jobs from 2026-08-27 19:12Z to 2026-08-28
+  00:42Z: **9.30.0 → 13 complete runs, 0 failures; 9.31.4 → 11 complete runs, 10 failures.** (5 jobs
+  cancelled before `npm ci`; 3 died incomplete at spec #2.) The Reviewer's independently derived 9/10
+  vs 0/14 differs only in where the window's edges fall; the conclusion is identical.
+* **Wheel arithmetic verified against the log and the installed source.** The rect probe in job
+  `98705756557` at 23:37:02.908 reads `elemRect { x: 553.296875, height: 32, width: 178, y: 589 }`,
+  `viewport { height: 700, width: 1000 }`, `scroll { x: 0, y: 0 }` — confirmed line by line. Through
+  9.31.4's `scrollIntoView`: `deltaY = 589 − (700 − 32)/2 = 255`, `deltaX` stays at
+  `targetByOption.start.x = 553.296875`, rounded to `(553, 255)`; the
+  `if (deltaX === 0 && deltaY === 0) return` early-out therefore does not fire. Confirmed in source that
+  `isVisibleY`/`isVisibleX` are consulted **only** in the `nearest` branches.
+* **"Both payloads are in the CI logs verbatim" was false and is gone.** `grep -c "type: 'wheel'"` on
+  job `98705756557` is **3** but `grep -c deltaX` is **0** — Node's inspector elides them as
+  `actions: [Array]`. The 9.30.0 payload *is* verbatim (job `98686079109`).
+* **Byte-identical geometry in the passing run.** Job `98681871872`'s third rect probe is
+  `elemRect { x: 553.296875, height: 32, width: 178, y: 589 }` — identical to the failing run's — and it
+  dispatched the same `wheel3`. Same wheel, racy outcome. That is what makes ~90% the honest number.
+* **`expect-webdriverio` 5.7.0 → 6.0.9** confirmed present in `48aa8697`'s lockfile diff; named and
+  excluded rather than left unaddressed.
+* **Guard regex scope** probed by hand (`return el.scrollIntoView();` and
+  `await (await $(".x")).scrollIntoView();` also miss, on top of the detached-`await` form the Reviewer
+  found) and now documented in the guard's own header. Widening it would be a code change; this round
+  was prose-only, so it is written down rather than silently overclaimed.
+
+**Operational consequence, stated in all five places: one green CI run does not verify this fix.**
+
+**Expect a new Visual Critic baseline for `transfer-panel`.** Because 9.30.0's command was a no-op, the
+five previously-latent call sites have never actually scrolled anything and now will —
+`scrollIntoViewCentered` really does centre the row. That is the direction those comments always
+intended, but `transfer-panel`'s is a screenshot case, so its framing genuinely changes (the broken-link
+row now centred). That is a **new baseline, not a regression**.
+
+Files corrected: the PR body, this ticket, `gui-smoke/README.md`,
+`gui-smoke/lib/scrollIntoViewUsage.test.ts` (header only), `gui-smoke/specs/macro-param-prompt.smoke.ts`
+(comment only). No executable code changed in this round.

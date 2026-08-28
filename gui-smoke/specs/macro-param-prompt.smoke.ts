@@ -71,8 +71,14 @@ async function pointOfRowNamed(name: string): Promise<Point | null> {
 // through `scrollIntoViewCentered` (the DOM API) and never WebdriverIO's `scrollIntoView` command: since
 // webdriverio 9.31.4 that command injects a wheel at viewport (0,0), which relocated the webview's hover
 // target on WebKitGTK, closed the Run-macro flyout via `Submenu.svelte`'s `on:mouseleave`, and turned the
-// test below into `element (".ctx .flyout .row") still not existing after 5000ms` on every completed CI
-// shard. See lib/scrollIntoView.ts.
+// test below into `element (".ctx .flyout .row") still not existing after 5000ms`.
+//
+// The trigger was the LOCKFILE, not any merge: onset was 2026-08-27T20:33Z on the CPE-1945 branch (job
+// `98661503323`, `c33a9609`), two hours before `48aa8697` reached main. And it was RACY, not
+// deterministic — 10 of 11 complete shard-2 runs on 9.31.4 failed, 0 of 13 on 9.30.0 did, and job
+// `98681871872` passed 14/14 ON 9.31.4 with a byte-identical rect probe and the same wheel dispatched.
+// So a single green run of this spec does not prove the fix; see lib/scrollIntoViewUsage.test.ts for the
+// full derivation. See lib/scrollIntoView.ts for the replacement.
 async function pointByText(selector: string, text: string): Promise<Point | null> {
   const els = $$(selector);
   for await (const el of els) {

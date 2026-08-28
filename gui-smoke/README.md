@@ -859,17 +859,63 @@ closed ~5 ms later because `paneContext` didn't `stopPropagation`).
 **Never call WebdriverIO's `element.scrollIntoView()` command in this suite.** It does not call the DOM
 API — it injects a real mouse wheel through the driver, and since **webdriverio 9.31.4** (pulled in by
 CPE-1945's `npm audit fix`, PR #1065) that wheel carries **no `origin`**, so it lands at viewport
-**(0, 0)** with a real delta computed from the element's rect. Measured against Chrome 151 with that
-exact build, scrolling an already-on-screen `.ctx .flyout .row` emits
-`{"type":"scroll","x":0,"y":0,"deltaX":560,"deltaY":222}`.
+**(0, 0)** with a real delta computed from the element's rect.
 
 On WebKitGTK (the Linux CI driver) that stray wheel relocates the webview's hover target. Any
 hover-opened surface goes with it: `Submenu.svelte`'s `on:mouseleave` closed the Run-macro flyout that
 `macro-param-prompt.smoke.ts` was about to click, and the spec died with
-`element (".ctx .flyout .row") still not existing after 5000ms` on **every completed shard-2 run** from
-2026-08-27 22:27Z onward — a permanent red on `gui-smoke-linux-verdict`. (The same command is also the
-source of the `Failed to execute "scrollIntoView" using WebDriver Actions API: move target out of
-bounds` noise `lib/logSignature.ts` classifies as an environment marker.)
+`element (".ctx .flyout .row") still not existing after 5000ms` — the standing red on
+`gui-smoke-linux-verdict`. (The same command is also the source of the `Failed to execute
+"scrollIntoView" using WebDriver Actions API: move target out of bounds` noise `lib/logSignature.ts`
+classifies as an environment marker.)
+
+### Onset and rate — the discriminator is lockfile content, not merge time
+
+Fingerprint a shard-2 job by what `npm ci` installed: **`added 479 packages` = webdriverio 9.30.0,
+`added 489 packages` = 9.31.4** (both confirmed against `git show <sha>:gui-smoke/package-lock.json`).
+Across the **32** shard-2 jobs from 2026-08-27 19:12Z to 2026-08-28 00:42Z:
+
+| webdriverio | complete (14/14) runs | failed `macro-param-prompt` |
+|---|---|---|
+| **9.30.0** (479 pkgs) | 13 | **0** |
+| **9.31.4** (489 pkgs) | 11 | **10** |
+
+Onset is **2026-08-27 20:33Z, job `98661503323`, on the `cpe-1945-gui-smoke-npm-audit` branch**
+(`c33a9609`) — about **two hours before** `48aa8697` merged to main at 22:27Z. Job `98669198175`
+(21:00Z) failed the same way, also pre-merge. Sorting the jobs by merge time makes a clean boundary
+appear that is not there; sorting them by installed lockfile makes the real one appear.
+
+**It is racy, ~90%, not deterministic — and job `98681871872` is the proof.** That job checked out
+`f656f36` (PR #1065's own merge commit), installed **489** packages, and reported
+`14/14 … 24 passed, 0 failed`: a clean, complete run **on 9.31.4**. Its rect probe is byte-identical to
+the failing run's and it dispatched the same `wheel3`; the flyout simply survived that once.
+**Operationally: one green CI run does not verify a fix in this area.** A green run already happened on
+the broken version.
+
+### The mechanism, derived from 9.31.4's source and the CI log's own rect probe
+
+From failing job `98705756557` at 23:37:02 — `findElements(".ctx .flyout .row")` returns one element,
+`getHTML` reads `… CPE-1190 Ask Macro`, then the rect probe reports
+`elemRect {x:553.296875, y:589, width:178, height:32}`, `viewport {1000x700}`, `scroll {0,0}`, and
+`performActions wheel3` fires. 208 ms later the same `findElements` returns `[]`, and on every retry for
+5 s. Through 9.31.4's installed `scrollIntoView`, for the call `scrollIntoView({ block: "center" })`:
+
+* `deltaY = 589 − (700 − 32) / 2 = 255`
+* `inline` is undefined, so `deltaX` keeps its initial `targetByOption.start.x = 553.296875`
+* rounded → **`(553, 255)`** — non-zero, so the `if (deltaX === 0 && deltaY === 0) return` guard does
+  not fire, and the wheel lands at viewport **(0, 0)**.
+* `isVisibleY`/`isVisibleX` *are* computed, but they are consulted **only** in the `nearest` branches, so
+  `block: "center"` bypasses the already-visible check entirely.
+
+Only the **9.30.0** payload appears in the CI logs verbatim —
+`{"type":"scroll","x":-249,"y":-334,"deltaX":0,"deltaY":0,"origin":{…element…}}` in job `98686079109`,
+i.e. the deltas assigned to the *origin offset* fields with `deltaX`/`deltaY` left at 0: a no-op anchored
+on the element. Node's inspector elides 9.31.4's as `actions: [Array]`, so the numbers above are derived
+from the log's rect probe rather than quoted from a payload.
+
+`48aa8697` also carried **`expect-webdriverio` 5.7.0 → 6.0.9**, a semver-major. Considered and excluded:
+the wheel trace accounts for the failure end to end, and `expect-webdriverio` is not on the
+`scrollIntoView` path.
 
 Use `scrollIntoViewCentered(el)` from `lib/scrollIntoView.ts`, which runs the page's own
 `Element.scrollIntoView({ block: "center" })` inside `element.execute`. It is a correct no-op for
