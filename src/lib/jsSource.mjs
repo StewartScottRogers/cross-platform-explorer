@@ -17,12 +17,26 @@
  * step, so the module both it and vitest import has to be runnable JavaScript. `checkJs` covers it via
  * the JSDoc types below.
  *
+ * ## The entry point is `stripScriptBodiesChecked`
+ *
+ * Not `stripJsComments`. The checked one compiles the result and throws when source that parsed
+ * before stripping does not after — the only leg that covers shapes nobody wrote a case for. Call
+ * the bare stripper only when there is genuinely no parseable-JS baseline to compare against, and
+ * say at the call site why.
+ *
  * ## What this module is NOT
  *
  * It is not a JavaScript parser, and the sections marked KNOWN GAP below are real. Every gap is
  * pinned by a case in `jsSource.test.ts` asserting the ACTUAL behaviour, so the blind spot is a
  * failing-if-it-changes test rather than a paragraph nobody re-reads. Read the gaps there, with their
  * inputs, rather than trusting this prose.
+ *
+ * Round 4's lesson, and the reason the gap list is now split by direction: **a declared gap is a
+ * claim like any other.** "All of which fail toward KEEPING source" was asserted over a LIST rather
+ * than derived per entry, its `)` case in the test table happened to be the benign form, and the
+ * oracle iterating that benign case read as coverage for the whole claim. Gaps that delete are now
+ * their own group, and what makes them survivable — that no valid JavaScript reaches them — is
+ * asserted with `vm.Script` rather than written down.
  */
 
 /**
@@ -41,6 +55,31 @@ const REGEX_AFTER = new Set([
   "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
   "case", "do", "else", "yield", "await",
 ]);
+
+/**
+ * Words whose `(…)` is a CONTROL-STATEMENT CONDITION, so the `)` closing it is followed by a
+ * statement — and a `/` opening that statement is a REGEX LITERAL, not a division.
+ *
+ * This set is CPE-1966 round 4's blocker, and it is round 3's defect reached through a different
+ * door. Round 3 fixed the KEYWORD prefix (`return /[/*]/;`) and left `)` documented as a gap that
+ * "fails toward keeping source" — which was false for exactly the same reason: `if (s.length)
+ * /[/*]/.test(s);` is valid JavaScript, the `/` after `)` was read as division, the `[` was emitted
+ * as itself, and the NEXT `/` reached the `//` and `/*` branches and invented a comment.
+ * Measured on the Reviewer's 191-character fixture: **144 characters deleted**, parseable in,
+ * unparseable out. Deciding `)` by what its `(` opened is what real tokenizers do, and it is why
+ * that gap is now closed rather than reworded. The `(` kinds are tracked on a per-frame stack, so
+ * `if (f(x)) /re/.test(s)` resolves the inner `)` to a value and the outer one to a regex position.
+ *
+ * `switch` and `catch` are deliberately absent — their `)` is followed by `{`, never by a regex, so
+ * adding them would only widen the regex reading with no shape to justify it.
+ *
+ * RED-PROOF (CPE-1933 rule 3), run at round 4 and recorded here rather than only in the PR: emptying
+ * this set to `new Set([])` reds **6** of `jsSource.test.ts`'s 48 — the four `FALSE_STRIP_PAREN`
+ * cases, the explicit `-144 -> 0` measurement, and, decisively, the `vm.Script` oracle itself with
+ * four cases newly unparseable. The oracle catching it is the part that was missing before: round 3's
+ * gap entry for `)` was the benign `/re/` form, so the oracle iterated a shape that could not fail.
+ */
+const CONTROL_PAREN = new Set(["if", "for", "while", "with"]);
 
 const WORD = /[A-Za-z0-9_$]/;
 
@@ -61,24 +100,47 @@ const WORD = /[A-Za-z0-9_$]/;
  *   substitutions were never entered.
  * - Regex literals, including `/` and `*` inside a `[…]` character class, decided by the previous
  *   TOKEN (see `REGEX_AFTER`) rather than the previous character.
+ * - A regex literal after a control-statement condition — `if (x) /re/.test(s)`, `while (…)`,
+ *   `for (…)` — decided by what the matching `(` opened (see `CONTROL_PAREN`), not by the `)`.
  * - A keyword used as a property name (`obj.return / 2`) — the `.` in front demotes it to a value, so
  *   the `/` stays a division.
  *
- * ## KNOWN GAPS, all of which fail toward KEEPING source rather than deleting it
- * 1. **A regex literal directly after `)` or `]` is read as division.** `if (x) /re/.test(s)` and
- *    `a[0] /re/.test(s)` are genuinely ambiguous without a parser; division is the conservative
- *    reading, and the observed effect is that the text is emitted verbatim (the scanner re-syncs on
- *    the closing `/`), never that a comment is invented. Pinned by test.
- * 2. **No ASI awareness.** `a = b` newline `/re/.test(c)` is division for the same reason.
- * 3. **Unterminated literals** (a lone `"` or a `/` starting nothing) are emitted as themselves and
- *    scanning continues from the next character, rather than swallowing the rest of the file.
+ * ## DO NOT CALL THIS BARE
  *
- * The backstop for all three, and for anything not yet imagined, is to compile the RESULT: a caller
- * that can afford it should run `new vm.Script(stripped)` and fail loudly when source that parsed
- * before stripping no longer parses after. `engine.mjs`'s `checkFixtureProvenance` does exactly that.
- * A desync that deletes code is overwhelmingly likely to leave something unparseable behind, and a
- * desync that keeps too much cannot break a parse at all — which is the whole reason the KEEP
- * direction is the safe one.
+ * Use `stripScriptBodiesChecked` (below), which compiles the result and throws on a desync. This
+ * function is exported without that backstop only so the backstop's own tests, and callers that
+ * genuinely have no parseable-JS baseline to compare against, can reach it. Round 4's blocker was a
+ * *documented* gap that turned out to delete code, and the reason it was survivable in-tree is that
+ * the one caller went through the checked entry point. The gaps below are the ones known today; the
+ * `vm.Script` oracle is what covers the ones that are not.
+ *
+ * ## KNOWN GAPS
+ *
+ * 1. **A regex literal after `]`, or after a `)` that closes a CALL or a grouping, is read as
+ *    division.** `a[0] /re/.test(s)` and `f(x) /re/.test(s)` are genuinely ambiguous without a
+ *    parser, and division is what a real tokenizer reads there too. Two sub-cases, and they differ:
+ *    - the text is emitted verbatim (the scanner re-syncs on the closing `/`) — `a[0] /re/.test(s)`;
+ *    - **the region is DELETED when the mis-read regex hides a `//` or a `/*`** — `a[0] /[//]/…`
+ *      deletes to end of line, `f(x) /[/*]/…` deletes to the next `*​/`, possibly pages away. The
+ *      emitted `/` and `[` are ordinary characters, so the next `/` reaches the comment branches.
+ *
+ *    Both deleting sub-cases are pinned by test. Neither is reachable from valid JavaScript: real JS
+ *    reads that `/` as division too, so `a[0] / [//]/…` opens an array literal that the `//` comments
+ *    away — the input does not parse *before* stripping either. That is why they are listed as gaps
+ *    rather than as bugs, and it is a much weaker claim than "fails toward keeping".
+ * 2. **No ASI awareness.** `a = b` newline `/re/.test(c)` is division, with exactly the same two
+ *    sub-cases and the same reason they are unreachable from parseable input.
+ * 3. **Unterminated literals** (a lone `"` or a `/` starting nothing) are emitted as themselves and
+ *    scanning continues from the next character, rather than swallowing the rest of the file. This
+ *    one really does fail toward keeping.
+ *
+ * The backstop for all three, and for anything not yet imagined, is to compile the RESULT: run
+ * `new vm.Script(stripped)` and fail loudly when source that parsed before stripping no longer
+ * parses after — which is what `stripScriptBodiesChecked` does, and what `engine.mjs`'s
+ * `checkFixtureProvenance` gets by using it. A desync that deletes code is overwhelmingly likely to
+ * leave something unparseable behind. Note what that oracle can and cannot see: it catches deletion
+ * on input that parsed, and it is blind to a desync on input that never parsed — which is precisely
+ * the corner gaps 1 and 2 now live in.
  *
  * @param {string} src JavaScript source.
  * @returns {string} the same source with every comment replaced by a single space.
@@ -88,9 +150,9 @@ export function stripJsComments(src) {
   let i = 0;
   /**
    * The kind of the last significant token. `"value"` (identifier, number, string, template, regex,
-   * `)`, `]`) means a following `/` is division; `"punct"`, `"keyword"` and `""` (start of input)
-   * mean it opens a regex.
-   * @type {"" | "value" | "punct" | "keyword"}
+   * `]`, a `)` closing a call or grouping) means a following `/` is division; `"punct"`, `"keyword"`,
+   * `"control"` and `""` (start of input) mean it opens a regex.
+   * @type {"" | "value" | "punct" | "keyword" | "control"}
    */
   let prevKind = "";
   /** The last punctuator emitted, so `.return` can be told from `return`. */
@@ -98,9 +160,12 @@ export function stripJsComments(src) {
   /**
    * Nesting stack. `template` is inside a `` ` `` literal; `code` is ordinary source, and a `code`
    * frame with `subst: true` is the inside of a `${…}` — its matching `}` pops back to the template.
-   * @type {{ mode: "code" | "template", depth: number, subst: boolean }[]}
+   *
+   * `parens` is per-frame so a `${…}` cannot leak an unbalanced `(` into the enclosing code: each
+   * entry is one open `(`, `true` when it opened a control-statement condition.
+   * @type {{ mode: "code" | "template", depth: number, subst: boolean, parens: boolean[] }[]}
    */
-  const stack = [{ mode: "code", depth: 0, subst: false }];
+  const stack = [{ mode: "code", depth: 0, subst: false, parens: [] }];
 
   while (i < src.length) {
     const top = stack[stack.length - 1];
@@ -113,7 +178,7 @@ export function stripJsComments(src) {
       if (c === "$" && d === "{") {
         out += "${";
         i += 2;
-        stack.push({ mode: "code", depth: 0, subst: true });
+        stack.push({ mode: "code", depth: 0, subst: true, parens: [] });
         prevKind = "";
         continue;
       }
@@ -154,7 +219,25 @@ export function stripJsComments(src) {
     if (c === "`") {
       out += c;
       i++;
-      stack.push({ mode: "template", depth: 0, subst: false });
+      stack.push({ mode: "template", depth: 0, subst: false, parens: [] });
+      continue;
+    }
+    if (c === "(") {
+      top.parens.push(prevKind === "control");
+      out += c;
+      i++;
+      prevKind = "punct";
+      prevPunct = c;
+      continue;
+    }
+    if (c === ")") {
+      // What this `)` closes decides the next `/`: a control-statement condition is followed by a
+      // STATEMENT, where `/` opens a regex; a call or a grouping is a value, where it divides.
+      const condition = top.parens.pop() === true;
+      out += c;
+      i++;
+      prevKind = condition ? "keyword" : "value";
+      prevPunct = c;
       continue;
     }
     if (c === "{") { top.depth++; out += c; i++; prevKind = "punct"; prevPunct = c; continue; }
@@ -172,7 +255,7 @@ export function stripJsComments(src) {
       prevPunct = c;
       continue;
     }
-    if (c === "/" && (prevKind === "" || prevKind === "punct" || prevKind === "keyword")) {
+    if (c === "/" && prevKind !== "value") {
       let j = i + 1;
       let inClass = false;
       let terminated = false;
@@ -202,8 +285,13 @@ export function stripJsComments(src) {
       while (j < src.length && WORD.test(src[j])) j++;
       const word = src.slice(i, j);
       out += word;
-      // `obj.return` is a property, not the keyword — the `/` after it is a division.
-      prevKind = REGEX_AFTER.has(word) && prevPunct !== "." ? "keyword" : "value";
+      // `obj.return` and `obj.if` are properties, not keywords — the `/` after them is a division.
+      const keyword = prevPunct !== ".";
+      prevKind = keyword && CONTROL_PAREN.has(word)
+        ? "control"
+        : keyword && REGEX_AFTER.has(word)
+          ? "keyword"
+          : "value";
       prevPunct = "";
       i = j;
       continue;
@@ -211,7 +299,9 @@ export function stripJsComments(src) {
     out += c;
     i++;
     if (!/\s/.test(c)) {
-      prevKind = c === ")" || c === "]" ? "value" : "punct";
+      // `(` and `)` never reach here — they have their own branches above, because `)` needs the
+      // paren stack to know whether it closed a condition or a value.
+      prevKind = c === "]" ? "value" : "punct";
       prevPunct = c;
     }
   }
@@ -228,6 +318,12 @@ export function stripJsComments(src) {
  * only because the swallowed region happened to be copied through verbatim. Pairing the extractor
  * with the stripper in one module is the cheapest way to keep the two from being used apart.
  *
+ * **11,872 is a HISTORICAL figure and cannot be reproduced against this stripper (round 4).** It was
+ * taken before round 3 made an unterminated string stop at the newline instead of running to the next
+ * `'` anywhere in the file; re-measured at round 4 the same injection shifts a whole-document strip by
+ * **0**. It is kept as the reason the rule exists, not as a number anyone should expect to re-derive.
+ * The live property is asserted in `jsSource.test.ts` and does not depend on the figure.
+ *
  * @param {string} html
  * @returns {string[]}
  */
@@ -238,14 +334,20 @@ export function htmlScriptBodies(html) {
 /**
  * Script bodies with comments stripped, and the parse backstop that catches a stripper desync.
  *
- * `stripJsComments` is a scanner, not a parser, and its declared gaps are real. They all fail toward
- * KEEPING source, which cannot break a parse — so compiling the result is a near-free oracle for the
- * one direction that matters: a desync that DELETED code overwhelmingly leaves something unparseable
- * behind. This is the JS equivalent of `rustSource.ts`'s `SURVIVING_COMMENT_LINE`, and it covers the
- * shapes nobody has thought of yet, which a case table by construction cannot.
+ * **This is the entry point. Prefer it to bare `stripJsComments` everywhere.**
+ *
+ * `stripJsComments` is a scanner, not a parser, and its declared gaps are real. Some of them DELETE
+ * (see its KNOWN GAPS 1 and 2) — round 3 wrote "they all fail toward KEEPING source" and round 4
+ * measured a documented gap deleting 144 characters of valid JavaScript, so that sentence is gone
+ * rather than softened. Compiling the result is a near-free oracle for the direction that matters: a
+ * desync that DELETED code overwhelmingly leaves something unparseable behind. This is the JS
+ * equivalent of `rustSource.ts`'s `SURVIVING_COMMENT_LINE`, and it covers the shapes nobody has
+ * thought of yet, which a case table by construction cannot.
  *
  * Only a body that parsed BEFORE stripping is checked after it, so a `<script type="application/json">`
- * or a minified bundle that was never JavaScript cannot red a caller.
+ * or a minified bundle that was never JavaScript cannot red a caller. Say the cost of that out loud:
+ * it is also the blind spot. Both surviving deleting gaps live on input that never parsed, so this
+ * oracle cannot see them — which is why they are pinned as explicit cases instead.
  *
  * The stripper is a parameter so the backstop itself can be RED-PROOFED (CPE-1933 rule 3) — see
  * `jsSource.test.ts`, which hands it one that really does delete. A backstop nobody has watched fail

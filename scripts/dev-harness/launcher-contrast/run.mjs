@@ -117,8 +117,25 @@ function signature(s) {
  *     `npm run harness:launcher-contrast`. `--verify-pixels` caught it, but only incidentally (the
  *     pixel leg is fed from `all`), and the no-flag invocation is the documented local one.
  *
- * So every number below is derived from readings that EXIST. `animations` (the page's own count) is
- * still printed, but beside `animFrames` rather than in place of it, and it is never floored.
+ * ── What the floors below actually are (corrected in round 4) ────────────────────────────────────
+ *
+ * There are **SIX** floors per scheme, not three, and they do not all come from the same place. Say
+ * this precisely, because "the floors are taken out of `all`" was the round-3 wording and it was
+ * wrong by half:
+ *
+ *   - THREE are `all.filter(...)` in `engine.mjs` — `baseReadings`, `stateReadings`, `animReadings`.
+ *     `all` is the one array the report is built from, so a sabotage that empties it reds all three
+ *     at once and cannot be survived by a leg's own bookkeeping. These are the load-bearing ones.
+ *   - THREE read LEG-LOCAL state — `forced.length` (pseudo-states actually forced), `stateSkips`
+ *     (a skip counter, which is correctly local: it counts rules that produced no reading, so it
+ *     could not be derived from readings), and `animFrames` (frames actually stepped).
+ *
+ * The property still holds, and it is the property rather than the provenance that matters: **every
+ * leg has at least one `all`-derived floor**, so no leg can measure nothing and pass. `animFrames`
+ * is leg-local but is incremented only AFTER a frame's probe has run and pushed into `all`, so it
+ * counts work rather than intent — which is exactly the distinction `animations` failed. That page
+ * metadata count is still printed, but beside `animFrames` rather than in place of it, and it is
+ * never floored.
  */
 function legsThatDidNotRun(res) {
   const out = [];

@@ -199,18 +199,32 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      trailing comments and heredoc bodies. For **Rust** sources: `src/lib/rustSource.ts`
      (`stripRustComments`, `rustStringLiteralAfter`, `rustStrSliceAfter`) — CPE-1950 lifted it out of
      `MacroRunConfirm.test.ts` rather than let a third scanner grow a fourth copy of the rules. For
-     **JavaScript** sources: `src/lib/jsSource.mjs` (`stripJsComments`, `htmlScriptBodies`,
-     `stripScriptBodiesChecked`) — CPE-1966 shipped the SIXTH private stripper, in a `.mjs` harness,
-     imported nowhere and untested; a Reviewer's 31 adversarial shapes found 7 wrong, **4 of them
-     deleting real code**. A whole-line-comment filter is *not* enough — a **trailing** comment walks
+     **JavaScript** sources: `src/lib/jsSource.mjs`, and **the entry point is
+     `stripScriptBodiesChecked`, not the bare `stripJsComments`** — it runs `new vm.Script` over the
+     result and throws when source that parsed before stripping does not after, which is the only
+     leg that covers the shapes no case table names. Reach for `htmlScriptBodies` first when the
+     input is HTML; call `stripJsComments` bare only when there is genuinely no parseable-JS baseline
+     to compare against, and say at the call site why. CPE-1966 shipped the SIXTH private stripper,
+     in a `.mjs` harness, imported nowhere and untested; a Reviewer's 31 adversarial shapes found 7
+     wrong, **4 of them deleting real code** (that 31/7/4 tally is the Reviewer's round-2 count,
+     recorded as provenance and never independently re-run — treat it as history, not as a measurement
+     you can reproduce). A whole-line-comment filter is *not* enough — a **trailing** comment walks
      straight through it, which is how CPE-1933's first draft reintroduced the hole it was closing.
-     Two JS-specific rules learned the hard way: decide regex-vs-division on the previous **token**,
+     Three JS-specific rules learned the hard way: decide regex-vs-division on the previous **token**,
      never the previous character (every keyword ends in a word char, so `return /[//]/;` reads as
-     division and the `/` opens a comment that eats the line); and **point a JS scanner at JS only** —
-     `sessionChipColours` tokenized a whole HTML document, where one apostrophe in prose shifted the
-     strip by 11,872 characters. Where a caller can afford it, compile the result
-     (`stripScriptBodiesChecked` runs `new vm.Script`): source that parsed before stripping and does
-     not after means code was deleted, and that oracle catches the shapes no case table names.
+     division and the `/` opens a comment that eats the line); decide a **`)`** by what its `(`
+     opened, never by the `)` itself (round 3 fixed the keyword prefix, then *documented* `)` as a gap
+     that "fails toward keeping source" — and `if (s.length) /[/*]/.test(s);` is valid JavaScript that
+     the same mechanism deleted 144 characters of, one round later, with a green test beside the false
+     claim); and **point a JS scanner at JS only** — `sessionChipColours` tokenized a whole HTML
+     document, where one apostrophe in prose shifted the strip by 11,872 characters (a round-2 figure,
+     **no longer reproducible**: round 3 made an unterminated string stop at the newline, so the same
+     injection now shifts the strip by 0 — the rule stands on the mechanism, not the size).
+     **The general lesson, which is the expensive one:** a *declared* gap is a claim like any other,
+     and "all of which fail toward keeping" was asserted over a list rather than derived per entry.
+     Split a gap list by direction, pin the deleting shapes as their own cases, and derive the
+     property that makes each survivable — `jsSource.test.ts` asserts with `vm.Script` that no
+     deleting gap accepts input that parsed, instead of writing it down.
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
      never actually re-reads its source is the same defect with extra steps. Write the red-proof's
      **result at the site**, not only in the PR body — a code comment that merely asserts, next to a

@@ -1,7 +1,20 @@
 // @ts-nocheck — this harness is run by plain `node`, has never been in `tsconfig.json`'s `include`,
 // and has never been type-checked. CPE-1966 round 3 gave `sessionChipColours` a real test, which
-// imports this module and so drags it into svelte-check's program for the first time: 40 implicit-any
-// errors in CDP payloads and probe JSON, none of them a defect, all of them noise that would bury the
+// imports this module and so drags it into svelte-check's program for the first time.
+//
+// Round 4 re-took the measurement rather than leaving "none of them a defect" as a claim over a
+// number (CLAUDE.md rule 2). Removing this pragma gives **40 errors, 0 warnings, in this one file**,
+// and they are 31 + 9, not 40 of a kind:
+//   31  Parameter 'x' implicitly has an 'any' type — CDP payloads, probe JSON and array callbacks.
+//    2  Property 'port' / 'cdpPort' does not exist on '{ chromePath?; verifyPixels? }' — `sweep()`'s
+//       destructured options object, whose type checkJs infers from the two params that HAVE defaults.
+//    2  `new Promise()` needs a JSDoc hint to produce a `resolve` callable with no arguments.
+//    2  'err' is of type 'unknown' — a bare `catch (err)` reading `err.code` / `err.message`.
+//    1  Property 'message' does not exist on type '{}' — the same, through `err?.message`.
+//    1  `cssRules` implicitly has return type 'any' (recursive `@media` walk, no annotation).
+//    1  string can't index type '{}' — the `schemes[scheme] = …` accumulator.
+// Every one is a checkJs strictness artifact on unannotated JavaScript; none changes what the code
+// does, and the 9 non-parameter ones were read individually to say so. What they WOULD do is bury the
 // `npm run check` 0/0 gate. Annotating a 1,100-line browser harness is its own ticket, not a rider on
 // a contrast fix. The parts worth checking were MOVED OUT instead — `src/lib/jsSource.mjs` is typed
 // via JSDoc and covered by `src/lib/jsSource.test.ts`.
@@ -291,6 +304,15 @@ export function preparedLauncherHtml() {
  * measured, that changed the stripped output by 11,872 characters, net DELETION, and two apostrophes
  * re-synced. The palette parse survived only because the swallowed region happened to be copied
  * through verbatim as a phantom string — luck, not design. A JS scanner is only ever pointed at JS now.
+ *
+ * **The 11,872 figure is HISTORY and is no longer reproducible (CPE-1966 round 4).** It was taken
+ * against round 2's stripper, which swallowed to the next `'` anywhere in the file. Round 3 made an
+ * unterminated string stop at the newline, so the same injection now shifts a whole-document strip by
+ * **0** characters — re-measured on this launcher.html at round 4: 145,874 chars in, 93,810 out,
+ * identical delta with and without `<p>the agent's log</p>`. Do not re-derive the number; the reason
+ * the rule still holds is the RULE, not the size of one old measurement, and what is asserted today
+ * is the live property (`jsSource.test.ts` → "an apostrophe in HTML prose outside every script
+ * changes nothing"), which does not depend on the figure at all.
  */
 export function launcherScriptBodies(raw = readFileSync(LAUNCHER, "utf8")) {
   return htmlScriptBodies(raw);
@@ -997,12 +1019,16 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
         systemColours: { Canvas: base.canvas, CanvasText: base.canvasText, Field: base.field, ButtonFace: base.buttonFace },
         sites: all, matched: setup.matched, mounted: setup.mounted, forced, animations: animMeta.count, pixels,
         // ── WORK DONE, per leg, per scheme (round-3 blocker 1) ─────────────────────────────────
-        // Counted OUT OF `all` — the one array the report is actually built from — rather than from
-        // each leg's own bookkeeping. That choice is the round-3 lesson repeated: a count taken
-        // where the work is *intended* still reads as work. The Reviewer's base-leg sabotage was
-        // `const all = []`, which leaves the base probe's own `sites.length` at 422 and would sail
-        // straight through a floor on it, while the report saw nothing. Deriving all three from
-        // `all` means every sabotage that empties it reds all three at once.
+        // `run.mjs` floors SIX of these per scheme. Three — `baseReadings`, `stateReadings`,
+        // `animReadings` — are counted OUT OF `all`, the one array the report is actually built
+        // from, rather than from each leg's own bookkeeping. That choice is the round-3 lesson
+        // repeated: a count taken where the work is *intended* still reads as work. The Reviewer's
+        // base-leg sabotage was `const all = []`, which leaves the base probe's own `sites.length`
+        // at 422 and would sail straight through a floor on it, while the report saw nothing.
+        // Deriving those three from `all` means every sabotage that empties it reds all three at
+        // once. The other three floors — `forced.length`, `stateSkips`, `animFrames` — are
+        // leg-local by necessity (a skip is by definition not a reading) and are safe because every
+        // leg also carries an `all`-derived floor; see run.mjs's `legsThatDidNotRun` header.
         // `animations` (the page's metadata) and `animFrames` (frames actually stepped) are BOTH
         // reported, side by side, so they can be compared rather than confused; only the second is
         // ever floored.

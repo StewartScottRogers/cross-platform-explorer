@@ -7,6 +7,12 @@
  * DELETED real code. `shellScriptLines.ts` and `rustSource.ts` each carry a `.test.ts`; this is the
  * JS one, and every shape below — fixed or still a gap — is a case here rather than a paragraph.
  *
+ * (That 31/7/4 tally is the Reviewer's round-2 count, recorded as provenance. It has never been
+ * independently re-run and there is no artefact to re-run it from, so it is HISTORY rather than a
+ * derived figure — CLAUDE.md → "if a claim is genuinely underivable, say at the site that it is
+ * unverified and why". The seven wrong shapes themselves are not folklore: each is a named case
+ * below, and each is asserted at its exact output.)
+ *
  * ## The oracle that covers the shapes nobody thought of
  *
  * Case tables only ever contain what someone imagined (CLAUDE.md → "a shared case file catches
@@ -61,6 +67,53 @@ const FALSE_STRIP: Case[] = [
 ];
 
 /**
+ * The 191-character fixture round 4 was blocked on: valid JavaScript in, **144 characters deleted**,
+ * unparseable out. Kept whole rather than reduced to its one line, because the deletion running past
+ * the end of the function and taking the next two statements with it is the part that matters.
+ */
+const ROUND4_BLOCKER = `function looksLikePath(s) {
+  if (s.length) /[/*]/.test(s);
+  return s;
+}
+const SESSION_CHIP_COLORS = ["#3a72b5", "#3a9d4a"];
+function sessionColor(id) { return SESSION_CHIP_COLORS[id % 2]; }`;
+
+/**
+ * FALSE-STRIP, round 4 — the SAME defect as the four above, reached through `)` instead of a keyword.
+ *
+ * Round 3 fixed the keyword prefix and then *documented* `)` as a gap that "fails toward keeping
+ * source rather than deleting it". That was false, and false in the one direction the whole module
+ * claims to be safe in: `if (s.length) /[/*]/.test(s);` is valid JavaScript, the `/` after `)` was
+ * read as division, the `[` was emitted as an ordinary character, and the next `/` reached the
+ * comment branches and invented a `/*` that ate the rest of the file. The declared gap was standing
+ * next to a green test, which is exactly CPE-1933's failure shape.
+ *
+ * Fixed by deciding `)` from what its `(` opened (`CONTROL_PAREN`), not from the `)` itself.
+ */
+const FALSE_STRIP_PAREN: Case[] = [
+  {
+    name: "`if (…)` + a regex whose class contains `//` — the round-4 blocker, minimal form",
+    input: "if (x) /[//]/.test(s);",
+    want: "if (x) /[//]/.test(s);",
+  },
+  {
+    name: "`if (…)` + a regex whose class contains `/*` — this one ate to the next `*/`",
+    input: "if (x) /[/*]/.test(s);\nconst survivor = 1;\nconst alsoSurvives = 2;",
+    want: "if (x) /[/*]/.test(s);\nconst survivor = 1;\nconst alsoSurvives = 2;",
+  },
+  {
+    name: "`while (…)` and `for (…)` conditions read the same way",
+    input: "while (x) /[//]/.test(s);\nfor (const v of l) /[//]/.test(v);",
+    want: "while (x) /[//]/.test(s);\nfor (const v of l) /[//]/.test(v);",
+  },
+  {
+    name: "the Reviewer's 191-character fixture, verbatim — was -144 characters",
+    input: ROUND4_BLOCKER,
+    want: ROUND4_BLOCKER,
+  },
+];
+
+/**
  * FALSE-KEEP — a comment left in place. Harmless to a parse, NOT harmless to `includes(claim)`:
  * round 1's whole defect was a provenance claim satisfied by a comment quoting the old value.
  */
@@ -104,21 +157,43 @@ const ALREADY_RIGHT: Case[] = [
   { name: "an escaped quote inside a string", input: "const q = 'it\\'s'; // c", want: "const q = 'it\\'s';  " },
   { name: "a trailing comment after code on the same line", input: "const a = 1; // trailing", want: "const a = 1;  " },
   { name: "a block comment between tokens becomes ONE space, never a join", input: "a/*x*/b", want: "a b" },
+  // The blast radius of round 4's `CONTROL_PAREN` change: everything a `)` can be followed by that
+  // is NOT a regex. A real comment after a condition, a division after one, a `)` that closes a
+  // call or an arrow's parameter list, and a control word demoted by a `.` in front of it.
+  { name: "a REAL block comment after a condition is still a comment", input: "while (x) /* c */ y();", want: "while (x)   y();" },
+  { name: "a REAL line comment after a condition is still a comment", input: "if (x) // c\ny();", want: "if (x)  \ny();" },
+  { name: "division after a condition is still division", input: "if (a) b / c; // c", want: "if (a) b / c;  " },
+  { name: "`/=` after a condition is still an operator", input: "while (i--) total /= 2; // c", want: "while (i--) total /= 2;  " },
+  { name: "a NESTED `)` closes the call, the outer one closes the condition", input: "if (f(x)) /re/.test(s); // c", want: "if (f(x)) /re/.test(s);  " },
+  { name: "an arrow's parameter list is a value, so `/` after it is division", input: "const f = (a) => a / 2; // c", want: "const f = (a) => a / 2;  " },
+  { name: "a control word used as a property name is a value", input: "obj.if / 2; // c", want: "obj.if / 2;  " },
+  { name: "`catch (e)` and `switch (x)` are not in CONTROL_PAREN and need not be", input: "try { a(); } catch (e) { b(); } // c", want: "try { a(); } catch (e) { b(); }  " },
+  { name: "parens inside a `${}` cannot leak into the enclosing code", input: "`a${ (x) / 2 }b`; // c", want: "`a${ (x) / 2 }b`;  " },
 ];
 
 /**
- * KNOWN GAPS — pinned at the behaviour they actually have, with the direction they fail in.
+ * KNOWN GAPS that fail toward KEEPING source — pinned at the behaviour they actually have.
  *
- * Every one fails toward KEEPING source. That is the defensible direction and the reason it is
- * acceptable to ship a scanner rather than a parser: a kept comment can only ever make a provenance
- * claim FAIL to match (a loud red naming the fixture), while deleted code makes one pass on a
- * mutilated file. If any of these ever flips to deleting, the `parses()` oracle below reds it.
+ * Keeping is the defensible direction and the reason it is acceptable to ship a scanner rather than
+ * a parser: a kept comment can only ever make a provenance claim FAIL to match (a loud red naming
+ * the fixture), while deleted code makes one pass on a mutilated file. If any of these ever flips to
+ * deleting, the `parses()` oracle below reds it.
+ *
+ * Round 4 is the reason this table is now split in two. "All of which fail toward keeping" was
+ * written here and in `jsSource.mjs` as a property of the whole gap list, and it was untrue of the
+ * `)` entry — whose case in this table happened to be the benign `/re/` form, so the oracle iterated
+ * it and agreed. The deleting shapes live in `DELETING_GAPS` below, named as what they are.
  */
 const KNOWN_GAPS: Case[] = [
   {
-    name: "GAP: a regex directly after `)` is read as division — the text survives verbatim",
-    input: "if (x) /re/.test(s); // c",
-    want: "if (x) /re/.test(s);  ",
+    name: "GAP: a regex after a `)` that closed a CALL is division — the text survives verbatim",
+    input: "f(x) /re/.test(s); // c",
+    want: "f(x) /re/.test(s);  ",
+  },
+  {
+    name: "GAP: a regex directly after `]` is read as division — the text survives verbatim",
+    input: "a[0] /re/.test(s); // c",
+    want: "a[0] /re/.test(s);  ",
   },
   {
     name: "GAP: no ASI awareness — a regex opening a line after a value is division; text survives",
@@ -132,12 +207,63 @@ const KNOWN_GAPS: Case[] = [
   },
 ];
 
+/**
+ * KNOWN GAPS that DELETE — the honest half, and the reason the bare stripper is not the entry point.
+ *
+ * When a mis-read regex's character class hides a `//` or a `/*`, the emitted `/` and `[` are
+ * ordinary characters and the next `/` reaches the comment branches: a comment is invented and the
+ * region is deleted, to end of line or to the next `*​/`. Round 3 fixed this for keyword prefixes and
+ * round 4 for control-statement conditions; what is left is `]` and a call's `)`.
+ *
+ * These are not reachable from valid JavaScript, and that is DERIVED below rather than claimed —
+ * `parsesBefore: false` is asserted with `vm.Script`, not written down. Real JS reads that `/` as
+ * division too, so `a[0] / [//]/…` opens an array literal the `//` comments away, and the input was
+ * already broken before the stripper saw it. That is a much weaker safety property than "fails
+ * toward keeping", which is the point of listing them separately: the `vm.Script` oracle is blind
+ * here by construction, because it only asks about inputs that parsed.
+ */
+const DELETING_GAPS: Case[] = [
+  {
+    name: "DELETES: `]` + a class containing `//` — to end of line",
+    input: "a[0] /[//]/.test(s);\nconst survivor = 1;",
+    want: "a[0] /[ \nconst survivor = 1;",
+  },
+  {
+    name: "DELETES: a call's `)` + a class containing `/*` — to the next `*/`, here the end of input",
+    input: "f(x) /[/*]/.test(s);\nconst survivor = 1;\nconst also = 2;",
+    want: "f(x) /[ ",
+  },
+  {
+    name: "DELETES: the ASI gap's variant of the same shape",
+    input: "const a = b\n/[//]/.test(c);\nconst survivor = 1;",
+    want: "const a = b\n/[ \nconst survivor = 1;",
+  },
+];
+
 describe("stripJsComments — the four shapes that used to DELETE code (CPE-1966 round 3)", () => {
   for (const c of FALSE_STRIP) {
     it(c.name, () => {
       expect(stripJsComments(c.input)).toBe(c.want);
     });
   }
+});
+
+describe("stripJsComments — the `)` shapes that used to DELETE code (CPE-1966 round 4)", () => {
+  for (const c of FALSE_STRIP_PAREN) {
+    it(c.name, () => {
+      expect(stripJsComments(c.input)).toBe(c.want);
+    });
+  }
+
+  it("the Reviewer's fixture is valid JavaScript, so the old behaviour really was a deletion", () => {
+    // Derived, not asserted (CPE-1933): the claim "144 characters of real code were deleted" is only
+    // meaningful if the input was real code. Both halves are measured here.
+    expect(parses(ROUND4_BLOCKER)).toBe(true);
+    expect(ROUND4_BLOCKER.length).toBe(191);
+    const out = stripJsComments(ROUND4_BLOCKER);
+    expect(out.length - ROUND4_BLOCKER.length).toBe(0);
+    expect(parses(out)).toBe(true);
+  });
 });
 
 describe("stripJsComments — the three shapes that used to KEEP a comment", () => {
@@ -164,8 +290,27 @@ describe("stripJsComments — declared gaps, pinned at their real behaviour", ()
   }
 });
 
+describe("stripJsComments — the declared gaps that DELETE, and why they stay declared", () => {
+  for (const c of DELETING_GAPS) {
+    it(c.name, () => {
+      expect(stripJsComments(c.input)).toBe(c.want);
+      // Deletion is asserted as deletion, not left to be inferred from `want`.
+      expect(stripJsComments(c.input).length).toBeLessThan(c.input.length);
+    });
+  }
+
+  it("NONE of them is reachable from parseable JavaScript — the safety property, derived", () => {
+    // This is the whole justification for shipping them as gaps rather than fixing them, and it is
+    // the claim round 4 refused to take on trust. If a future shape lands here that DOES parse
+    // before stripping, this reds — and it should, because that would be a live deletion bug.
+    const parseable = DELETING_GAPS.filter((c) => parses(c.input)).map((c) => c.name);
+    expect(parseable, "a DELETING gap accepts valid JavaScript — that is a bug, not a gap").toEqual([]);
+    expect(DELETING_GAPS.length, "the enumeration measured nothing").toBeGreaterThan(2);
+  });
+});
+
 describe("stripJsComments — the oracle that does not depend on anyone writing the case", () => {
-  const all = [...FALSE_STRIP, ...FALSE_KEEP, ...ALREADY_RIGHT, ...KNOWN_GAPS];
+  const all = [...FALSE_STRIP, ...FALSE_STRIP_PAREN, ...FALSE_KEEP, ...ALREADY_RIGHT, ...KNOWN_GAPS, ...DELETING_GAPS];
 
   it("every case that parses before stripping still parses after", () => {
     // A case table only contains what someone imagined. This leg is the one that catches the rest:
@@ -256,6 +401,12 @@ describe("launcher-contrast harness — sessionChipColours reads SCRIPT BODIES, 
   it("an apostrophe in HTML prose outside every script changes nothing", () => {
     // The shape the Reviewer measured at 11,872 characters of net deletion: `<p>the agent's log</p>`
     // opened a string literal in a JS scanner pointed at HTML. Script bodies cannot contain it.
+    //
+    // That figure is HISTORY and is deliberately not asserted (round 4). It was taken against round
+    // 2's stripper, which swallowed to the next `'` anywhere in the file; round 3 made an
+    // unterminated string stop at the newline, so re-measured today the same injection shifts a
+    // whole-document strip by 0. What is asserted below is the property that actually matters and
+    // that survives any future change to the stripper: the extractor's output does not move.
     const withProse = inject("<p>the agent's log</p>");
     expect(htmlScriptBodies(withProse)).toEqual(htmlScriptBodies(raw));
     expect(sessionChipColours(withProse)).toEqual(sessionChipColours(raw));
