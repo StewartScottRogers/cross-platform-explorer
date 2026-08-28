@@ -720,9 +720,14 @@ rather than against convenience: **promote.**
   render/gui-smoke + pixel/feel residual”*. The pixel/feel half genuinely does meet the criterion (the
   score-bar fill needs real hits, which need a live embedding endpoint). The **render/gui-smoke half does
   not**: `ContentIndexSearchDialog.svelte` has never rendered in CI at all, which is ordinary burnable
-  automation debt, not taste. Per “How the total is counted” a row is MVD whenever a human still has to
-  look at something for the row's claim to hold — an unburnable *sub*-residual does not excuse a burnable
-  one, or every `🟡 partial` row in the primary Ledger would be excluded on the same reasoning.
+  automation debt, not taste. The promotion is carried directly by this file's own rule at lines 133-135:
+  **“MVD = `⛰` + `🔧` + `🟡`. A row is debt whenever a human still has to look at something for the
+  row's claim to hold… Only `✅` leaves MVD.”** A human still has to look at this dialog rendering, so the
+  row is debt, and an unburnable *sub*-residual does not excuse a burnable one; `🔧 in progress` is the
+  right Legend marker because its automation ticket is open. (Counted this shift: the file contains exactly
+  **one** `🟡 partial` row — primary row **#6**, auto-update — and its unpinned half is the in-place
+  binary swap, which is *attended*, not feel. No general claim about `🟡` rows is needed here, and none is
+  made.)
 - **It has a named retiring ticket.** **CPE-1819**, live in `Ticketing/Tickets/Backlog/` with `tags: ready`,
   re-read off its frontmatter this shift. That is the exact fact the exclusion criterion turns on, and it
   is the one thing every other row in both `excluded` tables lacks.
@@ -730,10 +735,20 @@ rather than against convenience: **promote.**
   — *“the dialog opens via the command palette rather than a free key combo”* — was overturned on
   2026-08-20: `near-duplicates`, `similar-images` and `declutter` all drive `Ctrl+Shift+P` today, green on
   the blocking Linux leg.
-- **It is not already counted by Ledger row #12** (the other way this could have closed). Row #12 is the
-  **AI search** dialog shipped in v0.57.45; this row is **`ContentIndexSearchDialog`** (epic CPE-976). They
-  share a *blocker*, not a *surface*, and CPE-1819 retires both — so counting both is not double-counting,
-  and closing this row as “already covered by #12” would be the fiction.
+- **It is not already counted by Ledger row #12** (the other way this could have closed) — and the honest
+  reason is *not* that they are different surfaces. **They are the same component under the same epic.**
+  Row #12's “AI search dialog (shipped v0.57.45)” **is** this `ContentIndexSearchDialog`: v0.57.45 shipped
+  CPE-976/CPE-1273's configurable real embedder *for content search* (`.claude/sprint-metrics/history.md`;
+  CPE-1273's frontmatter is `epic: CPE-976`), i.e. the `content_index_build` / `content_search` pair this
+  dialog is the UI over — its header comment names CPE-1263/CPE-1262 under epic CPE-976, and CPE-1819's own
+  text calls row #12 “AI *content* search, shipped v0.57.45”. What differs is the **human look each row is
+  still owed**: row #12's is the never-performed *attended end-to-end against a live embedding endpoint*
+  (0.57.45 was cut and installed for the user to try; history.md records it “NOT yet tested by the user”),
+  while this row's is that the dialog **has never rendered in CI at all**. Two different looks at one
+  component are two rows on this file's **own established precedent**: rows **#1/#2** are the single
+  CPE-1045 harness (row #2's coverage cell reads *“Folded into the same CPE-1045 harness”*) and rows
+  **#7/#13** are the single CPE-1659 network-E2E job — each pair counted separately. CPE-1819 retiring both
+  halves is likewise ordinary; closing this row as “already covered by #12” would be the fiction.
 - **The residual has not since been automated** (the last way this could have closed): checked this shift
   — no `gui-smoke/lib/palette.ts` exists, and no spec in `gui-smoke/specs/` opens the dialog.
 
@@ -744,21 +759,23 @@ table that said it did not count. The **12** PR #1042's UAT tester reached indep
 
 **Row-by-row audit of the rest of both `excluded` tables** (enumerated, not recalled — CPE-1932). Every
 other row passes the criterion, so nothing else is promoted: **CPE-1090** and **CPE-1091** are `automated
-— pinned by gui-smoke (CPE-1096)`, residual fold-animation / minimap-scrub *feel*, no ticket. **CPE-1093**
+— pinned by gui-smoke (CPE-1096)`, residual fold-animation / minimap-drag *feel*, no ticket. **CPE-1093**
 is `render automated`, residual pixel/*feel* on the installed build, no ticket. **CPE-1094** and
 **CPE-1100** are `render automated`, residual *feel*, no ticket. **CPE-1098** is `render automated` and
 blocking-pinned, residual live token/USD numbers off a real paid agent run plus card *feel* — attended
 observation of a paid external run, with no ticket and nothing CI could pin. **CPE-1114** (the second
-`excluded` table's only row) is fully `automated — pinned by gui-smoke (CPE-1130)` with no residual named
-at all. CPE-1263 was the only row in either table carrying a *render* residual, and the only one naming a
-retiring ticket.
+`excluded` table's only row) is `automated — pinned by gui-smoke (CPE-1130)` and *does* name a residual —
+*“exact pixel/theme colour fidelity still worth an occasional human glance”*, which its own row frames as
+*“the same framing as the CPE-1090/1091 rows above”* — but that residual is feel and names no retiring
+ticket, so the row is excluded correctly. CPE-1263 was the only row in either table carrying a *render*
+residual, and the only one naming a retiring ticket.
 
 <!-- mvd-table: supplementary — the 2026-08-27 CPE-1946 promotion; one row, moved verbatim out of the
      2026-07-26 `excluded` table above, with its Status restated as a Legend marker -->
 
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
-| CPE-1263 | File-content search dialog (`ContentIndexSearchDialog.svelte`, epic CPE-976): needs-build prompt, streamed index-build progress, ranked query→results (name/relative-path/score-bar/snippet), navigate-on-click, debounce + generation-token supersede | **Interaction logic pinned by `ContentIndexSearchDialog.test.ts`** (jsdom, `content_search`/`content_index_build` mocked, 11 cases): needs-build state renders a prompt not a raw error; streamed build progress updates live then unlocks search; build-error surfaced; ranked hits render name+relative-path+score%+snippet; clean no-matches state; navigate-on-click dispatches the file path + closes; Escape closes; debounce waits out the window before searching; a stale search's late result is dropped once superseded; clearing the query cancels the pending search. No `gui-smoke` spec yet. **2026-08-20 correction:** the stated obstacle — "a spec would need to drive the palette rather than a direct key combo" — is obsolete; `near-duplicates.smoke.ts`, `similar-images.smoke.ts` and `declutter.smoke.ts` all drive `Ctrl+Shift+P` → `.cp-input` → Enter today, green on the blocking Linux leg, with the block copy-pasted verbatim in all three. Retiring ticket **CPE-1819** extracts `gui-smoke/lib/palette.ts` and pins this dialog's palette-open + needs-build offer + Escape-closes in both themes. The score-bar-fill *feel* genuinely cannot be pinned headlessly (it needs real hits, which need a live embedding endpoint) and stays the residual | 🔧 in progress — render/gui-smoke residual, retiring ticket CPE-1819 open | **CPE-1819** (`Ticketing/Tickets/Backlog/`, `tags: ready`, estimate M, verified live 2026-08-27): extract `gui-smoke/lib/palette.ts` from the block `near-duplicates` / `similar-images` / `declutter` already copy-paste, then one spec that opens this dialog and pins its needs-build offer, its ranked-results render and Escape-closes, in both themes. Confirmed NOT yet built this shift: `gui-smoke/lib/` contains no `palette.ts` and no spec in `gui-smoke/specs/` reaches `ContentIndexSearchDialog`. Retires Ledger row #12 in the same stroke — shared blocker, two different dialogs | 2026-08-02 (as excluded history) → promoted into MVD 2026-08-27 (CPE-1946) |
+| CPE-1263 | File-content search dialog (`ContentIndexSearchDialog.svelte`, epic CPE-976): needs-build prompt, streamed index-build progress, ranked query→results (name/relative-path/score-bar/snippet), navigate-on-click, debounce + generation-token supersede | **Interaction logic pinned by `ContentIndexSearchDialog.test.ts`** (jsdom, `content_search`/`content_index_build` mocked, 11 cases): needs-build state renders a prompt not a raw error; streamed build progress updates live then unlocks search; build-error surfaced; ranked hits render name+relative-path+score%+snippet; clean no-matches state; navigate-on-click dispatches the file path + closes; Escape closes; debounce waits out the window before searching; a stale search's late result is dropped once superseded; clearing the query cancels the pending search. No `gui-smoke` spec yet. **2026-08-20 correction:** the stated obstacle — "a spec would need to drive the palette rather than a direct key combo" — is obsolete; `near-duplicates.smoke.ts`, `similar-images.smoke.ts` and `declutter.smoke.ts` all drive `Ctrl+Shift+P` → `.cp-input` → Enter today, green on the blocking Linux leg, with the block copy-pasted verbatim in all three. Retiring ticket **CPE-1819** extracts `gui-smoke/lib/palette.ts` and pins this dialog's palette-open + needs-build offer + Escape-closes in both themes. The score-bar-fill *feel* genuinely cannot be pinned headlessly (it needs real hits, which need a live embedding endpoint) and stays the residual | 🔧 in progress — render/gui-smoke residual, retiring ticket CPE-1819 open | **CPE-1819** (`Ticketing/Tickets/Backlog/`, `tags: ready`, estimate M, verified live 2026-08-27): extract `gui-smoke/lib/palette.ts` from the block `near-duplicates` / `similar-images` / `declutter` already copy-paste, then one spec that opens this dialog and pins its needs-build offer, its ranked-results render and Escape-closes, in both themes. Confirmed NOT yet built this shift: `gui-smoke/lib/` contains no `palette.ts` and no spec in `gui-smoke/specs/` reaches `ContentIndexSearchDialog`. Retires Ledger row #12's render half in the same stroke — the same dialog, pinned once; row #12's other, attended look (a real query→results run against a live embedding endpoint) is not what this ticket burns | 2026-08-02 (as excluded history) → promoted into MVD 2026-08-27 (CPE-1946) |
 
 **The `excluded` tables now carry no known discrepancy.** Both halves of the note CPE-1922 left — the
 paragraph in the CPE-1922 section above and the parenthetical inside the 2026-07-26 annotation — are

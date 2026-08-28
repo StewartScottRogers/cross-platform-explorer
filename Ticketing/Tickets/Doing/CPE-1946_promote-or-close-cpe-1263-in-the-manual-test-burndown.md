@@ -132,3 +132,53 @@ header at 14: **40/40 green**, and the parser's own derived breakdown reads `11 
 **File hygiene.** No PowerShell touched any repo file. The ledger stays UTF-8, **no BOM**, **CRLF**
 throughout (`file` + `xxd` checked before and after every write); the row move was done by a Node script
 that splits and re-joins on `\r\n` explicitly, so no line ending was rewritten.
+
+### 2026-08-27 — round 2 (Reviewer: CHANGES REQUESTED on three prose claims)
+
+The Reviewer confirmed the enumeration, the denominator of eight, the red-proof, the ratchet flag, the
+byte-identical row move and every hygiene check — and returned CHANGES REQUESTED on three **factual**
+claims in the new section's prose. Since this ticket exists to stop the file disagreeing with itself,
+the record has to be right. **No arithmetic changed**: 6 primary + 8 supplementary = 14 still holds and
+the decision to promote stands.
+
+1. **Row #12 is the SAME component and the SAME epic, not a different surface.** The old bullet said
+   row #12 was “the AI search dialog shipped in v0.57.45” against “`ContentIndexSearchDialog` (epic
+   CPE-976)”, sharing “a *blocker*, not a *surface*”. That is false. v0.57.45 shipped CPE-976/CPE-1273's
+   configurable real embedder **for content search** (`.claude/sprint-metrics/history.md`; CPE-1273's
+   frontmatter is `epic: CPE-976`) — the `content_index_build` / `content_search` pair this dialog is the
+   UI over, and its header comment names CPE-1263/CPE-1262 under epic CPE-976. The promotion stands on
+   better ground: two rows are two **human looks at one component** — row #12's never-performed attended
+   end-to-end against a *live embedding endpoint*, versus this row's *never rendered in CI at all*. That
+   is the file's own established precedent, verified in the file this shift: rows **#1/#2** are the one
+   CPE-1045 harness (row #2's coverage cell literally reads “Folded into the same CPE-1045 harness”; both
+   rows carry `CPE-1045 / CPE-1594`) and rows **#7/#13** are the one CPE-1659 network-E2E job (`CPE-819/820
+   → CPE-1659` and `CPE-1659`). The “shared blocker, not shared surface” framing is gone from the prose
+   **and** from the promoted table row's own “Automation to build” cell, which carried it too.
+
+2. **CPE-1114 does name a residual.** The old text said “with no residual named at all”; its row names
+   *“exact pixel/theme colour fidelity still worth an occasional human glance”*, self-described as “the
+   same framing as the CPE-1090/1091 rows above”. The **verdict is unchanged** — it is feel and names no
+   retiring ticket, so it stays correctly excluded; only the sentence was wrong.
+
+3. **The `🟡` flourish was never load-bearing, and was false.** Counted this shift: the file has exactly
+   **one** `🟡` table row — primary row **#6** (auto-update), status cell *“🟡 partial — download/verify
+   automated & pinned; binary-swap still attended”*. Its unpinned half is **attended**, not feel, so under
+   the reading the sentence was refuting row #6 would *not* have been excluded. Replaced by the argument
+   that actually carries the promotion: the file's own rule at **lines 133-135** — “MVD = `⛰` + `🔧` +
+   `🟡`. A row is debt whenever a human still has to look at something for the row's claim to hold… Only
+   `✅` leaves MVD.” A human still has to look at this dialog rendering, and `🔧 in progress` is the right
+   Legend marker because its automation ticket is open.
+
+Also corrected, one word, same class of defect: the audit paragraph described **CPE-1091**'s residual as
+“minimap-scrub”. Its own row (line 231) says **minimap-*drag***. The Reviewer raised this against the PR
+body; the file carried the same error, and leaving a known falsehood in the permanent record is exactly
+what this ticket forbids, so both were fixed.
+
+**Gates, re-run on the rebased head.** `npx vitest run src/lib/mvdLedger.test.ts` **40/40**;
+`npm run check` **0 errors, 0 warnings**; `npm test` **345 files, 4932 passed, 2 skipped**. Rebased onto
+`origin/main` (77e011ef) first, one commit on the branch.
+
+**File hygiene, re-verified.** No PowerShell touched a repo file — the edits ran through a Node script
+splitting and re-joining on `\r\n`. `file` reports *UTF-8 text, with CRLF line terminators*; the first
+bytes hexdump to `2320 4d61 6e75 616c` (`# Manual`) with no BOM; a byte scan finds **0 bare LFs** in
+102,508 bytes. Diff confined to one file, 29 insertions / 12 deletions; nothing staged with `git add -A`.
