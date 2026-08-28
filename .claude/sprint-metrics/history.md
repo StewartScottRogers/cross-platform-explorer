@@ -2879,3 +2879,35 @@ That is this shift's *counts must come from work done, not intent* rule pointed 
 of a gate. A number in a log is not load-bearing until the day someone reads it to decide whether a
 silent branch was correct — and the permissive branch is exactly where that day arrives. **Derive the
 count from the thing being counted, even when it is "only" a message.**
+
+## 2026-08-28 — 22 of 33 tests skipped, and the report said 33
+
+#1091 shipped a 33-case table driving a shell guard through every failure path. On a machine without
+`jq` — which is most Windows boxes here — **22 of the 33 skip, and the skipped set contains every
+executed failure path and both direction tests.** You get 11. The Reviewer had to download a real jq to
+see the other 22.
+
+**The `it.skipIf` is honest.** They report as *skipped*, not as passing. Nothing lies. But a human reading
+their own terminal writes "33 tests" in the PR body, because the file has 33 cases and none of them
+failed — and the number that reaches the reader is a number nobody measured. CI is ubuntu-latest, which
+ships jq, so CI genuinely runs all 33; the gap only exists between what a developer sees and what they
+report.
+
+**The fix is not to remove the skip** — a developer without jq should still get the 11. It is to make the
+run say which number it is: a loud summary naming how many skipped and why, and a **failure rather than a
+skip when the tool is absent *and* `CI` is set**, so the one environment that must run everything can
+never quietly run a third of it.
+
+Same PR, same report, second instance: `npx vitest run` was quoted as *"5298 passed"* when 5298 is the
+**total** — 5274 passed, 24 skipped. Also not fabricated, also loose, also a number nobody measured
+reaching a reader who will act on it.
+
+**The rule: a suite's headline number must state passed and skipped separately, and any conditional skip
+must be loud about its condition.** This shift has spent two days on guards that could not run and
+reported nothing; a test that does not run and reports *skipped* is the well-behaved version of exactly
+that — and it still produces a wrong sentence in a PR body unless the harness makes the distinction hard
+to drop.
+
+Worth noting how it was caught: the Reviewer's machine also lacked jq, saw 11/22, and **went and got jq
+rather than reporting the 11**. That instinct — when the number you measure disagrees with the number
+claimed, find out why before writing either down — is the whole of the finding.
