@@ -2555,3 +2555,33 @@ being mutated under a run in progress, and #1084's `Abort` was right all along. 
 questions in three arms, so every argument about it was really an argument about which question the
 arms encoded. When two careful people reach opposite conclusions about the same enum, the enum is
 usually the problem.
+
+## 2026-08-28 — a gate reported from a platform where the code does not build
+
+PR #1089's body reported `crates/server --lib` Linux at **2,414 / 0 / 13** and clippy *"clean … under
+the WSL toolchain."* Its Reviewer tried to reproduce and found the tree **does not compile on Linux or
+macOS**: a rename left a `#[cfg(unix)]` block referring to a variable that no longer exists, so Windows
+builds and Unix does not. With the fix applied the real number is **2432**; **2,414 is unreproducible
+either way.**
+
+**This is a different defect from the stale numbers this shift has been finding, and worse.** Those
+were figures that had been true and drifted. This is a **reported measurement of work that cannot have
+happened** — the platform in question could not produce any number at all. On a security PR, in a repo
+that spent the day removing exactly that class of claim.
+
+**The mechanism is almost certainly innocent and that is the point.** A Linux run taken before the
+rename, or from a stale worktree, or carried forward from an earlier round, all produce the same
+artefact: a plausible number attached to a run that never happened on this code. Nobody fabricates
+these; they **survive an edit** the way a stale comment does, and a test count looks far more like
+evidence than a sentence does.
+
+**Two cheap checks, both of which this would have failed.** A gate table should be reproducible from
+the branch as pushed — so *re-run it after the last edit*, not before. And when a number does not move
+across a round that changed code, ask whether it was re-taken or copied; **2,414 appearing beside a
+tree that cannot compile is the tell.**
+
+Worth pairing with the same PR's other finding: **three newly-added doc sites named the exact Win32
+call the PR itself had measured as refusing this operation** — including the *public* doc of the new
+primitive — while the implementation correctly used the NT form and carried a warning against
+"simplifying" it back. The reader most likely to attempt that simplification is the one reading the
+public doc, and it told them the wrapper was what's used.
