@@ -3,7 +3,7 @@ id: CPE-1904
 title: package-lock.json version drift still has no build-time backstop — the exact incident CLAUDE.md records is still open
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-26
@@ -257,3 +257,63 @@ places would have been the exact CPE-1932 enumeration defect.
 warnings**. `npm test` **350 files / 5022 passed / 2 skipped** — delta **+1 file, +19 tests**,
 unchanged by this round (the deleted assertions lived inside a test that is still one test). No Rust
 touched.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1082, **fully green (25/25)**, after two rounds.
+
+**The sharpest single measurement of the shift.** With both `package-lock.json` version fields drifted
+(root → `0.57.66`, `packages[""]` → `0.57.64`, against a `package.json` of `0.57.69`):
+
+| command | exit | output |
+|---|---|---|
+| `npm ci` | **0** | "added 191 packages" — no warning, lockfile left drifted |
+| `npm test` | **0** | 349 files / 5003 passed |
+| `npm run check` | **0** | 0 errors, 0 warnings |
+| `npm install --package-lock-only` | **0** | **silently repaired both fields** |
+
+**The command that reveals the drift is the one that destroys the evidence of it.** Its Reviewer
+reproduced all four rows and added the detail that makes it worse in person: `git diff --stat` goes
+**empty**. The only trace the incident ever left — a dirty working tree that reads as unrelated noise —
+is gone, with no message and no exit code.
+
+**A `--locked`-style failure was not on offer, and that was measured, not assumed.** `npm ci` **is**
+npm's `--locked`, and it exits **0** on version drift — while correctly exiting **1** with `EUSAGE`
+*"Missing: left-pad@1.3.0 from lock file"* on a genuinely inconsistent lockfile. It enforces the
+dependency **graph** and never reads the version fields; the recorded incident was a graph-perfect
+lockfile **three releases stale**. Orthogonal, so this needed its own check.
+
+**Placement argued, not defaulted:** vitest, so it runs in CI's `frontend` job **and on every local
+`npm test`** — because **the drift is introduced and laundered locally**, and a CI-only job never sees
+the `npm install --package-lock-only` step that destroys the evidence. Its Reviewer verified `frontend`
+carries no `needs:` and no path filter rather than taking that on faith.
+
+**Its own red-proof harness had a fail-open, inside the ticket about fail-open guards.** The
+`package.json` case **nearly read as a pass** because the harness's `sed` aimed at line 3 when the
+version sits on line 4 — a sabotage that changes nothing looks exactly like a guard that catches
+nothing. Fixed so the harness cannot pass while drifting nothing; the Reviewer reproduced the fix by
+forcing a nonexistent occurrence and watching **all six** red with *"fixture drift of <file> (<field>)
+changed nothing."* A second harness defect (fixtures reproducing the sabotage) was reproduced **to the
+digit** at 8 failures.
+
+**Fail-closed, measured on three shapes**, including the one that produces a *plausible* answer: a
+well-formed lockfile with the package entry **absent** reports *"Only 5 version place(s) were found, and
+this guard refuses to pass a verdict on fewer than 6"* — **not** "5 of 5 agree". `MIN_VERSION_PLACES`
+catches it independently of the `KNOWN_VERSION_PLACES` tripwire, so the derived list is the one that
+fails, not the remembered one.
+
+**Round 2 deleted a shadowed guard rather than repairing it.** `it("names a fix command that actually
+exists")` asserted a filename appears in `release.ps1` — against **raw text, comments included**, whose
+header names all five files, so **prose alone satisfied it**. Deleting `tauri.conf.json` from the
+script's `$plans`, its summary and its `Invoke-Git add` left this test **19/19 green** while
+`releaseVersionBump.test.ts` reddened **hard** (10 failures). The argument for delete over repair is
+worth keeping: that sibling test does not *read* the script — it **spawns** it with `-BumpOnly` (so a
+renamed switch is a parameter-binding failure, not a passing regex) and joins three sources by **set
+equality**. The deleted assertion was weaker on all three axes at once, and ***a repaired subset of an
+equality assertion is still a subset.*** It then **red-proofed what it kept**.
+
+**Item 5 was already backstopped and covered anyway, with a reason:** `src-tauri/Cargo.lock` at a
+drifted version makes `cargo metadata --locked` exit **101** — but that message names the **file** and
+never the **field** or the values, its only "help" is the `--offline` trap that regenerates the lockfile
+rather than reporting staleness, and reaching it costs a Rust toolchain plus a preflight run. Five of
+six places would also have been the exact CPE-1932 enumeration defect.
