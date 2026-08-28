@@ -3766,3 +3766,34 @@ One shape worth naming, since it recurs: the fail-open in the `on:`-block parser
 than a quiet `false`. **A boolean predicate over parsed input has three outcomes and only two return
 values, and the third is the one that fails open.** Every scanner this shift has touched has had that
 same missing arm.
+
+## 2026-08-28 — a scanner pointed at the file that documents it will match its own documentation
+
+#1087's round 9 widened its declaration scan and added a second leg for `as`/`satisfies Case[]`, which
+necessarily spans lines. Pointed at raw source, that leg reached **back through the docblock's own quoted
+example** and matched an unrelated `const all = [` further up, reporting **a phantom table named `all`** —
+a permanent spurious red in a guard whose whole job is to notice tables.
+
+**The author found this itself, measured it rather than reasoning about it, and fixed it in a way that is
+worth copying:** that leg now reads `stripJsComments(src)`, which is circular — it is the module under
+test — **and the circularity is stated at the site with its bound**. The *annotated* leg still reads raw
+source, so a stripper regression can only remove the coverage this round added, never hide a table the
+older leg would catch. **A circular dependency that is named and bounded is a different thing from one
+that is not noticed.**
+
+This is the third distinct form of the same hazard on this one file: round 7's column-0 anchor existed to
+stop the pattern matching itself; round 8's red-proof sentence quoted a declaration into the docblock and
+quietly made that anchor load-bearing (10 anchored vs 11 unanchored); round 9's second leg made it 10 vs
+**12**. **A file that documents its own scanner accumulates decoys**, and every example added to explain
+the guard is a candidate input to it.
+
+**What made round 9 different is that the instruction was about the shape of sentences rather than about
+a defect.** Told only "do not write another closed list", it withdrew the false backstop rather than
+repairing it — replacing it with **"AND THERE IS NO BACKSTOP BEHIND THIS SCAN"** — split its remaining
+blind spots into *genuinely beyond one regex pass* versus *merely not covered today*, removed every count,
+and declared the one shape that is still invisible instead of quietly widening until the list looked
+complete. Six of seven sabotages now red; the seventh is named.
+
+**Nine rounds, eight narrow reviews, zero code defects, and the thing that finally moved was a rule about
+how to write a sentence.** That is worth remembering the next time a review round produces another
+precise correction to a precise claim: the correction was never the fix.
