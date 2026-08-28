@@ -3,7 +3,7 @@ id: CPE-1919
 title: dark-theme JSON string values measure 3.70:1 contrast, below the 4.5:1 bar for 12px text
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -297,3 +297,42 @@ worth a sentence, not a rewrite.
 
 Gates unchanged: `npm run check` 0 errors; `npm test` 346 files / 4947 passing, 2 skipped, 0
 failures; ratchets all 12 unchanged; hex 85/277. Rebased on `origin/main` (809f9c7c) first.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1069, after **four rounds**. Both blockers were the same defect wearing different
+clothes: **a claim written as measured that had not been measured.**
+
+**Round 2 — the ratios were estimated, not measured.** The PR stated `3.53:1` and `1.90:1`. The real
+values are **2.81** and **2.44**. Corrected in four places including `CLAUDE.md`. The author's response
+was the right one: rather than soften the guard's overstated claim, it gave the guard the *mechanism* —
+the file now asserts each theme block **declares** the token, not merely that the token resolves.
+
+**Round 3 — a claim about other files' coverage was false, in the safe-sounding direction.** The new
+comment said *"there is no general theme-parity guard in this repo"*, written specifically so nobody
+would trust an unchecked assumption. Its Reviewer disproved it **by deletion**: removing
+`--accent-text` from the `dark` block reds `dark-contrast.test.ts` **by name**, because that file
+carries a fixture-independent symmetric check a brand-new token joins automatically. The same deletion
+from `hc-dark` leaves `hc-contrast.test.ts` green. So `dark` is guarded; bare `:root`/`light` and both
+`hc-*` blocks are not. Understating existing coverage would have aimed the follow-up ticket at the half
+already solved. Filed properly as **CPE-1962**.
+
+**A negative claim about coverage is a claim about several other files at once** — and it is checkable
+by deletion, not by reading. That is the transferable lesson, and it is the same family as CPE-1933.
+
+**The guard survived five of six attacks on its parse claim** (deletion, comment-out, mis-casing,
+multi-line whitespace, selector-list — the last over-strict but failing **closed**). One narrow hole
+documented rather than patched: `--accent-text: ;` passes the DECLARED assertion through regex
+backtracking, and is caught by the resolve half. The regex was deliberately **not** tightened, because
+`extractDecls` is shared with the palette-resolution path and tightening risks a false positive on the
+valid multi-line form.
+
+**Also settled:** `--accent-hover` on `--surface` in dark measured **4.10:1**, *below* the new rest
+state's **5.03:1** — the link was **dimming** on hover, not merely half-stepping. The site count is
+**eight**. `--accent-soft` was a dangling reference to an undefined token sitting in front of a ground
+that feeds a pinned ratio; removed, with `warn-token.test.ts`'s stale "current instances" comment
+corrected. A latent hole is recorded at the site: `-webkit-text-fill-color`, `text-decoration-color`
+and `caret-color` are all real text roles the sweep's lookbehind rejects; none exists in `src/` today.
+
+**Merged past a known red**: shard 2 and its verdict job were failing on CPE-1960, verified by reading
+the job log rather than trusting the job name.
