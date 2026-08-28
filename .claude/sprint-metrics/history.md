@@ -2396,3 +2396,38 @@ cross-check to the exit code, the provenance check to code rather than prose.
 guard.** Breaking the guard proves it can fail. Breaking the *subject* and watching the guard stay
 green is what proves the wire exists — and it is the same "force the predicate to lie" half of
 CPE-1929's pair, applied one level out.
+
+## 2026-08-28 — two PRs in a row: the fix was right, the guard around it overstated
+
+Back to back, two independent reviews landed the same verdict in different subsystems:
+
+- **CPE-1966 / #1087** — *"the engineering is good and most of it holds up under attack. Three things do
+  not, and all three are in the machinery the brief said to weigh hardest."*
+- **CPE-1954 / #1088** — *"the security fix itself is correct, genuinely demonstrated, and I would
+  approve it on the code alone. Two findings are about the guard layer around it overstating what it
+  enforces."*
+
+Neither fix was wrong. In both cases the **claim about the guard** was, and in both cases the claim sat
+next to a green test that read as vouching for it.
+
+**The sharpest instance was a claim about layering.** #1088 protected a parse two ways — the
+constructor made `pub(crate)` (the compiler refuses the old spelling: `error[E0624]`) and a repo-wide
+scanner for the `serde_json::from_str::<CatalogIndex>` back door, since the type is still `pub` +
+`Deserialize`. The comment said *"each covering what the other cannot"* and *"neither alone is the
+invariant."*
+
+Its Reviewer wrote **one line** — `type Idx = sidecar_host::catalog::CatalogIndex;` — and defeated
+**both at once**. It compiles, forms a real escaping path at runtime, and the scanner stays 16/16 green.
+**Neither *together* is the invariant.** Seven more vectors survive all three regexes: `use … as`, a
+generic turbofish, a `#[serde(flatten)]` wrapper, return-position inference, `Self::from_json` inside
+the crate, a `TryFrom` impl, and a `Vec<CatalogIndex>` annotation.
+
+**Two layers is not evidence of depth.** Both of those layers key on the *spelling of a type name*, so a
+rename defeats them together — they are one layer wearing two coats. The test for "defence in depth" is
+not *how many checks* but *whether an attack that defeats one also defeats the other*, and that is a
+question you answer by trying it, not by counting.
+
+**The available structural fix makes the point.** Nothing outside that crate names the type at all, so
+the `Deserialize` derive can go behind a private wire type and **the compiler becomes the invariant** —
+no scanner, no claim, nothing to go stale. A guard you can delete is better than a guard you have to
+describe.
