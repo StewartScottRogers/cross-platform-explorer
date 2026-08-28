@@ -3,7 +3,7 @@ id: CPE-1946
 title: promote-or-close CPE-1263 in the manual-test burndown — by the file's own rule it is countable debt, so the total is 13 and arguably 14
 type: task
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-27
@@ -182,3 +182,43 @@ what this ticket forbids, so both were fixed.
 splitting and re-joining on `\r\n`. `file` reports *UTF-8 text, with CRLF line terminators*; the first
 bytes hexdump to `2320 4d61 6e75 616c` (`# Manual`) with no BOM; a byte scan finds **0 bare LFs** in
 102,508 bytes. Diff confined to one file, 29 insertions / 12 deletions; nothing staged with `git add -A`.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1071, after two rounds. **Decision: promote. Manual Verification Debt 13 → 14.**
+
+**The decision was argued from the file's own criterion, not from convenience.** CPE-1263's residual is
+**render/gui-smoke** — `ContentIndexSearchDialog.svelte` has never rendered in CI at all — not
+feel/taste, and it names a live retiring ticket (**CPE-1819**, `Backlog/`, `tags: ready`). The
+`excluded` annotation excludes rows *"with no retiring ticket"* whose residual is taste; this row met
+neither condition.
+
+**Both close-paths were checked before promoting**, which is what stopped it being a double-count in
+one direction or a fiction in the other.
+
+**Round 2 corrected three prose claims — the important one inverted the argument's ground.** The PR
+justified promotion by saying row #12 and CPE-1263 are *different surfaces* — *"a shared blocker, not
+a shared surface."* Its Reviewer traced the provenance and found **they are the same component under
+the same epic**: v0.57.45 shipped CPE-976/CPE-1273's embedder for content search, i.e.
+`content_index_build`/`content_search`, which is what `ContentIndexSearchDialog` is the UI over.
+
+**The promotion survives on better ground**, which is now what the file says: they are two different
+*human looks* at one component — row #12's is the never-performed attended end-to-end against a **live
+embedding endpoint**; this row's is that the dialog **has never rendered in CI**. And the file already
+counts rows sharing one retiring ticket separately: **#1/#2** are the single CPE-1045 harness, **#7/#13**
+the single CPE-1659 network-E2E job. Precedent, not exception.
+
+**Two smaller corrections:** CPE-1114 *does* name a residual (the PR said it named none), and the
+claim that *"every `🟡 partial` row would be excluded on the same reasoning"* was never load-bearing —
+there is exactly **one** `🟡` row (#6, auto-update) and its residual is **attended**, not feel. The
+promotion is carried directly by the file's own rule at lines 133-135. The flourish came out; the rule
+went in.
+
+**The enumeration held.** All seven other `excluded` rows were checked row-by-row and correctly stay
+excluded — and a mechanical cross-check settled it properly: of **every** ticket named anywhere across
+those seven rows, **not one is open**. True by enumeration rather than by reading.
+
+**Scope discipline worth noting:** the worker also fixed a `minimap-scrub`→`minimap-drag` error *in the
+file* after being told to limit that correction to the PR body — on the grounds that leaving a known
+falsehood in the permanent record is precisely what this ticket forbids. Correct call, and it said so
+rather than doing it quietly.
