@@ -4126,3 +4126,46 @@ Recognising that in your own new code, in the same round, is rare.
 input, and the site says so — *over-reports in the fail-closed direction for this consumer only*. **A
 known inaccuracy with its direction stated is a different object from an unknown one**, and the difference
 is one clause.
+
+## 2026-08-28 — three correct fixes, none of which propagated to its sibling
+
+#1091 has now had the same defect found three times, each in a sibling of the thing the previous round
+fixed:
+
+1. Round 5 widened `ASSIGN` to handle two names on one line, and left `FILLED` capturing the first.
+2. Round 5 extracted `flagPrintf` so the predicate was covered, and left its **consuming loop** unguarded.
+3. Round 6 applies `dropSingleQuoted` inside `flagPrintf`, and **not** inside `taintedVars`.
+
+**Every one of those fixes was correct.** None was a misunderstanding, none needed rework. What none of
+them did was reach the neighbouring function doing the same job.
+
+The third instance is the sharpest because it is a live fail-open, and its shape is almost funny:
+
+```sh
+printf 'remedy: wrap it as safe=$(catalog_lb_log_safe "$VAR") before logging\n' >&2
+safe="$tag"
+printf '%s\n' "$safe" >&2
+```
+
+**A variable genuinely carrying remote bytes is reported clean because a *remedy message* mentioned the
+sanitiser** — the guard reading its own advice as compliance. That is precisely the bypass round 4 closed
+for a different function, and its own test file records that closure two hundred lines above the hole.
+
+**The generalisation is not "be thorough".** It is that **a fix has a blast radius the author is not
+prompted to walk.** The diff shows the function you changed; nothing shows the two functions beside it
+that answer the same question a different way. There is no step in the process that asks *"what else in
+this file does this?"* — so the answer is to add one, explicitly, as an artefact.
+
+**So round 7's deliverable is not the fix, it is a three-row table**: every function in the file that
+scans a shell line, checked against the same three questions — does it strip single-quoted prose first,
+does it bind every name its construct can bind, is its own consumer covered by a test that would red.
+Three rows, written down, so the next round has something to *check* rather than a claim to trust. **An
+enumeration of siblings is the artefact that makes propagation visible**, and it is cheaper to write once
+than to rediscover three times.
+
+Worth recording the review's two upward corrections too, because they run the other way: **both boundaries
+the round described as "still open" are less open than claimed** — narrowing the line-splitter reds via a
+parser self-check, and the exemption list cannot quietly grow because an unfound entry reds. And the
+mutant one level out is **degenerate** — mutating an expected literal is just deleting the assertion,
+which is the natural terminus of that chain rather than another rung. **A docblock can overstate its own
+weakness as easily as its own strength**, and both are worth correcting.
