@@ -145,3 +145,31 @@ above zero is a visible report instead of the daily background noise it has been
 
 **Docs.** `src/docs/explorer-archives.md` gains a "Getting back out" bullet naming all four exits,
 including the address-bar one that did not work.
+
+### 2026-08-28 — after rate, measured on the branch
+
+Sample size and window, not an adjective. **1 of 1** completed `gui-smoke (ubuntu-latest) shard 2` job
+on head `b4d42738`, run 33200926262, job 98953638286, window 2026-08-28T19:02:32Z–19:04:35Z. Raw job
+log pulled the same way as the before sample:
+
+- `handleRunnableStart:resetFailedRestartingSession` — **0** (before: 77 of 77)
+- `expected the breadcrumb to show` — **0** (before: 77 of 77)
+- `respawning tauri-driver` — **0** (before: 11 of 77)
+- All 14 spec-file transitions logged `resetDone`, the archive-browse → checkpoint-restore one included;
+  `attempt 1: suite exited 0; 14/14 spec file(s) reported; ... 0 in-process driver respawn(s)`.
+- The rest of the run: shards 2, 3 and 4 green, layout guard and launcher contrast green (shard 1 still
+  running at time of writing).
+
+**What n=1 does and does not establish.** The before rate was 77 of 77 = **100 %**, so the mechanism was
+deterministic; a single clean job falsifies "always", which is the claim being fixed. It cannot bound a
+residual low-rate flake — that needs a post-merge window on `main`, and the reading to take is
+CPE-1910's `$GITHUB_STEP_SUMMARY` respawn count, whose expected value is now 0.
+
+**Cost removed, same-transition comparison** (before: job 98928416795; after: job 98953638286):
+
+| | `newFile` → reset resolved |
+|---|---|
+| Before | **50.19 s** (15.43 s of doomed breadcrumb polling + 34.77 s session restart) |
+| After | **0.50 s** |
+
+≈ 49.7 s per shard-2 job, on every run, green ones included.
