@@ -75,23 +75,33 @@
  * `styleBlock` throws, a loud red. Both of those are facts about a SINGLE-SELECTOR LOOKUP. For an
  * ENUMERATOR neither holds, and the difference is not cosmetic:
  *
- *   - with `stripComments: false` this sweep's population drops sharply — at the time of writing
- *     22 boxes to 8 — and the losses include BOTH already-fixed boxes AND still-content-driven ones.
+ *   - with `stripComments: false` this sweep's population drops sharply — most of it — and the losses
+ *     include BOTH already-fixed boxes AND still-content-driven ones.
  *     The mechanism is that every fix in this class ships with a comment explaining it, and a comment
  *     immediately above a rule is swallowed into that rule's SELECTOR — `.list` stops parsing as a
  *     single class and drops out of the enumeration altogether.
- *   - **THE EXACT SPLIT IS DELIBERATELY NOT WRITTEN DOWN HERE, AND THAT IS THE THIRD ATTEMPT AT THIS
- *     PARAGRAPH.** Round 1 said the losses were "exactly the ones that have been FIXED"; round 2
- *     corrected that to "one is not" and was ALSO wrong — there are two — while regressing the
- *     population figure from 8 to 9 in the same edit. The reason is the lesson the bullet itself was
- *     stating: which boxes vanish moves with the COMMENTS in the tree, and round 2's own diff moved
- *     one. It added the `.empty` centring comment to `CheckpointDialog`, which pushed `#drift-list`
- *     out of the unstripped scan — so the commit that wrote the count is the commit that falsified
- *     it (CLAUDE.md: "the commit that writes such a claim is often the commit that falsifies it").
+ *   - **NO FIGURE APPEARS ABOVE, AND IT TOOK FOUR ATTEMPTS TO STOP WRITING ONE.** The history is kept
+ *     because the shape of the mistake is the useful part. Every figure below is anchored to the
+ *     commit it was measured at, and NONE of them describes the tree you are reading:
+ *       * round 1 — "22 -> 8, and the losses are exactly the ones that have been FIXED". The 8 was
+ *         right; "exactly the fixed ones" was not, as two unfixed boxes were lost too.
+ *       * round 2 — corrected that to "one is not", which was ALSO wrong, and REGRESSED the
+ *         population figure from 8 to 9 inside the correction. Measured at `776db8c1`: 8, losing 14,
+ *         two of them content-driven.
+ *       * round 3 — deleted the split, kept a hedged "at the time of writing 22 -> 8", and that was
+ *         already wrong when it was committed. Measured at `56ac6bfa` by the reviewer's probe: 7,
+ *         losing 15, THREE content-driven. The extra loss was `CopilotDialog#op-results`, whose only
+ *         change in that round was REWORDED PROSE INSIDE A BLOCK COMMENT — no CSS, no assertion.
+ *     Rounds 2 and 3 each demonstrated the lesson from inside the sentence stating it: which boxes
+ *     vanish moves with the COMMENTS in the tree, so any commit touching any comment in a fixed
+ *     component falsifies the count — including a commit whose sole purpose is to correct it.
+ *     CLAUDE.md says it exactly: "the commit that writes such a claim is often the commit that
+ *     falsifies it."
  *     A pinned COUNT is the same object as a pinned LIST, and the fix for both is the same: the two
  *     legs below DERIVE the properties — that at least one already-fixed box is lost, and that at
- *     least one still-content-driven box is lost — and name no box and no number. Whatever those
- *     legs report when they fail is the current truth; this prose is not.
+ *     least one still-content-driven box is lost — and name no box and no number. They absorbed all
+ *     three drifts without an `expect(...)` moving. Whatever those legs report when they fail is the
+ *     current truth; this prose is not, and has stopped trying to be.
  *   - **Round 1 also said "a smaller population is all green … a silent pass, not a loud throw",
  *     which claims this file's own floor does not work. It does.** With the stripper disabled the
  *     `>=15` floor reds, along with the other legs that name specific boxes. The accurate
