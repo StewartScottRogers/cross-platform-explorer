@@ -1919,9 +1919,10 @@ fn same_object_or_refuse(
         // **Measured, not assumed: this is NOT a shadowed guard, and CPE-1957 expected it to be.**
         // That ticket filed it as a probable duplicate of `shred_dir_pinned`'s `probe.is_link`, worth
         // only an "unreachable backstop" note. The two sabotages say otherwise, on Windows 11
-        // (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored, base
-        // `eca04c22` and re-confirmed against `2c7f69ff` — see `overwrite_pinned_file` for why the
-        // revision is named):
+        // (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored at base
+        // `eca04c22`, re-confirmed against `2c7f69ff`; **2,461 in the tree this comment ships in — the
+        // same baseline plus CPE-1957's one new test — so each figure below reads one higher here**;
+        // see `overwrite_pinned_file` for why the revision and the +1 are named):
         // disabling it (`if false && now.is_link`) is **2,458 passed / 2 failed** —
         // `a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against` and
         // `shred_tree_refuses_a_root_that_is_itself_a_link` — and forcing the predicate to lie
@@ -2005,11 +2006,21 @@ fn overwrite_pinned_file(
     // narrowing only this one changes nothing at all, since control never arrives.
     //
     // **Shadowed-guard measurement, run by hand on Windows 11 (`cargo test --lib`, `crates/server`),
-    // baseline 2,460 passed / 0 failed / 14 ignored.** Every number in this file's CPE-1957 comments was
-    // measured at base `eca04c22` and re-confirmed against `2c7f69ff` after rebasing: the baseline came
-    // back identical, so #1099/#1100 moved nothing here. A number is a fact about a revision, so the
-    // revision is named rather than left to the reader (CPE-1933) — if a later change moves the count,
-    // these are stale and must be re-run, not adjusted.  Disabling this refusal (`if false && (..)`):
+    // baseline 2,460 passed / 0 failed / 14 ignored at base `eca04c22`; re-confirmed against `2c7f69ff`
+    // after rebasing, where the baseline came back identical, so #1099/#1100 moved nothing here.**
+    // **In the tree these comments ship in the suite is 2,461 — the same 2,460 baseline plus this
+    // ticket's one new test — so every figure below reads one lower than what you will measure here.**
+    // That +1 is stated at the site on purpose: the commit that writes a count is usually the commit
+    // that falsifies it, and without this clause the instruction in the next sentence fires spuriously
+    // on day one. A number is a fact about a revision *and* about the predicate it was measured
+    // against, so both are named rather than left to the reader (CPE-1933) — if a later change moves
+    // the count beyond that +1, these are stale and must be re-run, not adjusted.
+    //
+    // **The two sabotage figures below pre-date the line they sit under.** They were measured against
+    // the pre-fix predicate `facts.is_reparse_point || facts.is_dir`, which this same diff replaces
+    // with the narrowed `reparse_name_surrogate(&file).unwrap_or(true) || facts.is_dir`. Re-run on the
+    // shipped predicate the legs are **2,461 / 0** and **2,434 / 27**, and the verdict is unchanged.
+    //  Disabling this refusal (`if false && (..)`):
     // **2,460 / 0** — identical, so nothing in the suite makes its predicate true. Forcing the predicate
     // to lie (`if true || ..`): **2,434 passed / 26 failed** — which proves only that the *line* is on
     // the hot path of every ordinary file, not that the *refusal* is reachable, and is why the second
@@ -4919,6 +4930,23 @@ mod tests {
     /// Windows-only by construction: Unix has no reparse points and its `is_link` is already
     /// `file_type().is_symlink()`.
     ///
+    /// **The tag is not merely an accident of cloud sync — it is plantable (CPE-1957 review).** The
+    /// reviewer built a `REPARSE_DATA_BUFFER` carrying the real OneDrive Files-On-Demand tag
+    /// `0x9000_001A` and Windows-Container-Isolation `0x8000_0018`, and `FSCTL_SET_REPARSE_POINT`
+    /// accepted both **from an unprivileged process**. So the pre-fix behaviour was not only a
+    /// silent skip that a OneDrive user could stumble into; it was a locally plantable way to make
+    /// the lock report success over untouched plaintext. This fixture uses a GUID tag rather than
+    /// those two because the bit under test is `IO_REPARSE_TAG_NAME_SURROGATE`, and the two halves
+    /// below isolate exactly that bit — but the shape it stands in for is reachable, not theoretical.
+    ///
+    /// **Both alias policies run below**, because `wipe_session_dir` — the route the defect actually
+    /// travelled — passes `UnlinkAliasesInsteadOfOverwriting`, not the `ShredEveryFile` that a reader
+    /// might assume from `create_vault`. The production policy runs first so a red-proof names it:
+    /// un-narrowing `EntryProbe::is_link` back to the bare bit fails here with *"the wipe left the
+    /// user's plaintext on the volume under UnlinkAliasesInsteadOfOverwriting"*, measured, not assumed.
+    /// A single-name file per policy keeps the alias question out of it — with exactly one name both
+    /// policies must overwrite, so their agreement is a result rather than a restatement of the setup.
+    ///
     /// **Red-proofed, both halves, on Windows 11 (`cargo test --lib`, `crates/server`, base `eca04c22`,
     /// re-confirmed against `2c7f69ff`).** Un-narrowing
     /// `EntryProbe::is_link` back to the bare bit gives **2,460 passed / 1 failed**, failing here on
@@ -4940,56 +4968,79 @@ mod tests {
         let session = dir.path().join("session");
         std::fs::create_dir_all(&session).unwrap();
 
-        let placeholder = session.join("placeholder.txt");
-        std::fs::write(&placeholder, SECRET).unwrap();
-        if !crate::fsutil::make_guid_reparse_point(&placeholder, NON_SURROGATE_FILE_TAG, false) {
-            crate::skip_notice!(
-                "SKIPPED cpe_1957_a_non_surrogate_reparse_point_in_the_session_tree_is_overwritten_not_skipped: \
-                 could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
-                 vault wipe's treatment of a cloud placeholder."
+        // **Both alias policies, because the production caller does not use the obvious one
+        // (CPE-1957 review).** `wipe_session_dir` — the path this whole fix is about — passes
+        // `UnlinkAliasesInsteadOfOverwriting`, while `create_vault`'s shred-original passes
+        // `ShredEveryFile`. Driving only the latter would leave the defect's actual route uncovered,
+        // and the two policies reach different arms of `wipe_disposition`, so agreement between them
+        // is a result rather than an assumption. A fresh single-name file per policy keeps the alias
+        // question out of it: with exactly one name both policies must overwrite.
+        // The production policy runs FIRST, deliberately: it is the route the defect actually
+        // travelled, so a red-proof that reintroduces the bug should name it rather than tripping on
+        // the `create_vault` policy and never reaching it.
+        for (policy, stem) in [
+            (AliasPolicy::UnlinkAliasesInsteadOfOverwriting, "placeholder_session_wipe.txt"),
+            (AliasPolicy::ShredEveryFile, "placeholder_shred_every.txt"),
+        ] {
+            let placeholder = session.join(stem);
+            std::fs::write(&placeholder, SECRET).unwrap();
+            if !crate::fsutil::make_guid_reparse_point(&placeholder, NON_SURROGATE_FILE_TAG, false) {
+                crate::skip_notice!(
+                    "SKIPPED cpe_1957_a_non_surrogate_reparse_point_in_the_session_tree_is_overwritten_not_skipped: \
+                     could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                     vault wipe's treatment of a cloud placeholder."
+                );
+                return;
+            }
+            // Liveness: without the attribute this is a test that an ordinary file gets overwritten.
+            assert!(
+                std::os::windows::fs::MetadataExt::file_attributes(
+                    &std::fs::symlink_metadata(&placeholder).unwrap()
+                ) & 0x400
+                    != 0,
+                "fixture is inert ({policy:?}): no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder"
             );
-            return;
+            // The control that makes this mean anything: `shred_dir_pinned`'s FIRST check is
+            // `entry.file_type().is_symlink()`, which would `continue` for free and prove nothing about
+            // the narrowed question.
+            assert!(
+                !std::fs::symlink_metadata(&placeholder).unwrap().file_type().is_symlink(),
+                "fixture is shadowed ({policy:?}): std calls the non-surrogate placeholder a symlink"
+            );
+
+            let expected = probe_no_follow(&session).id;
+            assert!(
+                expected.is_some(),
+                "fixture is unusable: the session dir has no provable identity"
+            );
+            shred_dir_pinned(&session, expected, ShredScheme::Zero, policy).unwrap_or_else(|e| {
+                panic!(
+                    "a reparse point that does not stand in for another name is an ordinary file, and \
+                     refusing it fails the whole lock mid-wipe on a vault the user is trying to close \
+                     (policy {policy:?}): {e}"
+                )
+            });
+
+            // Read back through a no-follow open: an unrecognised reparse tag makes an ordinary open
+            // fail.
+            let mut after = Vec::new();
+            crate::batch_media::open_existing_no_follow_read(&placeholder)
+                .expect("the placeholder must still be there to read back")
+                .read_to_end(&mut after)
+                .unwrap();
+            assert_ne!(
+                after.as_slice(),
+                SECRET,
+                "HARM: the wipe left the user's plaintext on the volume under {policy:?} — a file \
+                 carrying a non-surrogate reparse tag was skipped by the wipe and would have been \
+                 unlinked by `remove_dir_all` with its extents intact, while the lock reported success"
+            );
+            assert!(
+                after.iter().all(|&b| b == 0),
+                "the zero scheme must have written zeros over the whole file under {policy:?}, not \
+                 merely changed it"
+            );
         }
-        // Liveness: without the attribute this is a test that an ordinary file gets overwritten.
-        assert!(
-            std::os::windows::fs::MetadataExt::file_attributes(
-                &std::fs::symlink_metadata(&placeholder).unwrap()
-            ) & 0x400
-                != 0,
-            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder"
-        );
-        // The control that makes this mean anything: `shred_dir_pinned`'s FIRST check is
-        // `entry.file_type().is_symlink()`, which would `continue` for free and prove nothing about
-        // the narrowed question.
-        assert!(
-            !std::fs::symlink_metadata(&placeholder).unwrap().file_type().is_symlink(),
-            "fixture is shadowed: std calls the non-surrogate placeholder a symlink"
-        );
-
-        let expected = probe_no_follow(&session).id;
-        assert!(expected.is_some(), "fixture is unusable: the session dir has no provable identity");
-        shred_dir_pinned(&session, expected, ShredScheme::Zero, AliasPolicy::ShredEveryFile).expect(
-            "a reparse point that does not stand in for another name is an ordinary file, and \
-             refusing it fails the whole lock mid-wipe on a vault the user is trying to close",
-        );
-
-        // Read back through a no-follow open: an unrecognised reparse tag makes an ordinary open fail.
-        let mut after = Vec::new();
-        crate::batch_media::open_existing_no_follow_read(&placeholder)
-            .expect("the placeholder must still be there to read back")
-            .read_to_end(&mut after)
-            .unwrap();
-        assert_ne!(
-            after.as_slice(),
-            SECRET,
-            "HARM: the wipe left the user's plaintext on the volume — a file carrying a non-surrogate \
-             reparse tag was skipped by the wipe and would have been unlinked by `remove_dir_all` with \
-             its extents intact, while the lock reported success"
-        );
-        assert!(
-            after.iter().all(|&b| b == 0),
-            "the zero scheme must have written zeros over the whole file, not merely changed it"
-        );
 
         // The surrogate half, differing in exactly one bit: still skipped, never followed.
         let surrogate = session.join("surrogate.txt");

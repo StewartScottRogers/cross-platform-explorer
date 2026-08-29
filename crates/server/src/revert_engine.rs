@@ -1090,9 +1090,11 @@ fn apply_write(
     // exposes no `openat`-relative resolution to close it with.
     // **CPE-1957 filed this as shadowing `claim_destination_handle`'s link refusal for `Create` ops, and
     // asked for a note or a reorder. The measurement says: note, and emphatically not a reorder.** On
-    // Windows 11 (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored,
-    // measured at base `eca04c22` and re-confirmed against `2c7f69ff` — a number is a fact about a
-    // revision, so if a later change moves the count these are stale and must be re-run, not adjusted),
+    // Windows 11 (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored at
+    // base `eca04c22`, re-confirmed against `2c7f69ff`; **2,461 in the tree this comment ships in — the
+    // same baseline plus CPE-1957's one new test in `vault_manager`, so each figure below reads one
+    // higher here** — a number is a fact about a revision, so if a later change moves the count beyond
+    // that +1 these are stale and must be re-run, not adjusted),
     // disabling this check (`if false && ..`) is **2,457 passed / 3 failed**, and the three do not fail
     // by landing on some downstream refusal with different wording — they fail with `HARM:` assertions
     // showing the revert *destroyed the user's file* (`RestoreReport { applied: 1, skipped: [] }`,

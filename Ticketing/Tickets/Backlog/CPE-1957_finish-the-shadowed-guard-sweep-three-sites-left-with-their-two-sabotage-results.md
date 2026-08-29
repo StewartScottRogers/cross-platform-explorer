@@ -3,7 +3,7 @@ id: CPE-1957
 title: finish the shadowed-guard sweep — three sites CPE-1929 measured and deliberately left, with the check that shadows each
 type: task
 priority: Medium
-status: Done
+status: Open
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -118,6 +118,19 @@ seconds; none was a cached "Finished in 0.5s".
 **Re-measured baseline: 2,460 passed / 0 failed / 14 ignored** (86.27 s). The ticket quoted 2,425/0/11
 from CPE-1929's merge; several PRs have landed since (#1089, #1098 among them).
 
+**The bug is plantable, not just a cloud-sync accident — review finding, and it changes what this was.**
+The Reviewer went past this ticket's GUID-tag fixture to the real tags: a hand-built `REPARSE_DATA_BUFFER`
+carrying OneDrive Files-On-Demand `0x9000001A` and Windows-Container-Isolation `0x80000018` is accepted by
+`FSCTL_SET_REPARSE_POINT` **from an unprivileged process**. So before this fix, any local code running as
+the user could mark a file inside a vault session directory and have the lock report success over
+untouched plaintext. The pre-fix defect was therefore a plantable retention hole, not only a defect a
+OneDrive user could stumble into. Recorded at the test site and in the PR body.
+
+**Second review finding — the narrowing also fixes a whole unwiped subtree.** A non-surrogate reparse
+*directory* previously `continue`d with everything beneath it left unwiped; it is now descended, and the
+inner file is confirmed zeroed rather than redirected. The same improvement reaches `create_vault`'s
+shred-original, where a user-picked folder that was itself a placeholder used to be refused outright.
+
 **Revision provenance, because a number is a fact about a revision (CPE-1933).** Every sabotage below
 was measured at base `eca04c22`. The branch was later rebased onto `2c7f69ff` (#1099 and #1100 having
 merged in between) and the suite re-measured: **2,461 / 0 / 14** — the same 2,460 baseline plus this
@@ -205,3 +218,45 @@ retained plaintext, so the vault's asymmetry runs opposite to the batch's. That 
 choice resting on its own batch-specific argument rather than on "the crate refuses these", which is no
 longer true. No narrowing-versus-refusing count is asserted at that site — CPE-1959 owns that
 enumeration, and a number written there would be a second unguarded copy of it.
+
+### Review round — PR #1101, APPROVE with three required fixes (all applied)
+
+**F1 — the comments' own counts were stale on the day they shipped.** All three sites said "baseline
+2,460 … came back identical", but the tree they ship in measures **2,461**, because this ticket's own new
+test moved it. So every figure read one lower than the next person would measure, and the sites'
+instruction *"if a later change moves the count, these are stale, re-run them"* would have fired
+spuriously on day one. The +1 was explained in the commit message and here, but **not at the site**,
+which is the inverse of the rule. This is CLAUDE.md's round-8 shape exactly — *stale the moment it was
+written, because the commit that writes such a claim is often the commit that falsifies it* — and I had
+read that paragraph while writing the very comments that repeated it. Each site now states the baseline,
+its revision, and that the shipping tree reads one higher and why.
+
+**F2 — a number must name its predicate, not only its revision.** Site 1's two sabotage figures were
+measured against the pre-fix `facts.is_reparse_point || facts.is_dir` — *a predicate this same diff
+replaces*. The comment then sat under the narrowed predicate annotating it with the old one's numbers.
+The Reviewer re-ran both legs on the shipped predicate (**2,461 / 0** and **2,434 / 27**) and the verdict
+is unchanged, so nothing was wrong; but the site now names the predicate as well as the revision, since a
+later reader could not otherwise tell the numbers pre-date the line above them.
+
+**F3 — the test drove the wrong alias policy.** It called `shred_dir_pinned` with `ShredEveryFile`, while
+`wipe_session_dir:1265` — the route this whole fix is about — passes `UnlinkAliasesInsteadOfOverwriting`.
+The placeholder half now runs under **both**, production policy first, one fresh single-name file each so
+the alias question stays out of it. Re-red-proofed: un-narrowing `EntryProbe::is_link` fails with *"the
+wipe left the user's plaintext on the volume under UnlinkAliasesInsteadOfOverwriting"*, so the production
+leg demonstrably catches the bug rather than merely passing beside it. Suite still **2,461 / 0 / 14** —
+the restructure added coverage, not a test, so F1's "+1" wording stays accurate.
+
+**Confirmed by the Reviewer, recorded so it is not re-litigated:** site 1's shadowing argument is
+load-bearing — with both by-path checks disabled the single failure carries `same_object_or_refuse`'s
+wording (*"a symbolic link or junction is at this directory"*), not `overwrite_pinned_file`'s, so site 2
+catches it on the directory route and site 1 never sees it. And site 2 has nothing in front of it
+**structurally**: `shred_tree` has two callers, and `create_vault:264` reaches it with no by-path link
+check at all. Refusing to write the ticket's requested "unreachable backstop" note was correct.
+
+**F4 — found by the Reviewer, NOT fixed here; the Foreman is filing it.** `vault_manager.rs:1846`'s
+`read_dir` enumerates names only and `shred_through` writes the default stream, so an **alternate data
+stream** on a session file is never overwritten, and `remove_dir_all` then unlinks the file leaving the
+stream's extents on the volume. Measured under the production policy: `main_all_zero=true`,
+`ads_readable=true`, `ads_still_secret=true`. It is the same failure mode this ticket just fixed, one
+layer down, and streams are mentioned nowhere in `vault_manager.rs` or `docs/design/VAULT-SECURITY.md`.
+Pre-existing and out of scope — widening this PR to cover it would have been the wrong call.
