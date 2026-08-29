@@ -4822,3 +4822,58 @@ review had not said — once guessing a reviewer's dirty worktree was a leftover
 insertions, 0 deletions), once framing a reviewer's suggested test shape as wrong when the shipped shape
 *was* theirs. Neither reached the tree, both because the recipient checked. **The relay is the one link in
 the chain nobody re-derives.**
+
+## Pin the complement, or the cheap wrong fix passes your test
+
+2026-08-28, PR #1105 (CPE-1900) — and the same shape twice more in the same batch.
+
+A refusal was too loose: `startsWith("src-tauri/")` accepted `src-tauri/../../planted.conf.json`. The
+obvious fix is "reject paths containing `..`". **The obvious fix is also satisfied by rejecting every
+path containing two dots**, which breaks `tauri..odd.conf.json` — a legitimate filename — and passes a
+test that only checks the traversal is refused.
+
+So the fix shipped **with its complement pinned**: a name that merely *contains* two dots is not a
+traversal and **must still be accepted**. The Reviewer then forced the filter over-eager (substring
+`includes("..")` instead of a segment test) and watched the **complement** test red. *"The pair genuinely
+constrains both directions; neither can be satisfied by the cheap wrong fix."*
+
+**The general rule: when you tighten a predicate, ask what the laziest passing implementation would be,
+and write the test that fails it.** A one-directional test on a refusal is an invitation to refuse
+everything.
+
+### The same batch, same shape, two more times
+
+- **A count is not a check if both sides count the same way** (F6). The new assertion compares the derived
+  overlay list against a regex sweep of the raw arguments. That is only worth something if the two
+  disagree when one is wrong — so the Reviewer ran **twelve shapes chosen to split a regex sweep from a
+  token walk** (`--conf`, `x--config`, `--config=a--config=b`, attached short flags, tab separators, a
+  `--` terminator, near-miss flag names). **12 of 12 agree, by two genuinely different routes** — which is
+  why the sweep fires when the walk drops an element. **The honest residue: they share the flag
+  *vocabulary*.** A third spelling in the upstream CLI and both legs miss it in lockstep, and the count
+  matches at 0 = 0. That is CPE-1950's shared blindness, found by looking for it rather than by assuming
+  two mechanisms are two opinions.
+- **A count assertion is not a test if the count is a name** (F5). Two naive scanners over a decoy fixture
+  were checked by how many decoys survived. The Reviewer renamed one survivor, **leaving both counts
+  identical and changing only identity** — a `toHaveLength(2)` passes. The `toEqual` over the two *names*
+  is what makes it non-tautological.
+
+### And a vacuity check worth copying
+
+Asked whether the new assertions could pass on nothing, the Reviewer answered structurally rather than by
+running them: emptying the scanner list makes the binding `undefined` so the length assertion **throws**;
+the build-leg list **cannot** be empty because the deriver throws at module load below its floors, so a
+near-empty derivation fails **collection** rather than silently registering zero tests. And then the
+precise part: **3 of the 6 count instances are `0 === 0`**, correctly, because one release channel passes
+no overlays — with the three that carry weight being the ones that red-proofed. *Saying which instances
+are trivially true is the difference between a vacuity check and a vacuity claim.*
+
+### A decline worth recording
+
+The Foreman pointed out that composing two measured analogues gives 35 minutes where a job header says 30.
+The arithmetic was right and the worker **declined anyway**: that header belongs to another ticket, already
+declares itself an unmeasured analogue, and resizing it wants a real run. *"I'd rather not edit it on an
+argument."*
+
+That is the correct instinct, and it is the mirror image of everything else in this shift. **Changing a
+measured-looking number on the strength of an argument is how the wrong kind of confidence gets in** — the
+same defect as writing an unmeasured claim, arriving from the opposite direction.
