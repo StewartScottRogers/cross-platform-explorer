@@ -3,7 +3,7 @@ id: CPE-1900
 title: CONFIG_CHAIN is a hand-copied literal with nothing tying it to release-sidecar.yml's real --config args
 type: bug
 priority: Medium
-status: Open
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-26
@@ -182,3 +182,169 @@ pinned_pubkey.rs"* is being **filed separately by the Reviewer** and was deliber
 **Round 2 verification.** `npm run check` 0 errors / 0 warnings. Full vitest **364 files / 5528 passed,
 62 skipped**. `cargo test --locked` in `crates/updater-verify` **147 passed / 0 failed**. All three new
 legs red-proofed and reverted; `git status --porcelain` clean.
+
+## Closing record — merged as PR #1105 (`5cf4e61d`), 2026-08-28
+
+### The bug, measured rather than argued
+
+`CONFIG_CHAIN` was a hand-maintained copy of the `--config` overlays the release workflow layers on
+`tauri.conf.json`, with **nothing tying it to the workflow**. So adding an overlay silently narrowed the
+guard while leaving it green.
+
+**The headline, established by running the unmodified base guard under the sabotage** (`git show
+56e0d3a7:src/lib/sidecarBundleResources.test.ts`), with an attacker-key overlay appended to
+`release-sidecar.yml`'s **real** `args:` line and the overlay file present carrying an attacker
+`plugins.updater`:
+
+> **20 passed / 20, exit 0.**
+
+The new guard on the identical input: **6 failed / 56** — exactly 3 OSes × {pubkey, endpoints}.
+Independently reproduced by the Reviewer.
+
+### What shipped
+
+`src/lib/tauriConfigChain.ts` — the literal is deleted. Every workflow in `.github/workflows/` is
+enumerated, every step that `uses:` `tauri-apps/tauri-action` is a build leg, its **job matrix is
+expanded**, `${{ matrix.* }}` resolved in `runs-on` and `args:`, and the overlays read out of the resolved
+`args:` **in order**. **Six legs today** (`release.yml` ×3 + `release-sidecar.yml` ×3), so **the plain
+channel now gets the updater pin too**.
+
+- Parsed **structurally** via the app's own YAML parser — comments are gone before a string is read
+  (CPE-1933 rule 2), and only the **values** of `with.args` and `runs-on` are scanned.
+- **Understands `-c` as well as `--config`.** A `--config`-only scanner would read a workflow switched to
+  the short form as having **no overlays at all**.
+- **Refuses rather than guesses** on unresolved `${{ … }}`, product-axis/`exclude:` matrices, quoted
+  `args:`, dangling flags, unclassifiable runner labels, and overlays outside `src-tauri/`, with
+  near-empty discovery floors (CPE-1932).
+
+**The second half — the one the ticket warned a workflow-only derivation would miss.** `configChainForLeg`
+composes **DERIVED** (workflow overlays) **+ ENUMERATED** (auto-merged `tauri.<platform>.conf.*`, which
+**no `args:` line can express**). Those files now enter the merged config, **so the pins see them;
+previously CPE-1903 only *refused* them.** Measured: an attacker `plugins.updater` in
+`tauri.windows.conf.json` **with no workflow edit at all** gives the new guard **5 failed / 36** — both
+windows legs, sidecar *and* plain — against the base guard's **1 failed / 19**, which is only the CPE-1903
+refusal. The widening is real and is the more valuable half.
+
+### Membership and ordering, red-proofed separately
+
+RFC 7396 merge is order-dependent, so a membership-only check would call a wrong order correct.
+
+| sabotage | result |
+|---|---|
+| overlay named but not committed | **13 failed / 49**, each naming the file |
+| attacker-key overlay | **6 failed** (3 OSes × pubkey/endpoints) |
+| `.sort()` in the extractor | **3 failed / 38 — ordering block only, every membership assertion green** |
+| `.reverse()` | same, plus 3 in `tauriConfigChain.test.ts` |
+
+**CPE-1873's pins not regressed:** an attacker key injected into each of the 7 chain files in turn reds
+**exactly the shipped OSes that file governs** — base 12/29 (all six legs), `sidecar.conf` 6/35, `unix`
+4/37 (linux+macos), the four per-OS files 2/39 each. Three spot-checked independently, including a per-OS
+file.
+
+### The author corrected their own evidence mid-flight
+
+A `JSON.stringify` oracle **inflated the ordering evidence**, calling 21 of 24 orderings "different" when
+only **16** were — 5 differed in **key insertion order alone**. Canonicalised, correction written at the
+site. Independently re-measured: `JSON.stringify` **21 on every leg**; canonical **16 / 12 / 12**;
+key-order-only **5 / 9 / 9** — and after review, **all three given per-leg at all three sites**, because a
+per-leg number quoted without its leg, *inside the paragraph correcting an oracle's scope*, is the same
+defect one scale down. CLAUDE.md gained *"a measurement that varies per case is reported per case, or not
+at all."*
+
+The stated limit is at the site **twice**: all six base-first orderings agree, so **what carries the order
+today is the base's position**.
+
+### The review's four required changes, and why they were the right shape
+
+**F1 — the derivation's reach was a closed claim.** *"A third release channel added tomorrow is guarded on
+the day it lands"* is true only of a channel that `uses: tauri-apps/tauri-action` **and** passes overlays
+through `with.args`. Measured at **zero legs, silently**: a `run: npx tauri build --config …` step, a local
+composite action, a reusable-workflow call, and `tauriScript:`. **The floors only catch shrinkage** — an
+extra channel leaves the count at 6 and reports clean. Both blind-spot lists were closed lists and are now
+**"at least these"**, with the honest good news kept: a third **tauri-action** channel *does* red, on the
+`toEqual` over the workflow list. *That turns "open door" into "bounded gap", which is what the measurement
+supports.*
+
+**F2 — a stale command name in the file the PR edited.** The `verify-updater-pin` job header still named
+`vitest run <one file>`, forty-two lines above the step this PR changed to `npm test`. **A comment naming a
+command the file no longer runs, in a PR about comments that stop describing what they point at.**
+
+**F3 — a bare `startsWith` accepted `src-tauri/../../planted.conf.json`.** Fixed with a segment test —
+**and the complement pinned**, because the lazy passing implementation (reject anything containing two
+dots) breaks the legitimate `tauri..odd.conf.json`. The Reviewer forced the filter over-eager and watched
+the **complement** test red: *"the pair genuinely constrains both directions; neither can be satisfied by
+the cheap wrong fix."* Four further shapes checked — backslash separators and `./..` are refused;
+`%2e%2e` is **correctly accepted**, since nothing in the chain URL-decodes, so refusing it would be a false
+positive.
+
+**F5 and F6 — two checks that were not checks.** The naive scanners quoted at 4-of-4 and 2-of-4 were
+**committed**, and the survivors asserted **by name**: renaming one survivor leaves both counts identical
+and changes only identity, so a length assertion passes and the `toEqual` reds. And a direct overlay count
+against `leg.args` turned `out.slice(1)` from **40/41** (where the single red was *incidental*) into **4
+failed / 43**, three of them this assertion, one per leg, printing both counts and both lists. On whether
+that count is a check or a mirror, **twelve shapes chosen to split a regex sweep from a token walk agree
+12 of 12, by two genuinely different routes** — with the honest residue named: they share the flag
+*vocabulary*, so a third upstream spelling would be missed in lockstep at 0 = 0.
+
+### Vacuity answered structurally, not by running it
+
+Emptying the scanner list makes the binding `undefined` so the length assertion **throws**; `BUILD_LEGS`
+**cannot** be empty because the deriver throws at module load below its floors, so a near-empty derivation
+fails **collection** rather than silently registering zero tests. And precisely: **3 of the 6 count
+instances are `0 === 0`**, correctly, because `release.yml` passes no overlays — the three sidecar legs
+carry the assertion that red-proofed at 2-vs-3. *Saying which instances are trivially true is the
+difference between a vacuity check and a vacuity claim.*
+
+### Sixteen adversarial shapes
+
+Derived correctly: `-c`, `-c=`, `--config=`, folded `>-` and literal `|` block scalars, YAML-double-quoted
+`args:`. Refused loudly: a surviving quote, a product-axis matrix, `${{ env.* }}`, `runs-on:` as a list,
+`./src-tauri/…`, a dangling trailing `-c`. `--configuration` / `--config-dir` correctly ignored.
+**"Refuses rather than guesses" is accurate.**
+
+### The workflow change, accepted with its reasoning verified
+
+`release-sidecar.yml`'s `verify-updater-pin` ran `npx vitest run <one file>`, **which would have skipped
+`tauriConfigChain.test.ts` on the release path** — the file where the producer's refusals and
+order-carrying live. *"The merged-config file would still red on a wrong chain, but not on a producer that
+silently narrows."* Widened to `npm test`, mirroring what CPE-1903 did to the `cargo test` step three lines
+above. Its wall-clock effect is **unmeasured and marked as such**.
+
+**And a decline worth recording.** The Foreman noted that composing the two measured analogues (msrv 17.1 +
+frontend 5.9, ×1.5) gives **35**, not the header's 30. The arithmetic was right and the worker **declined
+anyway**: that header belongs to CPE-1967, already declares itself an unmeasured analogue, and resizing it
+wants a real run — *"I'd rather not edit it on an argument."* **Changing a measured-looking number on the
+strength of an argument is the same defect as writing an unmeasured claim, arriving from the opposite
+direction.**
+
+### Filed, not fixed
+
+**CPE-1987** — `sidecarBundleResources.test.ts:469` carries *"Keep these two literals in lockstep with …
+`pinned_pubkey.rs`"*: **a bare provenance claim on the root of trust**, in a file that already imports
+`rustStrSliceAfter` and uses it to derive a different value from that same crate. Pre-existing; the Auditor
+measured the four sites as byte-identical today, so it is a live-and-correct value with a dead check.
+
+### Security — `SEC PASS`
+
+The change **strictly increases** what the pins are computed over: 3 hand-listed sidecar OSes → 6 derived
+legs across both channels, **plus the auto-merged half the pins previously could not see at all**. A
+dropped overlay reds (9 or 6 tests depending which); an added overlay pulls itself into the merged config
+and reds the pin, and **the pinned values are literals in the test, not derived from the workflow**; the
+ENUMERATED listing fails closed on a directory, an unparseable file, or two files for one platform; and the
+bounded YAML parser **throws rather than deriving an empty chain** when a workflow outgrows its subset.
+The one gap in the stated blind spots was F1, now open-ended.
+
+**Diff hygiene, confirmed by the Auditor:** no `tauri.conf.json`, no `capabilities/`, no key material
+anywhere in the PR; the pinned pubkey and endpoint **byte-identical across all four sites**; every injected
+value an obvious non-key; `git status --porcelain --untracked-files=all` empty after every sabotage.
+
+### Gates at merge
+
+`npm run check` **0 errors / 0 warnings** · full vitest **364 files / 5,528 passed / 62 skipped** ·
+`cargo test --locked` in `crates/updater-verify` **147 / 0** · CI `completed success — total_count=26
+pending=0 skipped=1 coverage=ok`.
+
+**Family:** CPE-1873 (the pin this must not regress), CPE-1903 (the per-platform refusal this turns into
+coverage, and the `npm test` precedent), CPE-1987 (the root-of-trust lockstep claim), CPE-1967 (measured
+job timeouts — whose header was deliberately left alone), CPE-1932 (enumerate, don't recall), CPE-1933
+(anchor on code, never on prose), CPE-1950 (two mechanisms are only two opinions if they can disagree).
