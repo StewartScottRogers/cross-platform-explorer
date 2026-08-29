@@ -3,7 +3,7 @@ id: CPE-1957
 title: finish the shadowed-guard sweep — three sites CPE-1929 measured and deliberately left, with the check that shadows each
 type: task
 priority: Medium
-status: Open
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -260,3 +260,136 @@ stream's extents on the volume. Measured under the production policy: `main_all_
 `ads_readable=true`, `ads_still_secret=true`. It is the same failure mode this ticket just fixed, one
 layer down, and streams are mentioned nowhere in `vault_manager.rs` or `docs/design/VAULT-SECURITY.md`.
 Pre-existing and out of scope — widening this PR to cover it would have been the wrong call.
+
+## Closing record — merged as PR #1101 (`5a207fd5`), 2026-08-28
+
+### The ticket predicted a refusal. What it found was silence.
+
+The ticket expected a dehydrated cloud placeholder to make the vault wipe **refuse** mid-lock — loud, and
+therefore survivable. **It does not. It silently skips the file.**
+
+`probe_no_follow`'s `is_link` was the bare `FILE_ATTRIBUTE_REPARSE_POINT` bit, and `shred_dir_pinned`'s
+only reader of that flag `continue`s. So a OneDrive Files-On-Demand, NTFS-dedup'd or WOF-compressed file
+inside a vault session dir was **dropped from the wipe list, never overwritten, then unlinked by
+`remove_dir_all`** — **plaintext extents left on the volume while the lock reported success.**
+
+**The reason it survived: a skip returns `Ok` too.** Every assertion on that path was satisfied by not
+touching the data. That is why the new test asserts **bytes** (`assert_ne!` on the secret, then
+`all(|&b| b == 0)`), never a verdict.
+
+### Two guards were hiding each other, and each half-fix makes things worse
+
+Measured, not argued:
+
+| change | result |
+|---|---|
+| un-narrow the handle check alone | **2,460 / 1** — `HARM:` assertion, secret readable (the live bug) |
+| narrow the path check alone | **2,460 / 1** — mid-wipe refusal (the ticket's *predicted* bug, now reachable) |
+| narrow both together | green |
+
+**Only the joint change is correct, and neither half is discoverable from the other's site.** Both are now
+`reparse_name_surrogate(..).unwrap_or(true)` — **calling** the crate's single owner of the tag rule rather
+than re-spelling it (CPE-1933: the call *is* the derivation).
+
+### The Security Auditor made the bug bigger than the fix's author claimed
+
+It went past the synthetic GUID fixture and planted the **real** tags — OneDrive Files-On-Demand
+`0x9000001A` and Windows-Container-Isolation `0x80000018` — with a hand-built `REPARSE_DATA_BUFFER`, on a
+session file and a session directory, under the **production** alias policy:
+
+```
+P5 file tag 0x9000001a: is_link=false wipe_err=None still_secret=false all_zero=true
+P5 dir  tag 0x9000001a: is_dir=true is_link=false inner_still_secret=false
+P4 microsoft tags 0x9000001a / 0x80000018 / 0x8000001b: set_reparse_point=true   ← UNPRIVILEGED
+```
+
+**`FSCTL_SET_REPARSE_POINT` with those Microsoft non-surrogate tags succeeds from an unprivileged
+process.** So the pre-fix defect was **not only a cloud-sync accident — it was a locally plantable way to
+make the vault lock report success over untouched plaintext.**
+
+And the narrowing does more than close the leak: a non-surrogate reparse **directory** previously
+`continue`d with **its whole subtree left unwiped**, and is now descended and zeroed. The same improvement
+applies to `create_vault`'s shred-original, where a user-picked folder that was itself a placeholder used
+to be refused outright.
+
+### Two of the ticket's three predicted verdicts were wrong
+
+That is the point of running the sabotages rather than reasoning about them. Reviewer's counts on the
+shipped tree (each +1 against the author's pre-PR-tree figures, since this ticket adds one test):
+
+| site | disable | predicate lies | verdict |
+|---|---|---|---|
+| 1 `overwrite_pinned_file` | **2,461 / 0** | **2,434 / 27** | shadowed → **kept as a declared backstop** |
+| 2 `same_object_or_refuse` | **2,459 / 2** | **2,433 / 28** | **NOT shadowed** |
+| 3 `revert_engine` occupancy | **2,458 / 3** | **2,441 / 20** | **NOT shadowed** |
+
+- **Site 1 — `if true ||` is the WRONG INSTRUMENT here, and that is the round's most transferable
+  finding.** The predicate is also consulted on every ordinary file's hot path, so forcing it to lie tests
+  the hot path, not the guard's reachability. The measurement that actually answers it was a **third**
+  sabotage nobody prescribed: disable **both** by-path checks (**2,460 / 1**) and read *who* catches it —
+  the failure carries **`same_object_or_refuse`'s** wording, not `overwrite_pinned_file`'s. Site 2 catches
+  it on the directory route; site 1 never sees it. Kept, because a handle cannot be substituted after the
+  open; the site says it is untestable and why.
+- **Site 2 was filed as a duplicate wanting an "unreachable backstop" note. Both legs red.** Confirmed
+  structurally, not just by sabotage: `shred_tree` has two callers, and `create_vault:264`
+  (`ShredEveryFile`, user-picked folder) has **no by-path link check at all** before reaching it.
+  **Writing the requested note would have been the exact false-coverage claim the pattern exists to
+  prevent.**
+- **Site 3 — with it disabled the revert destroys the user's file** (`applied: 1, skipped: []`, attacker
+  bytes on disk). Note, not reorder: the occupancy check refuses a **strict superset** of what the link
+  check would and names the actual problem; a reorder trades a correct permanent refusal for a narrower
+  one.
+
+### Three corrections in review, and the first is this shift's signature
+
+- **Every sabotage figure at all three sites cited a baseline this PR's own new test had moved** (2,460 vs
+  the shipping tree's 2,461). The comments would have read one low from the day they landed, and their own
+  *"if the count moved, re-run these"* instruction would have **fired spuriously on day one**. The author's
+  own note: they had read CLAUDE.md's round-8 paragraph — *"stale the moment it was written, because the
+  commit that writes such a claim is often the commit that falsifies it"* — **while writing the comments
+  that repeated it.**
+- Site 1's numbers were measured against a predicate **this same diff replaces**; the provenance now names
+  the predicate as well as the revision.
+- The new test drove `ShredEveryFile` while `wipe_session_dir` passes `UnlinkAliasesInsteadOfOverwriting`
+  — **the path the whole PR is about.** Now run under **both, production first**, so a red-proof names the
+  real route, with a fresh single-name file per policy *"so the two agreeing is a result rather than a
+  restatement of the setup."*
+
+### Filed, not fixed
+
+**CPE-1986** — `read_dir` enumerates names only and `shred_through` writes the default stream, so an
+**alternate data stream** is never overwritten and its extents survive the unlink. Measured under the
+production policy: `wipe_ok=true`, `main_all_zero=true`, **`ads_still_secret=true`**. The same failure mode
+one layer down, and **undocumented** — no mention of streams in `vault_manager.rs` or
+`docs/design/VAULT-SECURITY.md`.
+
+### The hand-off this refused to make
+
+Site 1's outcome was recorded for **CPE-1959** at the `batch_media` site — and the reasoning was
+**deliberately not generalised**: over-refusing at a **wipe** costs retained plaintext, not a skippable
+item, so **the vault's asymmetry runs opposite to the batch's.** Same tag rule, same crate, opposite cost
+function. **No count was asserted there**, because CPE-1959 owns that enumeration. *(CPE-1959 then resolved
+the split in PR #1103, narrowing `batch_media` too — on its own evidence, as intended.)*
+
+### Security audit — `SEC FINDINGS`, none introduced here, none blocking
+
+No shape is newly **followed**. Name-surrogate tags still skipped. Non-surrogate tags written through a
+`FILE_FLAG_OPEN_REPARSE_POINT` handle, so the write lands in the object's own stream — measured on both a
+file and a directory, no redirection. Hardlinks still unlink-only under the production policy (SEC-847). A
+file held exclusively by another process **refuses the lock rather than skipping** — a refusal, retryable.
+`EntryProbe::unreadable` still fails closed. The `probe_no_follow` handle-lifetime refactor is correct:
+ownership moves to a `File` immediately after `CreateFileW`, `CloseHandle` is gone, every path closes
+exactly once on drop. Blast radius fully enumerated — `EntryProbe::is_link` has exactly two readers, both
+narrowed. Unix untouched and already asking the narrow question. No capability, no `tauri.conf.json`, no
+key material.
+
+### Gates at merge
+
+`cargo test -p cpe-server --lib` **2,461 / 0 / 14** · clippy `--locked --all-targets -D warnings` clean in
+**both** feature modes · no `specta::Type` touched · CI `completed success — total_count=26 pending=0
+skipped=1 coverage=ok`.
+
+**Family:** CPE-1929 (the shadowed-guard sweep this finishes, and the pattern whose two sabotages proved
+insufficient at site 1), CPE-1896 (the dehydrated-placeholder rule), CPE-1959 (PR #1103 — the same question
+at `batch_media`, resolved separately), CPE-1986 (the ADS half), CPE-1972 (an absence of information must
+never license a delete), CPE-1932 (enumerate, don't recall).
