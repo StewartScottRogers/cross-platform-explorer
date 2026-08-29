@@ -108,15 +108,16 @@ identity reads) and `vault_manager.rs:1930` post-date that count. Of the nine, e
 | `batch_media::open_output_verified` | was bare bit → **now `reparse_name_surrogate`** | **changed here** |
 | `fsutil::claim_destination_handle` (the guard at `fsutil.rs:2258`, reached from `copy_file_onto_destination_handle` at `:1568`) | narrow since CPE-1896 | fine; note added that the split is closed |
 | `fsutil::overwrite_confirmed_no_follow` (3832) | narrow since CPE-1929 | fine; **its docblock claimed the opposite** — fixed |
-| `vault_manager::overwrite_pinned_file` (1942) | bare bit **at this head**; CPE-1957 / PR #1101 narrows it at **both** its checks (the by-path `probe.is_link` in `shred_dir_pinned` and the handle check) | not touched — that PR owns it |
+| `vault_manager::overwrite_pinned_file` (1942) | **narrow** — CPE-1957 / PR #1101 merged and narrowed it at **both** its checks (the by-path `probe.is_link` in `shred_dir_pinned` and the handle check) | not touched — that PR owns it |
 | `backup.rs:296`, `fsutil.rs:2752`, `3103`, `4237`, `4335` | use `.id`/`links` only | no position; nothing to do |
 
 A fifth consumer of the rule, `open_beneath::sys::name_surrogate_at`, is already narrow (CPE-1938).
 
-**The `vault_manager` row is order-dependent and is stated as of this branch's head.** It becomes stale
-the moment PR #1101 lands, which is the intended merge order — so no sentence in the code says
-"`batch_media` was the *last* site on the bare bit". The site comments say what is true of their own two
-sites unconditionally and leave the crate-wide count to this table (CPE-1932).
+**The `vault_manager` row was order-dependent, and the order has now resolved.** PR #1101 merged
+(`5a207fd5`) and this branch is rebased on top of it, so with this PR the crate has **no site left
+reading the bare bit**. That sentence is written here, once, rather than at any of the sites: the site
+comments each say what is true of their own function unconditionally, so none of them goes stale on a
+merge, and the crate-wide count lives in this table (CPE-1932).
 
 **A naming correction from the review:** the narrow guard reached from `copy_file_onto_destination_handle`
 lives in `claim_destination_handle`. Round 1 named the caller, so a reader grepping the named function
@@ -128,14 +129,17 @@ test pins that it does. Prose about a check thirty lines away, with the suite re
 vouched for it.
 
 **Sabotages — three, all red, Windows 11 / NTFS, `cargo test -p cpe-server --lib`.** Baseline
-**2,460 passed / 0 failed / 14 ignored**; each sabotage **2,459 / 1**, the failure being the new test
-every time. Disable; predicate forced to lie; un-narrow to the bare bit. The count does not move between
-baseline and merged state because this ticket replaced one test with one test.
+**2,461 passed / 0 failed / 14 ignored**; each sabotage **2,460 / 1**, the failure being the new test
+every time. Disable; predicate forced to lie; un-narrow to the bare bit. This ticket replaces one test
+with one test, so it moves the count by zero — the figures went 2,460 → 2,461 because **CPE-1957
+(PR #1101) merged and this branch was rebased onto it**, and they were re-taken rather than left stale
+by that merge.
 
 **`TMP` must be on the platform default to reproduce those numbers** — and round 1 of this log got the
 reason wrong, which mattered. It reported 2,458 / 2 and attributed the two failures to "running from a
-worktree nested inside the repo". Re-measured: the same nested worktree with a normal `TMP` gives
-2,460 / 0. The cause is `TMP`'s **location** — inside the repo tree,
+worktree nested inside the repo". Re-measured: the same nested worktree with a normal `TMP` gives a
+clean run (2,460 / 0 at the time, 2,461 / 0 after #1101). The cause is `TMP`'s **location** — inside the
+repo tree,
 `ticket_board::…nearest_project_root…` finds the repo's own `Ticketing/` above the tempdir and
 `archive::…cpe1774…` hits a path-length limit. A reader reproducing from a nested worktree with a default
 `TMP` would have got a baseline the comment did not predict and no way to tell whether the deltas were
@@ -158,9 +162,27 @@ the narrowed handle check at all.
   the handle check's coverage of the **non-symlink surrogate class** was still shadowed in CPE-1929's
   sense. The crate already owned the seam: `between_containment_and_open` now also plants a GUID tag,
   armed by `surrogate_between_containment_and_open_for_test`, in the window *after* the path probe has
-  passed the name as an ordinary file — where the handle check is the **sole** decider. The seam records
-  whether the plant took, so "the guard refused" cannot be confused with "the fixture never armed"
-  (CPE-1923).
+  passed the name as an ordinary file — so the handle check is the **first** thing that can see it. The
+  seam records whether the plant took, so "the guard refused" cannot be confused with "the fixture never
+  armed" (CPE-1923).
+
+**Round 2 wrote "sole decider" for half 4 and round 3 measured it false — the same defect this ticket
+exists to remove, one level in.** `std`'s `FileType::is_symlink` on Windows is
+`attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & IO_REPARSE_TAG_NAME_SURROGATE != 0` — exactly
+`reparse_name_surrogate`'s rule, read off a path instead of a handle, and this file's own reorder note
+already said so. Half 4's fixture leaves the tag on disk, so the `symlink_metadata` net **below** the
+handle check reaches it too. Measured (handle check disabled, half 3 neutered so half 4 could run):
+half 4 reds carrying that net's sentence, *"is a link, and a batch never writes through one — a link's
+target can be re-pointed after any check…"*.
+
+So half 4 pins **ordering plus wording**, not visibility — and the guard's non-redundancy has a better
+argument than "sole decider" ever was: **it reads the OBJECT.** An attacker who plants the tag before
+the open and removes it before the `symlink_metadata` defeats the path net and not this one. Corrected
+at five sites, the load-bearing one being the assertion's own failure message, which is what a future
+reader sees when the test reds. The path net's *"deliberately unreachable — do not be alarmed when
+sabotaging it leaves the suite green"* note now says explicitly that this is an **ordering** claim, with
+half 4 as the measurement, so nobody upgrades it to "nothing gets here" and concludes the handle check is
+redundant.
 
 **The test asserts filesystem state, never `Ok`** (CPE-1957's lesson). Half 1 drives the whole write and
 reads the bytes back, plus asserts the reparse bit is **gone** — which is the staged replace, and the

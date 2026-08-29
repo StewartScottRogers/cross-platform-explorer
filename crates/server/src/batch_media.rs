@@ -2075,11 +2075,22 @@ thread_local! {
 // The narrowed reparse refusal below is reachable from only ONE fixture class without this — a real
 // symlink — because `classify_reparse_tag` answers `WHY_SURROGATE_TAG` by path, before the open, for
 // every *other* surrogate tag. So for the non-symlink surrogate class the handle check was still
-// shadowed exactly the way CPE-1929 describes, and the honest note saying so was the best that could be
-// done at the time. It is not the best that can be done: this window is the one place where the path
-// probe has already answered and the handle check is the **sole** decider, and the crate already owned
-// a seam into it. Arming this plants the tag on an output that was an ordinary file when containment
-// looked at it, which is the only way to hand the handle check a non-symlink surrogate.
+// shadowed exactly the way CPE-1929 describes. Arming this plants the tag on an output that was an
+// ordinary file when containment looked at it, which is the only way to hand the handle check a
+// non-symlink surrogate at all.
+//
+// **What that buys is precise, and an earlier draft of this comment overstated it** (PR #1103 review).
+// It does NOT make the handle check the *sole* decider: `std`'s `is_symlink` reads the **same**
+// name-surrogate bit off a path that `reparse_name_surrogate` reads off a handle — this file already
+// says so at `open_output_verified`'s reorder note — so the `symlink_metadata` net below the handle
+// check reaches this fixture too, and with the handle check disabled it is what answers. Measured: see
+// half 4's own assertion message. What the seam buys is that the handle check answers **first**, on
+// wording unique to it, for a class no other fixture can deliver — which is coverage the crate did not
+// have.
+//
+// **The guard is not redundant with that net, and the reason is stronger than "sole decider" was**: the
+// handle check reads the OBJECT. An attacker who plants the tag before the open and removes it before
+// the `symlink_metadata` defeats the path net and not this one.
 //
 // Same one-shot, take-don't-read discipline as the hard-link seam above, and the same reason.
 #[cfg(test)]
@@ -2184,7 +2195,7 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // substituted after the open, whereas the name can be swapped either way in the window before a
     // `symlink_metadata`. Covered now by
     // `cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written`,
-    // and the same sabotage on the merged state is **2,459 passed / 1 failed** against a 2,460 / 0
+    // and the same sabotage on the merged state is **2,460 passed / 1 failed** against a 2,461 / 0
     // baseline — that test is the red-proof; all three sabotages and the `TMP` caveat that reproduces
     // them are at the refusal itself. (It replaced CPE-1929's
     // `..._a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`, which pinned the
@@ -2269,9 +2280,10 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
         }
     };
     // **Three sabotages, all run on this narrowed predicate, Windows 11 / NTFS, `cargo test -p
-    // cpe-server --lib`.** Baseline **2,460 passed / 0 failed / 14 ignored**; each sabotage is
-    // **2,459 / 1**, the one failure being `cpe_1959_…` every time. The count does not move between
-    // baseline and merged state because this ticket replaced one test with one test.
+    // cpe-server --lib`.** Baseline **2,461 passed / 0 failed / 14 ignored**; each sabotage is
+    // **2,460 / 1**, the one failure being `cpe_1959_…` every time. This ticket replaced one test with
+    // one test, so it moves the count by zero; the figures were **re-taken after CPE-1957 (PR #1101)
+    // merged**, which is what took them from 2,460 to 2,461, rather than left stale by a merge.
     //
     // - **Disabled** (`if false && …`): red.
     // - **Predicate forced to lie** (`reparse_name_surrogate` replaced by a `Some(false)` that still
@@ -2319,6 +2331,14 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // (`if false && std::fs::symlink_metadata(..)`), the lib suite is **2,425 passed / 0 failed / 11
     // ignored** — identical to baseline. Both disabled together, so the figure covers each of them
     // individually as well. That green is the expected result here, not a missing test.
+    //
+    // **"Unreachable" above is an ORDERING claim, and CPE-1959 measured it as one** — worth pinning
+    // because a reader can easily upgrade it to "nothing gets here", which is false and would make the
+    // guard above look redundant. Disable the handle refusal and this net answers immediately: half 4
+    // of `cpe_1959_…` reds carrying *this* branch's sentence, on a fixture whose tag `std` and this
+    // check agree is a name surrogate. It is unreachable because something refuses first, not because
+    // nothing can see the input. What the handle check has that this does not is the OBJECT: a tag
+    // removed between the open and this `symlink_metadata` defeats this net and not that one.
     if std::fs::symlink_metadata(output).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         verified.abandon(output);
         return Err(format!(
@@ -5101,14 +5121,23 @@ mod tests {
     ///   recognises and passes through as `Probe::Link` — a real symlink. It is what makes the disable
     ///   sabotage red.
     /// - **Half 4** covers what half 3 cannot. Half 3 only proves the check fires for a *recognised*
-    ///   tag; every other surrogate is still answered by `WHY_SURROGATE_TAG` first, so the handle
-    ///   check's coverage of the **non-symlink surrogate class** was shadowed in CPE-1929's exact sense.
-    ///   Round 2 stopped documenting that gap and closed it with the seam the crate already owned:
+    ///   tag; every other surrogate is answered by `WHY_SURROGATE_TAG` first, so the handle check's
+    ///   coverage of the **non-symlink surrogate class** was shadowed in CPE-1929's exact sense. Round 2
+    ///   stopped documenting that gap and closed it with the seam the crate already owned:
     ///   `surrogate_between_containment_and_open_for_test` plants the tag in the window *after* the path
-    ///   probe has passed the name as an ordinary file, where the handle check is the **sole** decider.
+    ///   probe has passed the name as an ordinary file, so the handle check is the **first** thing that
+    ///   can see it.
     ///
-    /// Two legs, two different claims: half 3 says the guard fires, half 4 says it fires for the class
-    /// nothing else can see.
+    /// **Round 2 wrote "sole decider" there and round 3 measured that false** — worth keeping, because
+    /// it is the same class of claim this whole ticket exists to remove. `std`'s `is_symlink` reads the
+    /// same name-surrogate bit off a path that `reparse_name_surrogate` reads off a handle, so the
+    /// `symlink_metadata` net below the handle check reaches half 4's fixture as well; with the handle
+    /// check disabled, that net is what answers. Half 4 pins **ordering plus wording**, not visibility.
+    /// The guard's non-redundancy rests on something better anyway: it reads the OBJECT, so a tag
+    /// removed after the open defeats the path net and not this one.
+    ///
+    /// Two legs, two different claims: half 3 says the guard fires, half 4 says it fires **first** for a
+    /// class no other fixture can deliver to it.
     ///
     /// **Every verdict is read off the filesystem, never off a `Result`** — CPE-1957's lesson is that a
     /// silent skip returns `Ok` too, and here the mirror-image trap is real: `open_output_verified`
@@ -5271,8 +5300,8 @@ mod tests {
             );
         }
 
-        // --- Half 4: the NON-SYMLINK surrogate class, in the only window where the handle check is
-        //             the sole decider (CPE-1959 round 2). ---
+        // --- Half 4: the NON-SYMLINK surrogate class, delivered to the handle check as the FIRST
+        //             decider (CPE-1959 round 2, scoped correctly in round 3). ---
         //
         // Half 3 leaves a real gap and it is worth naming precisely: it proves the handle check fires,
         // but only for a tag `classify_reparse_tag` recognises. For every *other* surrogate tag the
@@ -5280,11 +5309,17 @@ mod tests {
         // check's coverage of that class was still shadowed in CPE-1929's exact sense — safe, and
         // unverifiable, at the same time.
         //
-        // `between_containment_and_open` is the window where that stops being true: the path probe has
-        // already run and seen an **ordinary file**, and nothing else between here and the refusal can
-        // answer. Planting the surrogate tag there hands the handle check the one input class it could
-        // not otherwise be given. Same seam, same reason, as
+        // `between_containment_and_open` is the window that delivers it: the path probe has already run
+        // and seen an **ordinary file**, so containment cannot answer. Same seam, same reason, as
         // `cpe_1961_a_link_planted_after_the_path_check_is_still_caught_by_the_handle_census`.
+        //
+        // **What this leg does NOT prove, because round 2's comment claimed it and round 3 measured it
+        // false.** It is not the case that nothing else can see this fixture. The `symlink_metadata`
+        // net below the handle check reads the same name-surrogate bit off the path, and the planted
+        // tag is still on disk when it looks — so it reaches this input too. The claim here is
+        // **ordering**: the handle check answers first, and its wording is unique to it, which is what
+        // the assertion below reads. Non-redundancy comes from the object-vs-name difference, not from
+        // visibility.
         let planted_late = selected.join("out4.png");
         let late_bytes = b"ordinary when containment looked".to_vec();
         std::fs::write(&planted_late, &late_bytes).unwrap();
@@ -5298,9 +5333,13 @@ mod tests {
             );
             assert!(
                 err.contains("(a symlink, a junction, or a mount point)"),
-                "only the HANDLE-side tag refusal can have fired here: containment already passed this \
-                 name as an ordinary file, so neither WHY_SURROGATE_TAG nor the symlink_metadata check \
-                 below can be what answered: {err}"
+                "the HANDLE-side tag refusal must be what answered FIRST here. WHY_SURROGATE_TAG cannot \
+                 have: containment saw an ordinary file. The symlink_metadata check below it CAN — it \
+                 reads the same name-surrogate bit off the path — and with the handle check disabled \
+                 this assertion fails carrying that check's sentence, \"is a link, and a batch never \
+                 writes through one\" (measured, PR #1103 review). So what this leg pins is ordering \
+                 plus wording, not visibility; the guard's non-redundancy is that it reads the OBJECT, \
+                 so a tag removed after the open defeats the net below and not this one. Got: {err}"
             );
             let after_late = std::fs::symlink_metadata(&planted_late).unwrap();
             assert!(
