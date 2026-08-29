@@ -3,7 +3,7 @@ id: CPE-1951
 title: a release cut from an **older** commit publishes a fully green catalog that every client silently refuses — the floor is a static ratchet, not a monotonic one
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -182,3 +182,124 @@ dir. Checking only `gh` is what missed it: `gh` won, `curl` did not.
 fix, with the counter rejection and the 404 reasoning), `docs/security/threat-model.md` (the
 availability gap recorded as closed), and `catalog-version.sh`'s own header (which had told the next
 reader the gap was open and not to close it by widening the floor).
+
+## Closing record — merged as PR #1091 (`715112d8`), 2026-08-28, after **thirteen rounds**
+
+### What shipped
+
+A release cut from an **older** commit could publish a fully green catalog that every client silently
+refuses, because the floor was a **static ratchet** rather than a **monotonic** one. `release.yml` now
+refuses at `lb` — **before signing and before upload** — a catalog version not newer than the published
+one, with the refusal derived from the live published index rather than from a stored constant.
+
+### The arc is the record, and it is more instructive than any one round
+
+**Rounds 1–9 — every finding was claim-scope.** Nine rounds, eight reviews, **zero code defects**. The
+code was right; the sentences around it were not. What finally moved it was not a defect report but an
+instruction about **the shape of sentences**: *do not write another closed list.*
+
+**Rounds 9–12 — four real code defects, all one class: *fixed at one entrance*.**
+
+| round | held | did not hold |
+|---|---|---|
+| 10 | `$(…)` | `` `…` `` |
+| 11 | quotes inside expansions | expansions inside quotes |
+| 12 | expansions inside a quoted span | **backticks** — POSIX keeps **three** characters special inside `"…"` and the fix handled two |
+
+Each was found by **executing bash**, not by reading the diff, and **none was visible to the generated
+corpus at the time**. The fourth is the sharpest: `read -d "`printf "%s" ";"`" -r h6` spills a bare `;`,
+and a delimiter computed by a command substitution is an ordinary thing to write.
+
+**Round 12 — the findings changed shape again: the fix was right and its own description was wrong**, in
+all three places the round asked to be checked. The depth cap it introduced was documented as if it were
+free:
+
+- *"Caching a capped refusal would let a deep query poison a shallow one"* — **the poisoning was three
+  lines away and measurable.** The cap's own return was exempt; the `-1` it **induced** was memoized at
+  every ancestor. At `L=66`, a fresh query returned the real end 131 and the same query on a warm memo
+  returned −1.
+- The cap was described as *"nothing is swallowed"* — true, **and exactly the conflation round 11 had
+  corrected in round 10's span table.** Past the cap it fails **open**, cleanly at exactly 64. Re-made one
+  scope up, in the same commit that documents the lesson.
+- The over-cap assertion **could not fire for the failure it named**: mutating the cap into precisely the
+  direction its message warns about (`return SPAN_CAPPED` → `return line.length - 1`) left the file
+  **byte-identically green**.
+
+**Round 13 — no finding**, from a reviewer that pushed harder than the round's own legs: **1.28 million
+index-level comparisons** across three independent generators, five sabotages, and an **exhaustive** search
+over every string of length ≤ 7 in the relevant alphabet, hunting a residue it predicted from reading the
+fix. Not there.
+
+### The transferable lessons, in the order they were learned
+
+**1. Score the trade against the language, not against the table.** Rounds 6, 7 and 8 each traded one class
+of shape for another **without scoring the trade** — and round 8 did it *in the round that wrote the rule
+against it*. The rule said "run the previous matcher's cases through the new one"; the cases are what
+someone wrote down, and the trade lives in what nobody did. The fix that ended the class was a **committed
+generated corpus scored in both directions against bash itself**: fail-open **75 → 0**, and by the end 705
+lines with the over-reports all provably inside non-binding contexts.
+
+**2. A negative over a generated space is a statement about the generator.** Round 5 claimed a sweep proved
+a property of the language and was falsified by a reviewer's own generator in minutes. Round 13's reviewer
+wrote the correct form: *"no input **these three generators** produce reaches it. I am not claiming it is
+unreachable — only that I looked deliberately and did not find it."*
+
+**3. A guard can be unable to fire for two different reasons, and both are found by running it.** Round
+13's memo-consistency leg failed twice before it worked: first it queried a character position
+**production never queries** and reported **455 phantom divergences**; corrected, it probed only indices
+0–3 while the entries it protects are written at index **256 and beyond**. A guard that reds for the wrong
+reason and a guard that cannot red at all are both indistinguishable from a working guard on a green run.
+
+**4. When you cannot assert the strong property, say which strong properties you tried.** Three candidate
+over-cap assertions were each measured **false of shipped behaviour** — `deep` surviving as a token (false
+for backtick), >10 tokens (false for `$(`, which lexes to 9), no token covering most of the line (false for
+`$(`, whose legitimate argument token is **2003 of 2028 characters**). The guard now asserts only that it
+returns, **and says why nothing stronger is there.**
+
+**5. Two mechanisms that look like one need separate red-proofs.** The cache fix needed a `SPAN_CAPPED`
+sentinel **and** a `sawCap` flag; the flag alone left the failing case green, because one branch falls
+through and returns a **real** index computed on a poisoned path. Each red-proofed alone, *"so neither
+reads as coverage for the other."*
+
+**6. A fail-open that genuinely cannot be closed in code is the rule's one honest exception — write it as
+one.** This file's membership rule says a shape whose failure emits a metacharacter is **closed in code,
+never listed**. Past the depth cap is the single case that cannot be, because unbounded recursion is the
+thing being prevented. Naming it as the exception is more honest than either raising the cap (a
+`RangeError` is worse) or describing the refusal as harmless.
+
+**7. Self-reporting a rule violation is worth more than not being caught.** Round 13's author used a
+forbidden `sed -i` for a two-word edit and said so unprompted. Verified independently: the file is **new in
+this PR**, LF-only in the blob, no whole-file rewrite in the diff — **no damage**. The report cost nothing
+and bought the ability to check.
+
+**8. The Foreman's summary of a review is itself a claim, and it is the one link nobody re-derives.**
+Twice in this PR the brief relayed something the review had not said — once guessing a reviewer's dirty
+worktree was a leftover sabotage (it was a probe: 47 insertions, 0 deletions, no production logic), once
+framing a reviewer's suggested test shape as wrong when the shipped shape **was** theirs. Neither reached
+the tree, both because the recipient checked.
+
+### Other substantive corrections along the way
+
+- **Three of five rows in one round claimed bash binds a name it does not** — the RHS of a pipeline and an
+  explicit `( … )` both run in a subshell. Measured with `declare -p`, not read off a man page, which is
+  what the docblock had said it did. The headline dropped from five genuine catches to **two**, plus three
+  fail-closed over-reports.
+- **A membership table whose "reason" field was unenforced** — a reviewer added an empty-string reason
+  alongside a new function and the test went green. One `expect` over the values fixed it.
+- **A scan that covered one spelling of a declaration** — an arrow-function probe passed unremarked next to
+  a `function` one. Widened, with the residue written as *"at least these"*.
+- **A rebase resolved as a union, verified line-level rather than green-level**: taking one side silently
+  dropped a whole gate id and the suite went 1-failed until it was restored.
+
+### Gates at merge
+
+**With jq**: 363 files, **5,523 passed / 0 skipped**; this file **88 / 0**. **Without jq**: 363 files,
+**5,461 passed / 62 skipped**; this file **28 + 60** — and the skip banner shouts. `npm run check` 0/0.
+Taint set **12**, identical names, stable from round 7 through round 13. CI `completed success —
+total_count=26 pending=0 skipped=1 coverage=ok`.
+
+**Family:** CPE-1978 (PR #1095 — `release.yml`'s verify step, which landed in the same catalog job and
+forced this PR's one real rebase conflict), CPE-1954 (what `catalog-sign verify` actually checks),
+CPE-1940 (`VerifiedIndex`), CPE-1981 (the `model-snapshot.yml` half), CPE-1932 (enumerate, don't recall),
+CPE-1933 (derive provenance; do not name a backstop without checking it can fire), CPE-1950 (a shared
+oracle catches divergence, not shared blindness).
