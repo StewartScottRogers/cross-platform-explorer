@@ -3,7 +3,7 @@ id: CPE-1986
 title: 'Security: the vault wipe never overwrites an **alternate data stream**, so the lock reports success over retained plaintext'
 type: bug
 priority: High
-status: Open
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-28
@@ -165,3 +165,140 @@ other, and the bytes-not-`Ok` test discipline), **CPE-1929** (shadowed guards, a
 are the wrong instrument), **CPE-1959** (the `fsutil`-writes / `batch_media`-refuses split — still open),
 **CPE-1932** (enumerate, don't recall), **SEC-847** (hardlinks are unlink-only under the production policy —
 the existing, *declared* residual this one should be written to match in honesty).
+
+## Closing record — merged as PR #1106 (`944af51c`), 2026-08-29
+
+### The defect
+
+`vault_manager.rs` enumerated the session tree with `read_dir` — **names only** — and `shred_through`
+overwrote **the default data stream**. An **alternate data stream** was never written, then
+`remove_dir_all` unlinked the file and **left the stream's extents on the volume**. Measured under the
+production policy: `wipe_ok=true  main_all_zero=true  ads_still_secret=true`.
+
+**And the worker found a case the ticket never named: the same defect on a DIRECTORY** (`sub:dirsecret`
+survived a full wipe). The Reviewer wrote an **independent** directory-only probe rather than trust it —
+pre-fix `still_secret=true all_zero=false`, post-fix `still_secret=false all_zero=true`. Real, and fixed.
+
+**Why it survived: a skip returns `Ok`.** Every assertion on that path was satisfied by not touching the
+data — which is why the new test asserts **bytes** (`assert_ne!` on the secret, then `all(|&b| b == 0)`),
+never a verdict. Same lesson as CPE-1957, one layer down.
+
+### The fix, and the reuse argument that carries it
+
+`shred_alternate_streams`: `FindFirstStreamW`/`FindNextStreamW` enumerate the object's streams, and each
+named `$DATA` stream is overwritten **through `overwrite_pinned_file`** — the same function, and the same
+refusals, the default stream already uses.
+
+**That reuse rests on a measurement, independently re-taken on both a file and a directory:**
+
+| | id | links | is_dir | reparse | len |
+|---|---|---|---|---|---|
+| `f.txt` | vol …789 / idx …559 | 1 | false | false | 21 |
+| `f.txt:hidden` | **identical** | 1 | false | false | **61** |
+| `d` | idx …560 | One | **true** | – | – |
+| `d:dirstream` | **identical** | 1 | **false** | false | **7** |
+
+A stream is not a second object: it reports the file's **own** identity and link count, **no directory bit
+even on a directory's stream**, and the **stream's** length. So `overwrite_pinned_file`'s refusals — wrong
+object, link, directory, late alias — all apply unchanged, and `shred_through` sizes the stream rather than
+the default.
+
+Called from `shred_dir_pinned` for each file **and the directory itself**, never from inside
+`overwrite_pinned_file`. `same_object_or_refuse` now **returns its probe**, so a directory's streams pin to
+the identity step 2 verified — **which closes a TOCTOU rather than opening one**: on the session policy the
+only reachable `Ok` arm carries that verified identity, and re-probing the path would have pinned to
+whatever is there *now*.
+
+### Decisions, all stated at the site
+
+An **unshreddable stream refuses the wipe** — retryable, **before any unlink**, matching what a busy
+default stream already does. An **aliased file's streams are left alone** like its default stream, asked
+**before** enumeration. A **listing failure splits by alias policy** exactly as `same_object_or_refuse`'s
+`Unknown` arm does. **Only `$DATA` streams are shredded** — declared an **unexercised** safety valve.
+
+**The Reviewer tried five ways to exercise that valve and failed**: an EFS file (`cipher /e`, attrs
+`0x6020`) → `["::$DATA"]`, **no `:$EFS:`**; an object id (`fsutil objectid create`) → `["::$DATA"]`; a
+directory with 400 long-named children, i.e. a real `$I30` → `[]`; a junction → `[]`; a sparse file →
+`["::$DATA"]`. **The site's claim is accurate.**
+
+### Eight attacks, all fail-closed or correct
+
+The root session directory's own stream: **shredded**. A 255-character stream name: **shredded**. A
+**500-character path past MAX_PATH**: **shredded** — so the `verbatim_wide` claim holds. Stream names
+containing `\`, `/` or a second `:`: **the OS refuses to create them** (os error 123), and feeding crafted
+`:..\..\victim.txt:$DATA` straight into `overwrite_pinned_file` is **refused with the outside victim
+byte-identical** — no traversal through the name append. A hard-link alias appearing **after** enumeration
+(lying probe): the other name's stream **intact**, caught by the handle-side link re-read. A junction to an
+outside directory carrying a stream: **not followed**. `::$DATA` spelled explicitly: **filtered, not
+shredded twice**. Unprovable identity (`probe.id = None`): streams skipped — **identical to what
+`overwrite_pinned_file` already does to the default stream**, so consistent rather than a new gap. A stream
+created *between* enumeration and the loop is still missed — **the pre-existing "entry created after
+`read_dir`" race, unchanged for ordinary files.**
+
+### Call sites, re-derived at run time — verdict per site including the fine ones
+
+`wipe_session_dir:1265` (production policy) **fixed**; `create_vault:264` (`ShredEveryFile`) **fixed** — the
+fix lives inside `shred_dir_pinned`, which is called from `shred_tree:1827` **and its own recursion at
+`:1905`**, so every subdirectory's streams come from its own invocation and the root's from the root
+invocation. `shred_through`: exactly two callers, both inside `overwrite_pinned_file` → **covered**.
+`secure_shred::shred_file` → the user-facing **Shred** command → **declared residual, correct** (now
+**CPE-1989**).
+
+### The platform check PR #1103 lacked
+
+A real `cargo check --target x86_64-unknown-linux-gnu` is **impossible on this machine** — `bzip2-sys`,
+`lzma-sys`, `zstd-sys`, `libsqlite3-sys` and `ring` all fail with `ToolNotFound: x86_64-linux-gnu-gcc`, and
+**the author said so plainly rather than reporting "clippy clean" as coverage.** Instead it **flipped the
+ten new `#[cfg(windows)]` attributes to `#[cfg(any())]` and the one `#[cfg(not(windows))]` to
+`#[cfg(not(any()))]`, selecting the non-Windows arm on Windows**, and clippy finished clean. The Reviewer
+counted the eleven cfgs **from the diff rather than recalling them**, re-flipped them all, and judged it
+**sound within its stated scope**: it proves no ungated caller names a Windows-gated item — *"what #1103
+lacked"* — and it compiles the `not(windows)` body; it does not otherwise exercise the Linux target, and
+the site says so.
+
+### Two review findings, both about sentences
+
+**F1 — a correction inherited as boilerplate.** The sabotage sites carried *"the figures below read **five**
+lower than what you will measure here"* — copied from CPE-1957, where the equivalent "+1" clause is
+**genuinely true** because that ticket's figures were taken before its own test landed. **Here every figure
+already sums to the shipping tree's 2,466**, so **an honest re-run contradicts the comment** and fires the
+neighbouring *"these are stale — re-run, don't adjust"* instruction. Replaced with the derived statement,
+and `VAULT-SECURITY.md` gained the positive version even though it never carried the false one — *"stating
+the property where the numbers live is the point."*
+
+**F2 — "reachable" was the wrong word.** The pair redding proves the refusal is **covered**, not reachable.
+The **third** sabotage — neuter *every* upstream refusal in the walk — gives **2,460 / 6 with the message
+appearing zero times in the whole run**, because for a file `overwrite_pinned_file`'s write-open runs first
+on the same object, and for a directory the identity probe does. **Covered by a direct-call test, not
+reachable from the walk**, now declared as CPE-1929 requires and as the surrogate refusal two functions up
+already does — **and the author re-ran that sabotage independently rather than quoting the Reviewer's
+number, then named its spelling at the site so it is re-runnable.**
+
+**And unasked: the same false word was in `VAULT-SECURITY.md`.** The finding cited only the Rust site.
+*"Fixing one and leaving the other would have left the identical claim standing in the document that exists
+to be the honest record."*
+
+**F3** — "the two residuals" → **"at least these residuals"** (CLAUDE.md's round-9 rule).
+
+### Sabotages and gates
+
+CPE-1929 pair on the new refusal: disabled **2,465 / 1**, predicate lying **2,439 / 27** — both red. Wiring
+red-proof (both calls removed) **2,464 / 2**. Baselines **2,461 → 2,466**, five new tests, **all five
+actually ran** (no skip notice). `cargo clippy --locked --all-targets -D warnings` clean in **both** feature
+modes; `cargo test --locked` green; CI `completed success — total_count=26 pending=0 skipped=1 coverage=ok`.
+
+**Declared residuals, both filed rather than left implied:** `secure_shred::shred_file` has the identical
+leak **on every platform**, and there is **no Unix arm** — the analogue is extended attributes including
+`com.apple.ResourceFork`, **not closed**, because an xattr **cannot be overwritten in place through any
+portable API** and building untestable destruction logic for two platforms was judged worse than a stated
+gap. Both are **CPE-1989**.
+
+**One residual left open by the Reviewer, non-blocking:** `VAULT-SECURITY.md`'s "all three figures" now has
+four figures beneath it — the same shape as F1, one notch smaller, harmless because the next clause carries
+the correct scope and all four reproduce in the shipping tree.
+
+**Family:** CPE-1957 (the reparse-point half of the same skip-returns-`Ok` family, and the source of the
+"+1" clause this one inherited wrongly), CPE-1989 (the user-facing Shred command and the Unix xattr half),
+CPE-1988 (the cfg-intersection sweep), CPE-1929 (sabotage pairs, and when the pair is the wrong
+instrument), CPE-1932 (enumerate, don't recall), CPE-1933 (do not name a backstop without checking it can
+fire).
