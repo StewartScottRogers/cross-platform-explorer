@@ -4984,3 +4984,55 @@ checked rather than assumed, and cannot recur behind a single-element-shaped rea
 
 That is the general repair for this class. **When a scan's output is a key, and the key can name more than
 one thing, make the count part of the record and assert on it.**
+
+## A number that measures the tree cannot live in the tree
+
+2026-08-29, PR #1107 (CPE-1983), rounds 1 through 4.
+
+A guard's docblock explained what happens if you disable its comment stripper: the population of scanned
+boxes collapses. It quoted the collapse as a figure. **The figure was wrong in all three rounds that
+carried one, and each time it was the round's own diff that made it wrong.**
+
+| round | wrote | truth at that commit |
+|---|---|---|
+| 1 | "22 → 8 … the losses are exactly the fixed ones" | 8 ✓, but **two unfixed were also lost** |
+| 2 | "22 → 9, losing 13, one unfixed" | **8**, 14, **two** |
+| 3 | "at the time of writing 22 → 8" | **7**, 15, **three** |
+
+**Round 3 is the one to keep.** It wrote the mechanism down correctly — *"which boxes vanish moves with the
+COMMENTS in the tree; the commit that wrote the count is the commit that falsified it"* — and then, **two
+lines above that sentence, left a count its own three comment edits had falsified.** The Reviewer isolated
+the cause rather than assuming it: reverting only the three `.svelte` files to their round-2 text restored
+8/14/two, and the single delta was **a reworded line inside a block comment.** No CSS. No assertion.
+
+### The rule
+
+**When a quantity is a function of the source text, and the docblock stating it is part of that source
+text, the statement is self-falsifying.** Not "likely to rot" — *falsified by the act of writing it*, and
+by every future comment edit anywhere in the scanned set.
+
+**So delete the number and keep the sentence.** "The population drops sharply — most of it — and the losses
+include both already-fixed boxes and still-content-driven ones" carries the entire meaning, cannot go
+stale, and is the thing a reader actually needs.
+
+### The counterpart, which is why the fix is cheap
+
+**The derived legs absorbed every drift the prose could not.** Across all three shifts the two assertions —
+*some fixed boxes are lost* and *some content-driven boxes are lost* — stayed green and stayed correct
+(12 > 0 and 3 > 0 at round 3, on a population the prose had wrong three times). **The guard was never in
+danger. Only the sentence beside it was.**
+
+That is the general shape of this whole class: **assert the property, describe the mechanism, and let the
+failure output supply the numbers.** A count in a comment is a second implementation of the measurement,
+maintained by hand, with no test.
+
+### Two smaller lessons from the same PR
+
+**A pinned count is a pinned list.** Round 2 correctly removed a hard-coded list of which boxes vanish,
+*and kept the count of them* — then defended the removal in the same paragraph. The author's own words when
+this was pointed out: *"I removed one and kept the other, which is the whole error."* If naming the
+instances is too brittle, counting them is exactly as brittle.
+
+**An invented example inside a comment about over-trusting a matcher.** The same docblock cited three
+class names its regex over-matched. Two were real; **the third existed nowhere in the source — its only
+occurrence in the repo was that sentence.** Illustrative examples are claims. Grep them.
