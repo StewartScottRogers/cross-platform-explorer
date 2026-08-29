@@ -20,9 +20,10 @@
 //   * a `--verify-pixels` ground the screenshot painted differently from the prediction;
 //   * a `--verify-pixels` pass that verified ZERO grounds, because "0 verified, 0 disagreeing" reads
 //     as success and is really the leg not running (this repo's "did not run" != "found nothing");
-//   * ANY of the other three legs measuring nothing — no base readings, no forced pseudo-states, no
-//     animation frames actually stepped, or a state rule the engine refused to select. See
-//     `legsThatDidNotRun` for the three sabotages that used to print PASS and exit 0.
+//   * ANY of the other legs measuring nothing — no base readings, no forced pseudo-states, no
+//     animation frames actually stepped, a state rule the engine refused to select, or (CPE-1977) no
+//     INLINE site at all, meaning the fixtures stopped mounting the launcher's JS-painted palettes.
+//     See `legsThatDidNotRun` for the sabotages that used to print PASS and exit 0.
 // 2 is the harness itself refusing to answer: a failed WCAG anchor, a fixture whose provenance claim
 // is no longer in the launcher's source, a Chrome that would not start.
 
@@ -95,13 +96,35 @@ const NOT_FLAT_BY_DESIGN_EXEMPTIONS = [
  *     them would drown the real findings in noise rather than add coverage.
  */
 function enforced(s) {
-  // NOT ENFORCED, and this is the harness's own honest limit rather than an oversight: a colour the
-  // launcher's JS assigns INLINE (`chip.style.background = sessionColor(id)`) is not authored in the
-  // stylesheet this harness guards. It comes from an identity palette shared with the main app
-  // (`src/lib/sessionChip.ts`), so changing it is an app-wide visual decision, not a launcher CSS fix.
-  // Those sites are still MEASURED and printed under "measured, not enforced" below — see the report
-  // and CPE-1977 for the palette's own numbers.
-  if (s.inlineSelf || s.inlineGround) return false;
+  // THE INLINE EXEMPTION IS GONE (CPE-1977). It used to read `if (s.inlineSelf || s.inlineGround)
+  // return false`, on two grounds: a JS-assigned colour is not in the stylesheet this harness guards,
+  // and the session-identity palette is shared with the main app so retuning it is an app-wide
+  // decision rather than a launcher CSS fix. The second reason expired when CPE-1977 made that
+  // decision and pinned both copies to each other; the first never held up — the exemption was about
+  // where a colour is AUTHORED, and every bar in here is about what a user can SEE.
+  //
+  // What it cost while it stood: the sweep reported PASS with `#2aa1a1` carrying white text at 3.13:1
+  // and sitting on a hovered light tab at 2.42:1, one hash bucket in eight away from any session.
+  // "Measured, not enforced" printed the numbers honestly, and nothing read them for eleven days.
+  //
+  // The argument for keeping it was fragility: an inline site's ground is composited from
+  // engine-resolved system colours that move between Chrome builds. That is true — and it is equally
+  // true of the 23 stylesheet readings already sitting in THIN MARGINS at +0.05 (28 readings in 7
+  // rules in that block overall; the other 5 are at +0.17 and +0.24). Exempting one class of site from
+  // a fragility the rest of the sweep already lives with is not caution, it is a blind spot with a
+  // rationale attached.
+  //
+  // And the direction of the trade is measured, not assumed. Head is 35 readings in 14 rules: the same
+  // 28, plus 7 NEW inline readings — 4 at +0.07 and 3 at +0.08. Every newly-enforced inline reading is
+  // therefore LOOSER than all 23 of the pre-existing +0.05 ones, so deleting the exemption adds sites
+  // strictly less flake-prone than the floor this sweep already enforces. It does not raise the flake
+  // risk of the job; it widens what the job covers at a margin the job already accepts.
+  // (Round 2 of CPE-1977's review caught this comment conflating 28-in-the-block with 23-at-+0.05,
+  // which understated exactly the argument it was making.)
+  //
+  // RED-PROOFED: with `#2aa1a1` put back into SESSION_CHIP_COLORS this exits 1 on
+  // `#ffffff on #2aa1a1 — 3.13:1, below the 4.5:1 bar` in both schemes and both tab states. That is
+  // the exact reading the old exemption printed under "measured, not enforced" while exiting 0.
   if (s.role === "text") return true;
   const isFocus = /:focus/.test(s.state || "");
   if ((s.role === "border" || s.role === "outline") && isFocus) return true;
@@ -204,6 +227,18 @@ function legsThatDidNotRun(res) {
     }
     if (!(d.animReadings > 0)) {
       out.push(`${scheme}: the TIME leg took 0 readings across the ${d.animFrames} frame(s) it stepped`);
+    }
+    // The INLINE leg (CPE-1977). The launcher paints two JS tables inline — SESSION_CHIP_COLORS and
+    // STATE_META — and both are now enforced rather than exempted. An inline population of ZERO is
+    // not "the palette is fine", it is the fixtures having stopped expanding `__PALETTE_CHIPS__` /
+    // `__STATE_DOTS__`, and it prints exactly like a clean sweep. STATE_META spent CPE-1966 in
+    // precisely that state: mounted at its CSS default, measured, dropped, reported nowhere.
+    const inline = (d.sites ?? []).filter((s) => s.inlineSelf || s.inlineGround);
+    if (!(inline.length > 0)) {
+      out.push(
+        `${scheme}: the INLINE leg measured 0 site(s) painted from the launcher's own JS tables ` +
+          "(SESSION_CHIP_COLORS / STATE_META) — the fixtures are no longer mounting them",
+      );
     }
   }
   return out;
@@ -445,19 +480,26 @@ function main() {
     }
     console.log(`  chromatic threshold for non-text roles: max-min channel >= ${CHROMA_MIN}`);
 
-    // Measured but not enforced, printed every run so the number is never mistaken for zero.
-    const inlineUnder = sites.filter((s) => (s.inlineSelf || s.inlineGround) && worstOf(s).r < s.bar);
-    if (inlineUnder.length) {
-      console.log("");
-      console.log(`  MEASURED, NOT ENFORCED — ${inlineUnder.length} reading(s) under bar whose colour is assigned inline`);
-      console.log("  by the launcher's JS from the shared session-identity palette (see enforced() for why):");
-      const seen = new Set();
-      for (const s of inlineUnder.sort((a, b) => worstOf(a).r - worstOf(b).r)) {
-        const sig = `${s.scheme}|${s.role}|${s.painted}|${worstOf(s).against}`;
-        if (seen.has(sig)) continue;
-        seen.add(sig);
-        console.log(`      ${round2(worstOf(s).r).toFixed(2).padStart(5)}:1 (bar ${s.bar})  ${s.scheme}  ${s.role}  ${s.painted} on ${worstOf(s).against}  ${s.path}`);
-      }
+    // INLINE-ASSIGNED sites, printed every run. This block used to be "MEASURED, NOT ENFORCED" and
+    // listed the readings the exemption let through; CPE-1977 removed the exemption, so what has to
+    // be printed now is the opposite fact — that these sites exist AND are being enforced. A section
+    // that only appears when something is wrong cannot distinguish "nothing is wrong" from "nothing
+    // was measured", which is how STATE_META stayed invisible; `legsThatDidNotRun` reds on an empty
+    // population, and this prints the count either way.
+    const inline = sites.filter((s) => s.inlineSelf || s.inlineGround);
+    const inlineEnforced = inline.filter(enforced);
+    const inlineWorst = [...inlineEnforced].sort((a, b) => (worstOf(a).r - a.bar) - (worstOf(b).r - b.bar));
+    console.log("");
+    console.log(`  INLINE-ASSIGNED — ${inline.length} site(s) painted by the launcher's own JS`);
+    console.log(`  (SESSION_CHIP_COLORS via sessionColor(), STATE_META via renderState()); ${inlineEnforced.length} enforced,`);
+    console.log(`  ${inlineEnforced.filter((s) => worstOf(s).r < s.bar).length} under bar. Tightest first:`);
+    const seen = new Set();
+    for (const s of inlineWorst) {
+      const sig = `${s.scheme}|${s.role}|${s.painted}|${worstOf(s).against}`;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      if (seen.size > 8) break;
+      console.log(`      ${round2(worstOf(s).r).toFixed(2).padStart(5)}:1 (bar ${s.bar})  ${s.scheme}  ${s.role}  ${s.painted} on ${worstOf(s).against}  ${s.path}`);
     }
 
     // The rest of the 786. Round 1's report accounted for the 384 enforced and gave the 9 inline
@@ -465,7 +507,7 @@ function main() {
     // reads as "there was nothing there"; these are a JUDGEMENT (SC 1.4.11 excludes decorative
     // separators) and the count belongs in the log where the judgement can be checked, with `--all`
     // as the way to see every one.
-    const dropped = sites.filter((s) => !enforced(s) && !(s.inlineSelf || s.inlineGround));
+    const dropped = sites.filter((s) => !enforced(s));
     const droppedUnder = dropped.filter((s) => worstOf(s).r < s.bar);
     console.log("");
     console.log(`  NOT ENFORCED — ${dropped.length} non-text site(s) whose colour is under the ${CHROMA_MIN}-channel`);
@@ -517,15 +559,17 @@ function main() {
     console.log("     element that OVERLAPS a site without containing it (the boot overlay is the worked");
     console.log("     example, which is why --verify-pixels has to hide it) contributes no ground at all.");
     console.log("  3. Non-chromatic non-text sites are dropped, un-enforced — the counts are printed above.");
-    console.log("  4. Inline-assigned colours are measured but NOT enforced (the session-identity palette");
-    console.log("     shared with the main app; CPE-1977 owns its numbers).");
-    console.log("  5. Colours assigned inline from JS tables no fixture mounts are not measured AT ALL.");
-    console.log("     STATE_META paints .state-dot #d08a1a / #3a72b5 / #3a9d4a in renderState(); the");
-    console.log("     fixtures mount .state-dot at its CSS default #7a7a7a, which is non-chromatic and so");
-    console.log("     dropped — those three appear nowhere here, not even under MEASURED, NOT ENFORCED.");
-    console.log("     By hand: #d08a1a is 2.38:1 on a light tab, #3a9d4a is 2.86:1. Not a 1.4.11 failure");
-    console.log("     (each dot has a title= and .pane-state spells the state out), but unmeasured, and in");
-    console.log("     CPE-1977's scope with the chip palette.");
+    console.log("  4. Inline-assigned colours ARE enforced now (CPE-1977 dropped the exemption), but only");
+    console.log("     for the JS tables a fixture mounts. A THIRD table painted inline from JS would be");
+    console.log("     invisible here exactly as STATE_META was, and nothing in this harness can derive");
+    console.log("     that a table exists — `stateDotColours()` had to be written by hand and pointed at");
+    console.log("     it. The counted INLINE-ASSIGNED population above is what makes the absence loud.");
+    console.log("  5. The main app's copy of the chip palette (src/lib/sessionChip.ts) is NOT swept here:");
+    console.log("     this harness loads launcher.html and nothing else. The two are pinned equal by");
+    console.log("     src/lib/sessionChip.test.ts, so the VALUES cannot drift — but the app's own grounds");
+    console.log("     (--surface / --hover across four themes, under .agent-chip and .menu-chip) are");
+    console.log("     measured by neither this harness nor that test. No number is quoted here for them");
+    console.log("     because nothing in the tree measures one; that is the gap, not a footnote to it.");
     console.log("");
 
     // Fixture completeness (CPE-1932): a styled class that matches nothing is a rule this sweep never
