@@ -808,7 +808,7 @@ function setMsg(m, ok) {
   // ONE KNOWN EXCEPTION, declared here so this rule is not read as quietly broken: `STATE_META`'s
   // four dot colours are still inline. The first half genuinely does not apply to them (they must
   // NOT be per-scheme — see the paragraph at that table); the second half does, and CPE-1977 bought
-  // checkability with harness machinery instead of with classes. Refactor filed as follow-on.
+  // checkability with harness machinery instead of with classes. Refactor filed as CPE-1985.
   el.className = ok === "warn" ? "warn" : ok ? "ok" : "err";
 }
 
@@ -1273,7 +1273,7 @@ function agentStateFromText(text) {
 // that machinery — and `renderState()` already toggles a class (`.tab.blocked`) on the line BETWEEN
 // its two inline `style.background` assignments, so the convention is half-applied here. That refactor is
 // deliberately NOT in CPE-1977 (its scope is retune-and-enforce, and the current shape is measured,
-// enforced and red-proofed); it is filed as follow-on. Until it lands, read the `setMsg()` comment as
+// enforced and red-proofed); it is filed as CPE-1985. Until it lands, read the `setMsg()` comment as
 // still true and this table as the known exception, not as a rule quietly broken.
 //
 // ── A COST NO RATIO CAPTURES, recorded so it is not rediscovered as a bug ────────────────────────

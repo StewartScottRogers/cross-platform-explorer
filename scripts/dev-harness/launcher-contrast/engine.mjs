@@ -119,7 +119,7 @@
 //     row and `.menu-chip` in AgentMenu, over `--surface` / `--bg` / `--hover` in four themes. This
 //     comment deliberately quotes no ratio for them, because quoting one would be a number with no
 //     measurement behind it sitting next to a green sweep (CPE-1933). It needs a browser sweep of the
-//     app the way this one sweeps the launcher, which is its own ticket.
+//     app the way this one sweeps the launcher, which is CPE-1985.
 //
 // Run:  node scripts/dev-harness/launcher-contrast/run.mjs
 //   or: npm run harness:launcher-contrast
