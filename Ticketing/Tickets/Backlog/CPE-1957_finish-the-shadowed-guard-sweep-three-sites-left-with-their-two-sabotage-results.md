@@ -71,14 +71,14 @@ a plain duplicate — but it does shadow for that one op, which is worth either 
 
 ## Acceptance criteria
 
-- [ ] Run the two-sabotage check against each of the three, and **record the actual numbers** (tests
+- [x] Run the two-sabotage check against each of the three, and **record the actual numbers** (tests
       passed/failed for each sabotage) in the Work Log and at the site.
-- [ ] For each confirmed shadowed guard, decide **reorder vs delete** and say why. Reorder when the later
+- [x] For each confirmed shadowed guard, decide **reorder vs delete** and say why. Reorder when the later
       guard asks the more trustworthy question (a handle cannot be substituted after the open; a path
       can). Delete when genuinely redundant.
-- [ ] Where a guard is kept deliberately as an unreachable backstop, say so **at the site** and say that
+- [x] Where a guard is kept deliberately as an unreachable backstop, say so **at the site** and say that
       it is untestable and why.
-- [ ] Site 1 additionally: decide whether the bare `is_reparse_point` should be narrowed to
+- [x] Site 1 additionally: decide whether the bare `is_reparse_point` should be narrowed to
       `reparse_name_surrogate(..).unwrap_or(true)`, matching `fsutil::claim_destination_handle` (CPE-1896)
       and `fsutil::overwrite_confirmed_no_follow` (CPE-1929). If it is narrowed, it needs the two-halves
       GUID-reparse-point fixture those two use (`make_guid_reparse_point`, no privilege required), not a
@@ -108,3 +108,155 @@ in `fsutil::overwrite_confirmed_no_follow`'s `links > 1` guard — same function
 **CPE-1959** (the `fsutil`-writes / `batch_media`-refuses doctrine split recorded at
 `batch_media::open_output_verified`). Site 1's narrowing question is CPE-1959's question asked at a
 third site, so whichever is worked second should read the other's answer first.
+
+## Work Log
+
+**2026-08-28 — worked and closed.** All numbers below are `cargo test --lib` in `crates/server`, run by
+hand on **Windows 11** (`win32`, `x86_64-pc-windows-msvc`). Every run recompiled and took tens of
+seconds; none was a cached "Finished in 0.5s".
+
+**Re-measured baseline: 2,460 passed / 0 failed / 14 ignored** (86.27 s). The ticket quoted 2,425/0/11
+from CPE-1929's merge; several PRs have landed since (#1089, #1098 among them).
+
+**The bug is plantable, not just a cloud-sync accident — review finding, and it changes what this was.**
+The Reviewer went past this ticket's GUID-tag fixture to the real tags: a hand-built `REPARSE_DATA_BUFFER`
+carrying OneDrive Files-On-Demand `0x9000001A` and Windows-Container-Isolation `0x80000018` is accepted by
+`FSCTL_SET_REPARSE_POINT` **from an unprivileged process**. So before this fix, any local code running as
+the user could mark a file inside a vault session directory and have the lock report success over
+untouched plaintext. The pre-fix defect was therefore a plantable retention hole, not only a defect a
+OneDrive user could stumble into. Recorded at the test site and in the PR body.
+
+**Second review finding — the narrowing also fixes a whole unwiped subtree.** A non-surrogate reparse
+*directory* previously `continue`d with everything beneath it left unwiped; it is now descended, and the
+inner file is confirmed zeroed rather than redirected. The same improvement reaches `create_vault`'s
+shred-original, where a user-picked folder that was itself a placeholder used to be refused outright.
+
+**Revision provenance, because a number is a fact about a revision (CPE-1933).** Every sabotage below
+was measured at base `eca04c22`. The branch was later rebased onto `2c7f69ff` (#1099 and #1100 having
+merged in between) and the suite re-measured: **2,461 / 0 / 14** — the same 2,460 baseline plus this
+ticket's one new test. The baseline is unmoved, so the numbers below stand as measured; each site names
+the revision so that if a later change *does* move the count, the next reader re-runs the sabotages
+rather than quietly adjusting the figures.
+
+### The two-sabotage results
+
+| Site | disable (`if false && …`) | predicate lies (`if true \|\| …`) | verdict |
+|---|---|---|---|
+| 1 — `overwrite_pinned_file`'s reparse/dir refusal | **2,460 / 0** (identical to baseline) | **2,434 / 26** | shadowed |
+| 2 — `same_object_or_refuse`'s `now.is_link` | **2,458 / 2** | **2,433 / 27** | **NOT shadowed** |
+| 3 — `revert_engine`'s `Create` occupancy check | **2,457 / 3** | **2,440 / 20** | **NOT shadowed** |
+
+**Site 1 — shadowed, confirmed, and the second sabotage is the wrong instrument here.** Forcing the
+predicate true reds only because the line sits on the hot path of every ordinary file; that says
+nothing about whether the *refusal* can fire. The measurement that does answer it: disabling **both**
+by-path checks in `shred_dir_pinned` gives **2,459 / 1**, and the single failure
+(`a_link_planted_inside_the_session_tree_…`) is refused by **site 2** on the directory route, not by
+site 1. So on Windows a surrogate at a *file* name cannot reach site 1 at all —
+`entry.file_type().is_symlink()` catches the symlink spelling, and a junction is a directory.
+**Disposition: kept as a deliberate backstop against a probe-to-open swap, with the numbers and the
+"untestable, and here is why" note written at the site.** Not deleted: it asks the more trustworthy
+question (a handle cannot be substituted after the open), which is the reorder/delete rule's own test.
+
+**Site 2 — the ticket's expectation was wrong, and the measurement says so.** It was filed as a probable
+duplicate deserving an unreachable-backstop note. Both sabotage legs are red: two tests
+(`a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against`,
+`shred_tree_refuses_a_root_that_is_itself_a_link`) pin it. The reason is already in its own doc
+comment — the **root** call reaches it before any enumeration, so there is no earlier by-path check in
+front of it to shadow it. **Disposition: behaviour unchanged; the site now records that it was measured
+and is covered, so nobody re-files it as a duplicate.** Writing the requested "untestable backstop"
+note would have been a false claim of exactly the kind this pattern exists to stop.
+
+**Site 3 — not shadowed, and a reorder would be a downgrade.** With it disabled the three failures are
+not "some other guard refused with different wording" — they are `HARM:` assertions showing the revert
+**destroyed the user's file** (`RestoreReport { applied: 1, skipped: [] }`, attacker bytes on disk).
+Nothing downstream covers it. The ticket's narrow claim is true (for a `Create` onto a link the
+occupancy check refuses first, so `claim_destination_handle`'s link refusal cannot decide), but the
+right response is a note: reordering would trade a permanent, correctly-worded occupancy refusal for a
+link-specific message covering a strict subset, and leave every non-link occupant to fall through to a
+guard that never asks about occupancy. **Disposition: note at the site, no behaviour change.**
+
+### Site 1's narrowing decision — narrowed, and the bug was one check earlier than the ticket said
+
+The ticket predicted that a placeholder "makes the wipe **refuse** rather than overwrite". **It does
+not — it makes the wipe silently skip it.** `probe_no_follow`'s `is_link` was the bare
+`FILE_ATTRIBUTE_REPARSE_POINT` bit, and `shred_dir_pinned`'s sole reader of it `continue`s. So a
+WOF-compressed, dedup'd or OneDrive-placeholder file in a session dir was dropped from the file list,
+never overwritten, and then unlinked by `remove_dir_all` — **plaintext extents left on the volume while
+the lock reported success.** That is worse than the predicted refusal because it is silent, and it is
+the vault's one job.
+
+**Narrowing only one of the two makes matters worse, and that is measured rather than argued:**
+
+- Un-narrowing `EntryProbe::is_link` alone gives **2,460 / 1**, failing on the new test's `HARM:`
+  assertion with the secret still readable. That is the live bug, reproduced.
+- Narrowing the path check but leaving the handle check on the bare bit also gives **2,460 / 1**,
+  failing on the new test's `expect` with `refusing to wipe …` — i.e. exactly the mid-wipe refusal the
+  ticket predicted, now reachable for the first time.
+
+Both were narrowed to `reparse_name_surrogate(..).unwrap_or(true)`, calling the crate's single owner of
+the tag rule rather than re-spelling the bit test. Unix is unchanged (`file_type().is_symlink()` is
+already the narrow question), so both platforms now answer alike.
+
+**New test:** `cpe_1957_a_non_surrogate_reparse_point_in_the_session_tree_is_overwritten_not_skipped`,
+using the two-halves `make_guid_reparse_point` fixture (`0x0000_1957` / `0x2000_1957`, one bit apart,
+no privilege required) as the acceptance criterion asked. It calls `shred_dir_pinned` directly rather
+than `wipe_session_dir`, because the public entry point removes the tree and "the call returned `Ok`"
+is satisfied just as well by the skip as by the fix — so it asserts on the **bytes**. Both halves
+red-proofed; the two runs above are that proof. Confirmed with `--nocapture` that the fixture really
+staged rather than quietly emitting a skip notice.
+
+**Final: 2,461 passed / 0 failed / 14 ignored** (baseline plus the new test).
+`cargo clippy --locked --all-targets -D warnings` is clean in **both** feature modes (plain and
+`--features index`). No `specta::Type` struct was touched, so no bindings regeneration.
+
+### For CPE-1959
+
+Site 1's narrowing is CPE-1959's question answered at a third site, in `fsutil`'s favour. It is recorded
+at the `batch_media::open_output_verified` site so that ticket reads it rather than diverging. The
+reasoning deliberately does **not** generalise: over-refusing at a *wipe* is not a skipped item, it is
+retained plaintext, so the vault's asymmetry runs opposite to the batch's. That leaves `batch_media`'s
+choice resting on its own batch-specific argument rather than on "the crate refuses these", which is no
+longer true. No narrowing-versus-refusing count is asserted at that site — CPE-1959 owns that
+enumeration, and a number written there would be a second unguarded copy of it.
+
+### Review round — PR #1101, APPROVE with three required fixes (all applied)
+
+**F1 — the comments' own counts were stale on the day they shipped.** All three sites said "baseline
+2,460 … came back identical", but the tree they ship in measures **2,461**, because this ticket's own new
+test moved it. So every figure read one lower than the next person would measure, and the sites'
+instruction *"if a later change moves the count, these are stale, re-run them"* would have fired
+spuriously on day one. The +1 was explained in the commit message and here, but **not at the site**,
+which is the inverse of the rule. This is CLAUDE.md's round-8 shape exactly — *stale the moment it was
+written, because the commit that writes such a claim is often the commit that falsifies it* — and I had
+read that paragraph while writing the very comments that repeated it. Each site now states the baseline,
+its revision, and that the shipping tree reads one higher and why.
+
+**F2 — a number must name its predicate, not only its revision.** Site 1's two sabotage figures were
+measured against the pre-fix `facts.is_reparse_point || facts.is_dir` — *a predicate this same diff
+replaces*. The comment then sat under the narrowed predicate annotating it with the old one's numbers.
+The Reviewer re-ran both legs on the shipped predicate (**2,461 / 0** and **2,434 / 27**) and the verdict
+is unchanged, so nothing was wrong; but the site now names the predicate as well as the revision, since a
+later reader could not otherwise tell the numbers pre-date the line above them.
+
+**F3 — the test drove the wrong alias policy.** It called `shred_dir_pinned` with `ShredEveryFile`, while
+`wipe_session_dir:1265` — the route this whole fix is about — passes `UnlinkAliasesInsteadOfOverwriting`.
+The placeholder half now runs under **both**, production policy first, one fresh single-name file each so
+the alias question stays out of it. Re-red-proofed: un-narrowing `EntryProbe::is_link` fails with *"the
+wipe left the user's plaintext on the volume under UnlinkAliasesInsteadOfOverwriting"*, so the production
+leg demonstrably catches the bug rather than merely passing beside it. Suite still **2,461 / 0 / 14** —
+the restructure added coverage, not a test, so F1's "+1" wording stays accurate.
+
+**Confirmed by the Reviewer, recorded so it is not re-litigated:** site 1's shadowing argument is
+load-bearing — with both by-path checks disabled the single failure carries `same_object_or_refuse`'s
+wording (*"a symbolic link or junction is at this directory"*), not `overwrite_pinned_file`'s, so site 2
+catches it on the directory route and site 1 never sees it. And site 2 has nothing in front of it
+**structurally**: `shred_tree` has two callers, and `create_vault:264` reaches it with no by-path link
+check at all. Refusing to write the ticket's requested "unreachable backstop" note was correct.
+
+**F4 — found by the Reviewer, NOT fixed here; the Foreman is filing it.** `vault_manager.rs:1846`'s
+`read_dir` enumerates names only and `shred_through` writes the default stream, so an **alternate data
+stream** on a session file is never overwritten, and `remove_dir_all` then unlinks the file leaving the
+stream's extents on the volume. Measured under the production policy: `main_all_zero=true`,
+`ads_readable=true`, `ads_still_secret=true`. It is the same failure mode this ticket just fixed, one
+layer down, and streams are mentioned nowhere in `vault_manager.rs` or `docs/design/VAULT-SECURITY.md`.
+Pre-existing and out of scope — widening this PR to cover it would have been the wrong call.
