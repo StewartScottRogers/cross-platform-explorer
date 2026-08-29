@@ -417,14 +417,24 @@ export function expandFixtures() {
   // One dot per STATE_META entry on a tab (the scheme-following ground) — the pane-head ground, which
   // is #161616 in BOTH schemes, is covered by the state dots mounted in the grid-view fixture.
   //
-  // The extra `for-<state>` class carries NO style; it exists to split the dedup key. `analyse()`
-  // collapses readings to one site per `scheme|path|role|prop|state`, keeping the WORST — and every
-  // `.state-dot` on a `.tab` has the identical path, so without this the four chromatic dots collapsed
-  // into the same site as the CSS-default `#7a7a7a` one, which is NON-chromatic and therefore dropped
-  // un-enforced. Measured before the split: the `.tab:hover` site reported `#808080` at 3.04 and the
-  // four real colours appeared nowhere. A neutral reading that wins the dedup does not just hide the
-  // chromatic ones from the report, it takes them out of enforcement — so a fixture that mounts a
-  // JS-painted element ALONGSIDE its CSS default has to keep the two apart.
+  // The extra `for-<state>` class carries NO style, and it is STRUCTURAL, not cosmetic — read the
+  // numbers below before deciding it is tidy-up and deleting it. It exists to split the dedup key:
+  // `analyse()` collapses readings to one site per `scheme|path|role|prop|state`, keeping the WORST,
+  // and every `.state-dot` on a `.tab` has the identical path — so without it the four chromatic dots
+  // collapse into the same site as the CSS-default `#7a7a7a` one, which is NON-chromatic and therefore
+  // dropped un-enforced. A neutral reading that wins the dedup does not merely hide the chromatic ones
+  // from the report, it takes them OUT OF ENFORCEMENT.
+  //
+  // RE-MEASURED by deleting just the class and re-running (CPE-1977 review round 2, which correctly
+  // said the first draft of this comment undersold it). The whole INLINE-ASSIGNED population drops
+  // **30 sites -> 16**, and the harness **exits 0**:
+  //   * on a tab, exactly ONE chromatic dot survives per scheme, both in `base` — `#158d41` light,
+  //     `#2477e9` dark. The other six tab readings are gone.
+  //   * BOTH `.tab:hover` readings revert to the neutral default (`#7f7f7f` light, `#797979` dark)
+  //     and are dropped as non-chromatic — so the HARDER of the two tab grounds, the one where these
+  //     colours were retuned to 3.30-3.32, ends up enforced for ZERO of the four states.
+  // A fixture that mounts a JS-painted element ALONGSIDE its CSS default has to keep the two apart, or
+  // the default answers for both and the sweep reports a pass it never measured.
   const dots = stateDotColours()
     .map((s) => `<div class="tab" data-fixture="state-${s.state}"><span class="state-dot for-${s.state}" style="background:${s.colour}" title="Agent ${s.state}"></span><span class="tab-label">${s.state}</span></div>`)
     .join("");

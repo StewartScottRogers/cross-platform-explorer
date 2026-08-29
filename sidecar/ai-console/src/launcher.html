@@ -805,6 +805,10 @@ function setMsg(m, ok) {
   const el = $("msg"); el.textContent = m || "";
   // CPE-1921: the state picks a CLASS, and the class picks a per-scheme token — never an inline
   // hex, which can't have a dark-theme value and can't be checked against the ground it lands on.
+  // ONE KNOWN EXCEPTION, declared here so this rule is not read as quietly broken: `STATE_META`'s
+  // four dot colours are still inline. The first half genuinely does not apply to them (they must
+  // NOT be per-scheme — see the paragraph at that table); the second half does, and CPE-1977 bought
+  // checkability with harness machinery instead of with classes. Refactor filed as follow-on.
   el.className = ok === "warn" ? "warn" : ok ? "ok" : "err";
 }
 
@@ -1256,6 +1260,30 @@ function agentStateFromText(text) {
 // light tab and `#3a9d4a` 2.86:1 — the same two numbers that had already retired those hexes from
 // `.tab.blocked` and `.badge.yes`. The browser harness now mounts these (fixtures.mjs's
 // `__STATE_DOTS__`, expanded from THIS object) so the numbers are in its report rather than in prose.
+//
+// ── WHY THIS IS STILL AN INLINE HEX, when the comment inside `setMsg()` says never to use one ────
+// That comment is CPE-1921's, it is about these four as much as about `#msg`, and it has TWO halves:
+// an inline hex "can't have a dark-theme value" and "can't be checked against the ground it lands
+// on". The paragraph above answers the first half — these four must NOT have a dark-theme value,
+// because `.pane-head` is fixed-dark in both schemes. It does not answer the second, and CPE-1977
+// worked around that half rather than fixing it: `stateDotColours()`, the `for-<state>` dedup split,
+// and a stated "a third JS table would be invisible" gap all exist to make an inline table checkable.
+// Four `.state-dot.blocked/.working/.done/.idle` rules carrying these same single values would meet
+// the pane-head constraint AND land in the stylesheet the harness already sweeps, needing none of
+// that machinery — and `renderState()` already toggles a class (`.tab.blocked`) on the line BETWEEN
+// its two inline `style.background` assignments, so the convention is half-applied here. That refactor is
+// deliberately NOT in CPE-1977 (its scope is retune-and-enforce, and the current shape is measured,
+// enforced and red-proofed); it is filed as follow-on. Until it lands, read the `setMsg()` comment as
+// still true and this table as the known exception, not as a rule quietly broken.
+//
+// ── A COST NO RATIO CAPTURES, recorded so it is not rediscovered as a bug ────────────────────────
+// `blocked` lost salience. At 8px on `.pane-head`'s fixed-dark surface, `#9f7218` reads duller than
+// the `#d08a1a` it replaces — and `blocked` is the one state that most needs to pull the eye, since
+// it means the agent is waiting on the user. The contrast bar is met (3.31:1 worst ground, against
+// 2.38:1 before), so no number in the sweep shows this; what carries the state instead is the
+// `dotpulse` animation on `.tab.blocked .state-dot` plus the `title=` and `.pane-state` text. If a
+// future round wants the salience back it has to come from motion, size or a ring — NOT from
+// lightening this hex, which is pinned between the two tab grounds with no room either way.
 const STATE_META = {
   blocked: { color: "#9f7218", label: "blocked" },
   working: { color: "#2477e9", label: "working" },
@@ -1311,6 +1339,13 @@ function tickStates() { for (const s of sessions.values()) renderState(s); }
 // browser harness prints it as such. The old palette missed one or both bars on seven of the eight
 // (#2aa1a1 was 3.13:1 white / 2.42:1 fill). Identity is the palette's job, so the eight are also held
 // >= 25 degrees of hue apart, the same bar the --msg-* triad is held to.
+//
+// ONE CROSS-ROLE OVERLAP, recorded so it is not misread as a regression from this retune. A tab shows
+// a state dot and an identity chip 8px apart, and the two palettes are tuned independently, so a dot
+// and a chip can land in the same hue family: the closest pair is `done` #158d41 against chip[1]
+// #258648 at CIELAB dE76 8.9 / 0.4 degrees apart, which partially merges at 8px. Measured on the
+// PREVIOUS palettes, the same two pairs were dE76 0.0 — `#3a72b5` and `#3a9d4a` were literally the
+// same hex in both roles, twice. So this is a pre-existing overlap that got better, not a new one.
 const SESSION_CHIP_COLORS = ["#3975ca","#258648","#6e7c23","#c136c1","#d63c3c","#248282","#9b6c2b","#8450ff"];
 function sessionColor(id) {
   let h = 0;

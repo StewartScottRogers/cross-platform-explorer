@@ -109,9 +109,18 @@ function enforced(s) {
   //
   // The argument for keeping it was fragility: an inline site's ground is composited from
   // engine-resolved system colours that move between Chrome builds. That is true — and it is equally
-  // true of the 28 stylesheet readings already in THIN MARGINS at +0.05. Exempting one class of site
-  // from a fragility the rest of the sweep already lives with is not caution, it is a blind spot with
-  // a rationale attached.
+  // true of the 23 stylesheet readings already sitting in THIN MARGINS at +0.05 (28 readings in 7
+  // rules in that block overall; the other 5 are at +0.17 and +0.24). Exempting one class of site from
+  // a fragility the rest of the sweep already lives with is not caution, it is a blind spot with a
+  // rationale attached.
+  //
+  // And the direction of the trade is measured, not assumed. Head is 35 readings in 14 rules: the same
+  // 28, plus 7 NEW inline readings — 4 at +0.07 and 3 at +0.08. Every newly-enforced inline reading is
+  // therefore LOOSER than all 23 of the pre-existing +0.05 ones, so deleting the exemption adds sites
+  // strictly less flake-prone than the floor this sweep already enforces. It does not raise the flake
+  // risk of the job; it widens what the job covers at a margin the job already accepts.
+  // (Round 2 of CPE-1977's review caught this comment conflating 28-in-the-block with 23-at-+0.05,
+  // which understated exactly the argument it was making.)
   //
   // RED-PROOFED: with `#2aa1a1` put back into SESSION_CHIP_COLORS this exits 1 on
   // `#ffffff on #2aa1a1 — 3.13:1, below the 4.5:1 bar` in both schemes and both tab states. That is
