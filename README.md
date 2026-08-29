@@ -188,11 +188,14 @@ rather than probing filenames: every format, every target, any casing. If you ev
 per-platform config, it may set anything **except** `plugins.updater` — route real key/endpoint
 changes through `tauri.conf.json` so the pins actually see them.
 
-Update all three constants to the new value, rotate the `TAURI_SIGNING_PRIVATE_KEY*` secrets above,
-and state the reason in the PR description. See `pinned_pubkey.rs`'s module doc for the full
+Update `tauri.conf.json` and the two constants in `pinned_pubkey.rs` to the new value — **those two
+files are the whole edit** (CPE-1987; the TypeScript guard reads the constants and follows on its own,
+and adding a *second declaration* of either constant name, `#[cfg]`-gated or merely prefix-sharing, is
+refused rather than guessed at). Rotate the `TAURI_SIGNING_PRIVATE_KEY*` secrets above, and state the
+reason in the PR description. See `pinned_pubkey.rs`'s module doc for the full
 walkthrough and — importantly — **what this does and does not prove**: every one of these checks
-compares two files read from the *same* commit/checkout. A rotation that updates the config and all
-three pins together is perfectly self-consistent and passes every one of them; nothing here consults
+compares two files read from the *same* commit/checkout. A rotation that updates the config and the
+pins together is perfectly self-consistent and passes every one of them; nothing here consults
 a value that lives outside the tagged commit (a repo secret, an org variable, a previously published
 release). That stronger property — proving continuity with the key **users already trust**, not just
 internal agreement within one commit — is exactly what CPE-1873's ticket calls option 2 ("source the

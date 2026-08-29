@@ -513,10 +513,20 @@ describe("the config chain is DERIVED from the release workflows, and its ORDER 
 // **What the copy was actually costing, stated precisely, because "drift" is the wrong word for it.**
 // A stale literal here could not drift SILENTLY — it is compared against the real merged config, so a
 // stale copy simply reds. What the copy bought an attacker was the opposite: this file's pin was
-// independent of the Rust one, so writing an attacker key into an OVERLAY *and* into this literal left
-// every guard green (the Rust pin only ever reads the BASE config, which is untouched in that
-// scenario). Two edited files, six shipped legs compromised, nothing red. Deriving closes that: the
-// value asserted against every merged leg is now the Rust const itself.
+// independent of the Rust one, so writing an attacker key into an OVERLAY *and* into this literal hid
+// it from every guard that could see it (the Rust pin only ever reads the BASE config, untouched in
+// that scenario). Deriving closes that: the value asserted against every merged leg is now the Rust
+// const itself.
+//
+// **The size of that attack, corrected to what actually reproduces (PR #1108 review, CLAIM-1).** The
+// first write-up here said "two edited files, six shipped legs, nothing red". Measured on the base
+// commit, the TWO-file version (overlay + this literal) is **3 failed / 44 passed**: `release.yml`'s
+// plain channel takes no overlay, so its three legs keep the real merged pubkey while the literal has
+// moved, and they say so. Only the three SIDECAR legs are compromised, and it is NOT silent. The
+// genuinely all-green shape needs a THIRD file — the overlay must also be added to `release.yml`'s
+// matrix `args:` — and that one does reproduce in full: whole suite green, attacker root of trust on
+// all six legs. The fix holds: at this file's head the two remaining files of that attack red
+// **6 failed / 42 passed**, every leg.
 //
 // **And what deriving gives up, so the next reader does not have to re-derive it.** The deleted
 // literal was also a THIRD copy, and a rotation that edits `tauri.conf.json` + `pinned_pubkey.rs`

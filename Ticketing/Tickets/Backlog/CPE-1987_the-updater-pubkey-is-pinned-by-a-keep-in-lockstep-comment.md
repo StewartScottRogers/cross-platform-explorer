@@ -81,12 +81,20 @@ places" were updated in the same commit.
 **The framing the ticket inherited was slightly off, and the correction is the interesting part.**
 A stale TS literal could not have drifted *silently* — it was compared against the real merged config,
 so a stale copy simply reds. What the copy actually bought was the reverse: because it was independent
-of the Rust const, an attacker writing a key into an **overlay** *and* into that literal passed every
-guard (the Rust pin only ever reads the BASE config, untouched in that scenario). Two files, six
-shipped legs compromised, nothing red. Deriving closes that. The cost, stated at the site: the deleted
-third copy also used to red on a `tauri.conf.json` + `pinned_pubkey.rs` rotation, and no longer does —
-which is the same self-consistency limit `pinned_pubkey.rs`'s "What none of this proves" already
-declares out of bounds.
+of the Rust const, an attacker writing a key into an **overlay** *and* into that literal hid it from the
+only guard that could see it (the Rust pin only ever reads the BASE config, untouched in that
+scenario). Deriving closes that. The cost, stated at the site: the deleted third copy also used to red
+on a `tauri.conf.json` + `pinned_pubkey.rs` rotation, and no longer does — which is the same
+self-consistency limit `pinned_pubkey.rs`'s "What none of this proves" already declares out of bounds.
+
+**Corrected after review (PR #1108, CLAIM-1) — the first write-up of that attack did not reproduce.**
+It said "two files, six shipped legs, nothing red". Measured on base `dd560869`, the **two**-file
+version (overlay + the literal) is **3 failed / 44 passed**: `release.yml`'s plain channel takes no
+overlay, so its three legs keep the real merged pubkey and say so. Only the three **sidecar** legs are
+compromised, and it is **not silent**. The genuinely all-green shape needs a **third** file — the
+overlay added to `release.yml`'s matrix `args:` — and that one does reproduce in full (whole suite
+green, attacker root of trust on all six legs). The fix holds either way: at head, the two remaining
+files of that attack red **6 failed / 42 passed**, every leg.
 
 **Site enumeration** (`git ls-files | xargs grep -l`, not recall). Three live files carry the pubkey —
 `pinned_pubkey.rs` (source of truth, unchanged), `src-tauri/tauri.conf.json` (unchanged), and the test
@@ -103,3 +111,41 @@ unstripped reader derives the decoy (measured with a throwaway script).
 
 **CPE-1873's injection re-run over all 7 chain files**, unchanged from CPE-1900's recorded table:
 12 / 6 / 4 / 2 / 2 / 2 / 2 failures, each reddening exactly the OSes that file governs.
+
+**2026-08-29 — review round 2 (PR #1108: SEC FINDINGS + CHANGES REQUESTED). SEC-1, HIGH, fixed.**
+The derivation re-opened the same green-when-compromised shape one file over: both readers took the
+**first textual occurrence** of the anchor, where rustc resolves the name by compiler rules. Three
+shapes split them and all three derived a decoy silently — a longer name with the anchor as its prefix
+(`…_PUBKEY_LEGACY`), a `#[cfg(target_os = "android")]`-gated duplicate (never compiles, invisible to a
+text scan), and the anchor inside an earlier `r#"…"#` raw string (which `stripRustComments` correctly
+preserves, because a raw string is code). The reviewer built it end to end at the first head:
+**74/74 passed**, clippy clean, `cargo test -p cpe-updater-verify` 8/8 ok, attacker root of trust on
+all six legs. The Rust legs were immune throughout; only the TypeScript leg — the one that covers
+overlays — was fooled.
+
+Fixed with one shared `uniqueAnchorIndex` used by **both** `rustStrConstAfter` and the pre-existing
+`rustStrSliceAfter` (`EXPECTED_TAURI_UPDATER_ENDPOINTS` had the identical hole): the anchor must occur
+exactly once, or the reader refuses rather than guessing. All three shapes leave it occurring twice, so
+one check closes the class. Re-measured by planting each decoy in the real `pinned_pubkey.rs`: each now
+throws at collection, naming the second occurrence's line. **This revises the earlier scope call** —
+"no guard against a fourth copy of the value" is no longer the shape of the risk; the derivation made a
+*second declaration of the anchor* load-bearing, and that is guarded in the reader by one added line
+rather than by editing every pin. Recorded at the site: the TS pin now trusts this file's text where
+Rust trusts the compiler, **strictly weaker than the independent literal it replaced was independent** —
+still net positive, but only with the uniqueness check.
+
+Two pre-existing legs changed verdict as a result, in the safe direction: the raw-source half of each
+comment-decoy test now **throws** ("anchor is not unique") instead of silently returning the stale
+value. Stripping's value is unchanged; forgetting it is no longer silent.
+
+**CLAIM-2 (low), corrected.** The CPE-1929 write-up quoted the wrong spelling: `semi >= -1` alone is
+**26/26 green** because `&& quote > semi` still gates it; the always-refuse spelling is
+`semi >= -1 || quote > semi`, and that reds 4. "Shadowed" is also a property of the **order**, now
+stated at the site: re-inserted *after* the whitespace check it is 26/26 both ways; *before* it, 1 red.
+
+**CLAIM-3 (low), fixed.** `README.md` still said "Update all three constants" and "all three pins
+together" ~15 lines below the opening this PR had corrected — the deleted THREE-places framing, stale
+on arrival, in the file being edited. Both rewritten. `RELEASING.md`'s endpoint quote now says at the
+site that it is illustrative and not a pin. `rustStringLiteralAfter`'s undecoded numeric escapes
+(`\u{2014}`, `\x41`) added to its gap list as a silent-wrong-value gap, unreachable for the
+base64/ASCII values read through it today.

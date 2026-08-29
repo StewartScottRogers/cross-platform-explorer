@@ -57,12 +57,29 @@
 //!   the reader throws at collection with `anchor not found in Rust source: pub const
 //!   EXPECTED_TAURI_UPDATER_PUBKEY` and the whole file reports zero tests (measured 2026-08-28).
 //!   Rename the anchor there in the same commit.
+//! - **DO NOT ADD A SECOND DECLARATION OF EITHER NAME — not even a `#[cfg]`-gated one, and not even a
+//!   longer name that merely starts with it** (`…_PUBKEY_LEGACY`). A text scan takes the FIRST
+//!   occurrence where rustc takes the one its name resolution and `cfg`s select, and that gap was a
+//!   demonstrated silent bypass (CPE-1987 SEC-1: overlay + `release.yml`'s matrix `args:` + one decoy
+//!   const here → 74/74 passed, clippy clean, `cargo test -p cpe-updater-verify` 8/8 ok, attacker root
+//!   of trust on all six shipped legs). The reader now **refuses a non-unique anchor** rather than
+//!   guessing, so such a declaration reds loudly at collection instead — but it reds, so do not add
+//!   one casually. The rule and the three shapes live at `uniqueAnchorIndex` in `rustSource.ts`.
 //! - **What the deleted copy was worth, and what it cost.** It could never drift *silently* — it was
 //!   compared against the real merged config, so a stale copy simply went red. What it did do was let
-//!   an attacker who wrote a key into an *overlay* **and** into that literal pass every guard, because
-//!   nothing here reads an overlay. Deriving closes that. In exchange, a rotation that edits
-//!   `tauri.conf.json` and these consts together no longer trips a third stale copy — which is the
-//!   same self-consistency limit the "What none of this proves" section below already declares.
+//!   an attacker who wrote a key into an *overlay* **and** into that literal hide it from the only
+//!   guard that could see it, because nothing here reads an overlay. **Sized honestly** (PR #1108
+//!   review, CLAIM-1 — the first write-up of this said "two files, six legs, nothing red" and that
+//!   does not reproduce): the two-file version is **3 failed / 44 passed**, because `release.yml`'s
+//!   plain channel takes no overlay and its three legs still red. The all-green shape needs a THIRD
+//!   file, adding the overlay to `release.yml`'s matrix `args:`. Deriving closes it either way. In
+//!   exchange, a rotation that edits `tauri.conf.json` and these consts together no longer trips a
+//!   third stale copy — the same self-consistency limit "What none of this proves" below declares.
+//! - **The net trade, recorded rather than left implicit:** the TypeScript pin now trusts this file's
+//!   *text*, where the Rust legs trust the compiler — strictly weaker than an independent literal was
+//!   independent. Still net positive, because it closes a three-file attack needing no Rust edit and
+//!   forces that third edit into this file, which is the most-reviewed one in the repo — **but that is
+//!   only true with the uniqueness refusal in place.**
 //!
 //! **A THIRD path, found independently of `--config` entirely (CPE-1873 attempt 3, Security Auditor,
 //! DEMONSTRATED; widened by CPE-1903):** Tauri merges a per-platform config file AUTOMATICALLY on

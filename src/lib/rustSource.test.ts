@@ -162,8 +162,10 @@ describe("rustStrSliceAfter", () => {
       '// Was: pub const T: &[&str] = &["stale"];',
       'pub const T: &[&str] = &["current"];',
     ].join("\n");
-    // Raw source: the comment's copy comes first and wins -- the silent-wrong-value class.
-    expect(rustStrSliceAfter(hostile, "pub const T")).toEqual(["stale"]);
+    // Raw source: the comment's copy comes first. Until CPE-1987's SEC-1 fix this silently returned
+    // ["stale"] -- the wrong-value class. It now throws, because the anchor occurs twice; the value
+    // of stripping is unchanged, but the failure mode when someone forgets it is no longer silent.
+    expect(() => rustStrSliceAfter(hostile, "pub const T")).toThrow(/anchor is not unique/);
     // Stripped first (what every caller does): the real declaration is what is read.
     expect(rustStrSliceAfter(stripRustComments(hostile), "pub const T")).toEqual(["current"]);
   });
@@ -208,8 +210,9 @@ describe("rustStrConstAfter", () => {
       '// Was: pub const K: &str = "stale";',
       'pub const K: &str = "current";',
     ].join("\n");
-    // Raw source: the comment's copy comes first and wins.
-    expect(rustStrConstAfter(hostile, "pub const K")).toBe("stale");
+    // Raw source: the comment's copy comes first. Since CPE-1987's SEC-1 fix that is a THROW rather
+    // than a silent "stale" -- two occurrences of the anchor, so the reader refuses to pick one.
+    expect(() => rustStrConstAfter(hostile, "pub const K")).toThrow(/anchor is not unique/);
     // Stripped first (what every caller does): the real declaration is what is read.
     expect(rustStrConstAfter(stripRustComments(hostile), "pub const K")).toBe("current");
   });
@@ -246,5 +249,74 @@ describe("rustStrConstAfter", () => {
     // value itself is checked, against every shipped build leg's merged config.
     expect(pubkey.startsWith("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6")).toBe(true);
     expect(pubkey.length).toBeGreaterThan(80);
+  });
+});
+
+/**
+ * CPE-1987, PR #1108 review SEC-1 — **the three shapes that made a text scan and rustc disagree, each
+ * of which used to derive a decoy SILENTLY.** Demonstrated end to end by the reviewer at that PR's
+ * first head: overlay + `release.yml`'s matrix `args:` + one decoy const, **74/74 passed** with an
+ * attacker root of trust on all six shipped legs.
+ *
+ * Both readers are swept, because `EXPECTED_TAURI_UPDATER_ENDPOINTS` had the identical hole. The
+ * `_LEGACY` and `#[cfg]` shapes are the ones a normal-looking PR could carry; the raw-string shape is
+ * the one that survives comment stripping *by design*, because a raw string is code.
+ *
+ * The complement matters as much as the refusal here: an anchor that is genuinely unique must still
+ * be read, including when a LONGER name that merely contains it is nowhere in the file. The last two
+ * cases pin that, so a lazier "refuse if anything resembles the anchor twice" cannot pass.
+ */
+describe("a non-unique anchor is refused, never guessed (CPE-1987 SEC-1)", () => {
+  const REAL_STR = 'pub const K: &str = "REAL";';
+  const REAL_SLICE = 'pub const E: &[&str] = &["real"];';
+
+  const shapes: Array<{ name: string; before: string }> = [
+    { name: "a longer name with the anchor as its prefix", before: "_LEGACY" },
+    { name: "a #[cfg]-gated duplicate that never compiles on this host", before: "cfg" },
+    { name: "the anchor text inside an earlier raw string", before: "raw" },
+  ];
+
+  function plant(kind: string, decl: string, anchor: string, decoy: string): string {
+    if (kind === "_LEGACY") return `${anchor}_LEGACY: ${decoy}\n${decl}`;
+    if (kind === "cfg") return `#[cfg(target_os = "android")]\n${anchor}: ${decoy}\n${decl}`;
+    return `pub const NOTE: &str = r#"see ${anchor}: ${decoy}"#;\n${decl}`;
+  }
+
+  shapes.forEach((shape) => {
+    it(`${shape.name} — the &str reader refuses rather than deriving the decoy`, () => {
+      const src = plant(shape.before, REAL_STR, "pub const K", '&str = "DECOY";');
+      expect(() => rustStrConstAfter(stripRustComments(src), "pub const K")).toThrow(
+        /anchor is not unique/,
+      );
+    });
+
+    it(`${shape.name} — the &[&str] reader refuses too`, () => {
+      const src = plant(shape.before, REAL_SLICE, "pub const E", '&[&str] = &["decoy"];');
+      expect(() => rustStrSliceAfter(stripRustComments(src), "pub const E")).toThrow(
+        /anchor is not unique/,
+      );
+    });
+  });
+
+  it("the refusal names the line of the second occurrence, so the decoy is findable", () => {
+    const src = ['pub const K_LEGACY: &str = "DECOY";', 'pub const K: &str = "REAL";'].join("\n");
+    expect(() => rustStrConstAfter(src, "pub const K")).toThrow(/also occurs at line 2/);
+  });
+
+  it("a genuinely unique anchor is still read — the complement of the refusal", () => {
+    // The laziest passing implementation of the rule above refuses too much. These two are ordinary
+    // single-declaration files and must keep working, or the guard would have taken the derivation
+    // down with the decoy.
+    expect(rustStrConstAfter(REAL_STR, "pub const K")).toBe("REAL");
+    expect(rustStrSliceAfter(REAL_SLICE, "pub const E")).toEqual(["real"]);
+  });
+
+  it("a decoy sitting in a COMMENT is still handled by stripping, not by this rule", () => {
+    // The two mechanisms are independent and must not be confused for one another: stripping removes
+    // the comment entirely, so the anchor is unique again and the live value is read. If this ever
+    // starts throwing "not unique", the strip has stopped running -- a different bug with a different
+    // fix.
+    const src = ['// pub const K: &str = "DECOY";', 'pub const K: &str = "REAL";'].join("\n");
+    expect(rustStrConstAfter(stripRustComments(src), "pub const K")).toBe("REAL");
   });
 });
