@@ -75,21 +75,26 @@
  * `styleBlock` throws, a loud red. Both of those are facts about a SINGLE-SELECTOR LOOKUP. For an
  * ENUMERATOR neither holds, and the difference is not cosmetic:
  *
- *   - with `stripComments: false` this sweep's population drops. **Today: 22 boxes to 9, losing 13.**
+ *   - with `stripComments: false` this sweep's population drops sharply — at the time of writing
+ *     22 boxes to 8 — and the losses include BOTH already-fixed boxes AND still-content-driven ones.
  *     The mechanism is that every fix in this class ships with a comment explaining it, and a comment
  *     immediately above a rule is swallowed into that rule's SELECTOR — `.list` stops parsing as a
  *     single class and drops out of the enumeration altogether.
- *   - **Round 1 of this paragraph said the losses "are exactly the ones that have been FIXED". They
- *     are not, and the truth is worse rather than softer**: today 12 of the 13 are fixed and **one is
- *     not** — `MacroRunConfirm#collision-list`, a live content-driven box, allowlisted but still real
- *     debt. An unfixed offender silently leaving the population is the more dangerous loss of the
- *     two, so it is stated rather than rounded off. (Review round 2 measured a different pair on the
- *     round-1 tree, `CopilotDialog#op-results` and `#collision-list`; WHICH boxes vanish moves with
- *     the comments in the tree, which is exactly why the assertion below derives the property and
- *     does not pin a list.)
+ *   - **THE EXACT SPLIT IS DELIBERATELY NOT WRITTEN DOWN HERE, AND THAT IS THE THIRD ATTEMPT AT THIS
+ *     PARAGRAPH.** Round 1 said the losses were "exactly the ones that have been FIXED"; round 2
+ *     corrected that to "one is not" and was ALSO wrong — there are two — while regressing the
+ *     population figure from 8 to 9 in the same edit. The reason is the lesson the bullet itself was
+ *     stating: which boxes vanish moves with the COMMENTS in the tree, and round 2's own diff moved
+ *     one. It added the `.empty` centring comment to `CheckpointDialog`, which pushed `#drift-list`
+ *     out of the unstripped scan — so the commit that wrote the count is the commit that falsified
+ *     it (CLAUDE.md: "the commit that writes such a claim is often the commit that falsifies it").
+ *     A pinned COUNT is the same object as a pinned LIST, and the fix for both is the same: the two
+ *     legs below DERIVE the properties — that at least one already-fixed box is lost, and that at
+ *     least one still-content-driven box is lost — and name no box and no number. Whatever those
+ *     legs report when they fail is the current truth; this prose is not.
  *   - **Round 1 also said "a smaller population is all green … a silent pass, not a loud throw",
  *     which claims this file's own floor does not work. It does.** With the stripper disabled the
- *     `>=15` floor reds at 9, along with the other legs that name specific boxes. The accurate
+ *     `>=15` floor reds, along with the other legs that name specific boxes. The accurate
  *     statement is one level down: the SUBSTANTIVE leg — "no scroll box can grow under the pointer" —
  *     passes VACUOUSLY over the shrunken population, and it is this PR's own non-vacuity floors that
  *     turn that vacuum into a red. Which is the argument for having them, not against.
@@ -237,9 +242,15 @@ function openTags(markup: string): string[] {
  *
  * FOUND IN REVIEW ROUND 2, and it is worth stating because the wrong version looks right. Round 1
  * asked `class="[^"]*\blist\b[^"]*"`. In a regex a HYPHEN IS A WORD BOUNDARY, so `\blist\b` matches
- * inside `class="drift-list"` — and `\blog\b` inside `class="log-line"`, and `\bres-out\b` inside
- * `res-outcome`. Measured on this tree, that over-matched five of the twenty-two boxes and made the
- * multi-element count added in this same round report phantoms.
+ * inside `class="drift-list"`, and `\blog\b` inside `class="log-line"`. Measured against the
+ * tokenised matcher: the same 22 boxes either way, but FIVE reported as multi-element where there are
+ * THREE — the two phantoms being exactly `CheckpointDialog#list` (via `drift-list`) and
+ * `SyncDialog#log` (via `log-line`).
+ *
+ * Both examples above are real, which round 2's first draft of this paragraph could not say: it
+ * offered a third, `\bres-out\b` inside `res-outcome`, and no such class exists anywhere in `src/` —
+ * an invented detail, inside the comment explaining a defect caused by over-trusting a matcher, which
+ * is precisely the shape CPE-1933 exists for. Two measured examples are enough.
  *
  * It was also a latent FALSE EXCLUSION, which is the direction that matters: the `role="dialog"` skip
  * asks whether any tag carrying the class is the dialog root, so a body class that happened to be a
@@ -377,8 +388,8 @@ describe("CPE-1983 — the enumeration itself (CPE-1932: a guard over 'all the X
 
     // WHY it matters, derived rather than pinned. Round 1 listed three box ids here, which is a
     // claim about today's comments: WHICH rules a comment happens to sit above moves every time
-    // anyone edits one, and review round 2 measured a different pair on the round-1 tree. So assert
-    // the two PROPERTIES that make this dangerous instead.
+    // anyone edits one — round 2's own diff moved one, by adding a comment to `CheckpointDialog`.
+    // So assert the two PROPERTIES that make this dangerous instead, and name nothing.
     //
     // Property 1: the losses include boxes that are ALREADY FIXED — the enumeration stops watching
     // the instances it was built for, and cannot then notice a revert.

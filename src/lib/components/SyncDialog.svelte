@@ -255,7 +255,8 @@
      one arrives AND then grows, line by line, for the whole duration of the sync. A fixed height
      cannot remove the arrival, but it removes the per-line creep, which is the worst variant in the
      sweep — every line was a fresh half-line of upward movement under a resting pointer.
-     NO CENTRED PLACEHOLDER (unlike six of the sibling fixes): this box renders `{#each log}` and
+     NO CENTRED PLACEHOLDER (unlike the seven sibling declarations — six `.empty` rules plus
+     MacroRunConfirm's scoped `.ops li.dim`): this box renders `{#each log}` and
      nothing else, and it only exists once there is at least one line. */
   .log {
     margin-bottom: 14px; height: 140px; overflow: auto;
