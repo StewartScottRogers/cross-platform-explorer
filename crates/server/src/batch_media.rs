@@ -2093,7 +2093,22 @@ thread_local! {
 // the `symlink_metadata` defeats the path net and not this one.
 //
 // Same one-shot, take-don't-read discipline as the hard-link seam above, and the same reason.
-#[cfg(test)]
+//
+// **`#[cfg(all(test, windows))]`, and the gate is the whole seam rather than just the plant** — this
+// leg is Windows-only *by construction*, three times over: reparse points only exist there,
+// `HandleFacts::is_reparse_point` is hard-coded `false` everywhere else, and the fixture-maker
+// `fsutil::make_guid_reparse_point` is itself `#[cfg(windows)]`. The consumer
+// (`cpe_1959_…_and_a_placeholder_is_written`) is `#[cfg(windows)]` for the first two reasons already,
+// so on Linux/macOS every item here would be *both* uncallable and unused.
+//
+// **Round 4 shipped this arm ungated and it was a compile error on Linux and macOS** —
+// `E0425: cannot find function make_guid_reparse_point in module crate::fsutil`, with rustc's own
+// *"found an item that was configured out"* note pointing at the `#[cfg(windows)]` on it. Three
+// reviewers all worked on Windows and all three were green; the 3-OS matrix is what caught it. The
+// generalisable check, which costs nothing and runs anywhere: **when new code names a symbol, confirm
+// the symbol's own `#[cfg]` is no narrower than the call site's.** `make_guid_reparse_point` is
+// `#[cfg(windows)]`; this was `#[cfg(test)]`; that is the bug, visible by grep from any machine.
+#[cfg(all(test, windows))]
 thread_local! {
     static SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN: std::cell::RefCell<Option<(String, u32)>> =
         const { std::cell::RefCell::new(None) };
@@ -2112,17 +2127,36 @@ pub(crate) fn link_between_containment_and_open_for_test(victim: &str, at: &str)
 }
 
 /// Arm the reparse-tag seam for exactly one call (CPE-1959). Clears the previous verdict so a stale
-/// `true` from an earlier test cannot be read as this one's.
-#[cfg(test)]
+/// `true` from an earlier test cannot be read as this one's. Windows-only — see the seam's own comment.
+#[cfg(all(test, windows))]
 pub(crate) fn surrogate_between_containment_and_open_for_test(at: &str, tag: u32) {
     SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| *c.borrow_mut() = Some((at.to_string(), tag)));
     SURROGATE_PLANTED.with(|c| c.set(false));
 }
 
-/// Did the last armed reparse-tag plant take? See [`SURROGATE_PLANTED`].
-#[cfg(test)]
+/// Did the last armed reparse-tag plant take? See [`SURROGATE_PLANTED`]. Windows-only.
+#[cfg(all(test, windows))]
 pub(crate) fn surrogate_was_planted_for_test() -> bool {
     SURROGATE_PLANTED.with(std::cell::Cell::get)
+}
+
+/// Apply an armed GUID reparse tag. Windows-only, because `make_guid_reparse_point` is: split into its
+/// own function rather than left as a `#[cfg]`-ed statement inside [`between_containment_and_open`] so
+/// the gate sits on an item, where it is visible to a reader scanning declarations.
+///
+/// **There is deliberately NO non-Windows arm**, and that is the safety-relevant half of the choice.
+/// The alternative — a stub that disarms and sets `SURROGATE_PLANTED` to `false` — would compile
+/// everywhere and read as portable, and a later edit dropping the `#[cfg(windows)]` from half 4's test
+/// would then make the leg *silently pass* on Linux against a fixture that was never planted. That is
+/// the unarmed-fixture-reporting-success shape this seam's flag exists to prevent. With no stub, the
+/// only consumer is Windows-gated and the compiler enforces it.
+#[cfg(all(test, windows))]
+fn plant_armed_surrogate() {
+    let armed_tag = SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| c.borrow_mut().take());
+    if let Some((at, tag)) = armed_tag {
+        let ok = crate::fsutil::make_guid_reparse_point(std::path::Path::new(&at), tag, false);
+        SURROGATE_PLANTED.with(|c| c.set(ok));
+    }
 }
 
 #[cfg(test)]
@@ -2132,11 +2166,8 @@ fn between_containment_and_open() {
         let _ = std::fs::remove_file(&at);
         let _ = crate::links::create_hard_link(&victim, &at);
     }
-    let armed_tag = SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| c.borrow_mut().take());
-    if let Some((at, tag)) = armed_tag {
-        let ok = crate::fsutil::make_guid_reparse_point(std::path::Path::new(&at), tag, false);
-        SURROGATE_PLANTED.with(|c| c.set(ok));
-    }
+    #[cfg(windows)]
+    plant_armed_surrogate();
 }
 
 #[cfg(not(test))]
