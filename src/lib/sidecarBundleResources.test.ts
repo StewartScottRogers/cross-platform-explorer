@@ -156,11 +156,18 @@ function autoMergedPlatformConfigs(os: ShipOS): string[] {
  * Order between the two halves is Tauri's: `read_from` merges the per-platform file onto the base
  * before the CLI applies a single `--config`, so it sits between them.
  *
- * The one thing NEITHER half covers: a config supplied at build time by something other than this
- * repo's committed files — a runner-side patch of `tauri.conf.json` (`release.yml` really does patch
- * `bundle.windows` for code signing), or a `TAURI_CONFIG` environment variable. That is a property of
- * the runner, not of the tree, and no test reading this checkout can see it. It is stated rather than
- * silently absent.
+ * **What NEITHER half covers — AT LEAST these, and the list is open.** A closed count of blind spots
+ * is a claim like any other, and this repo has been wrong about one twice (CLAUDE.md, CPE-1933 rule 2,
+ * round 9). Known today:
+ *
+ *   - A config supplied at build time by something that is not a committed file: a runner-side patch
+ *     of `tauri.conf.json` (`release.yml` really does patch `bundle.windows` for code signing), or a
+ *     `TAURI_CONFIG` environment variable. A property of the runner, not of the tree — no test reading
+ *     this checkout can see either.
+ *   - A build not driven by a `uses: tauri-apps/tauri-action` step with its overlays in `with.args`.
+ *     `src/lib/tauriConfigChain.ts`'s header lists the four shapes measured to yield zero legs
+ *     silently (a bare `run: npx tauri build --config …`, a composite action, a reusable-workflow
+ *     call, tauri-action's `tauriScript:`) and says why the floors do not catch them.
  */
 function configChainForLeg(leg: BuildLeg): string[] {
   return [BASE_CONFIG, ...autoMergedPlatformConfigs(leg.os), ...leg.overlays];
@@ -298,9 +305,14 @@ function permutations<T>(items: T[]): T[][] {
  *
  * A plain `JSON.stringify` is the wrong oracle here and the difference is not academic: `mergeJson`
  * spreads the base and then assigns the overlay's keys, so merging the same files in a different order
- * yields the same configuration with its keys in a different insertion order. Measured while writing
- * this: `JSON.stringify` called 21 of the 24 orderings "different", of which 5 differed only in key
- * order — a number that would have been quoted as evidence that ordering matters more than it does.
+ * yields the same configuration with its keys in a different insertion order.
+ *
+ * Measured while writing this, **per leg, because the gap is not the same on each and quoting one
+ * leg's number as the chain's would repeat the very error this function exists to fix** (of 24
+ * orderings): `JSON.stringify` calls **21** "different" on all three legs, while the canonical
+ * comparison finds **16 / 12 / 12** (windows / linux / macos) — so **5 / 9 / 9** of them differ in key
+ * insertion order alone. Any of those raw 21s would have been quoted as evidence that ordering
+ * matters more than it does.
  */
 function canonicalJson(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
@@ -356,6 +368,31 @@ function canonicalJson(v: unknown): string {
  */
 describe("the config chain is DERIVED from the release workflows, and its ORDER is load-bearing (CPE-1900)", () => {
   BUILD_LEGS.forEach((leg) => {
+    it(`${leg.where}: the derived overlay COUNT is the number of --config flags in the args`, () => {
+      // Nothing counted overlays before (Reviewer, F6): dropping the FIRST overlay from the chain
+      // left this file at 40/41, and the single red was the order-vacuity test — which caught it only
+      // INCIDENTALLY, because a 3-file chain still has orderings that differ. Dropping the LAST one
+      // red 9 tests, for unrelated reasons. A guard whose failure depends on which element went
+      // missing is not counting; it is noticing side effects.
+      //
+      // RED-PROOFED (2026-08-28): with `configOverlaysFromArgs` returning `out.slice(1)`, this file
+      // goes to 4 failed / 43 passed and three of those four are THIS assertion, one per sidecar leg,
+      // each printing "the derived chain has 2 overlay(s) but the workflow passes 3 --config
+      // flag(s)" with both lists. Before this test the same sabotage was 40/41. Reverted.
+      //
+      // A regex sweep of the flag occurrences, not another token walk — the same "different
+      // mechanism" discipline as the ordering assertion below.
+      const flagCount = (leg.args.match(/(?:^|\s)(?:--config|-c)(?:=|\s)/g) ?? []).length;
+      expect(
+        leg.overlays.length,
+        `${leg.where}: the derived chain has ${leg.overlays.length} overlay(s) but the workflow ` +
+          `passes ${flagCount} --config flag(s).\n  derived: ${leg.overlays.join(", ") || "(none)"}` +
+          `\n  args:    ${leg.args}\n` +
+          `An overlay the extractor drops is a file that SHIPS into the merged config with no ` +
+          `assertion over it at all — the exact shape of the bug this ticket closed.`,
+      ).toBe(flagCount);
+    });
+
     it(`${leg.where}: the derived overlay order is the workflow's own order`, () => {
       // A DIFFERENT mechanism from the tokenizer that produced the list: substring position in the
       // leg's own resolved `args:` string. Re-running the token walk cannot notice a token walk that

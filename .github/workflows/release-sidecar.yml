@@ -121,8 +121,10 @@ jobs:
   # This job runs BOTH checks, BEFORE the build/sign/publish matrix below (via `needs:`), against
   # whatever ref this workflow_dispatch checked out:
   #   1. `cargo test -p cpe-updater-verify` — the base-config pin (`pinned_pubkey_guard.rs`).
-  #   2. `vitest run src/lib/sidecarBundleResources.test.ts` — the FULL merged-overlay-chain pin, which
-  #      is what actually reflects this channel's shipped config.
+  #   2. `npm test` — the whole vitest suite, which carries the FULL merged-overlay-chain pin: what
+  #      actually reflects this channel's shipped config. CPE-1900 widened this from `vitest run
+  #      src/lib/sidecarBundleResources.test.ts`; see the step itself for why naming one file was the
+  #      same enumeration mistake CPE-1903 removed from check 1.
   # A failure here blocks `release-sidecar` from running at all, so a rotated-without-updating-the-pin
   # config (base OR overlay) never reaches a signed, published sidecar release.
   verify-updater-pin:

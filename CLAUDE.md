@@ -348,8 +348,11 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
   membership leg (a `.sort()` in the extractor left every membership assertion green), and then
   measure whether reordering the real chain actually changes anything, or the ordering leg is
   decorative. And **compare configs canonically**: `JSON.stringify` called 21 of 24 orderings
-  "different" when only 16 were — the rest differed in key insertion order alone, a number that would
-  have been quoted as evidence.
+  "different" on every leg, where the real counts are **16 / 12 / 12** (windows / linux / macos) — the
+  rest differ in key insertion order alone. Note the shape of that near-miss, because it is the
+  cheapest one to repeat: the first write of this said "21 … of which 5 differed only in key order",
+  which is the **windows** leg's number quoted without naming a leg, in the very sentence correcting an
+  oracle's scope. **A measurement that varies per case is reported per case, or not at all.**
 - **There are TWO npm projects (CPE-1945).** The root, and **`gui-smoke/`** — which has its own
   `package.json`, its own `package-lock.json`, its own advisories, and its own CI job. Any
   dependency/advisory statement must say which project it covers, or cover both: `gui-smoke/` went

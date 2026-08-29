@@ -23,20 +23,38 @@
 // of silently deriving an empty chain.
 //
 // Enumerated, never recalled (CPE-1932): every workflow in `.github/workflows/` is walked, and every
-// step that `uses:` `tauri-apps/tauri-action` is a build leg — so a third release channel added
-// tomorrow is guarded on the day it lands, with nobody editing a list. Each leg's job matrix is
-// expanded and `${{ matrix.* }}` resolved, because the real overlay filenames only exist after that
-// substitution (`tauri.sidecar.${{ matrix.overlay }}.conf.json`). Floors below refuse a near-empty
-// discovery, which is the half of that rule that keeps getting left off.
+// step that `uses:` `tauri-apps/tauri-action` is a build leg. Each leg's job matrix is expanded and
+// `${{ matrix.* }}` resolved, because the real overlay filenames only exist after that substitution
+// (`tauri.sidecar.${{ matrix.overlay }}.conf.json`). Floors below refuse a near-empty discovery, which
+// is the half of that rule that keeps getting left off.
 //
-// ## What this does NOT cover, said out loud
+// ## What this does NOT cover — AT LEAST these, and the list is open
 //
-// **Tauri also merges `tauri.<platform>.conf.json` with no `--config` flag at all** — via
+// **1. The derivation keys on ONE build shape: a step whose `uses:` is `tauri-apps/tauri-action`,
+// passing its overlays through `with.args`.** A build driven any other way is invisible to it, and
+// the floors do not help — they catch SHRINKAGE, so an extra channel leaves the count at 6 and
+// reports clean. Measured shapes that yield ZERO legs, silently: a `run: npx tauri build --config
+// src-tauri/tauri.evil.conf.json` step, a local composite action wrapping the build, a
+// reusable-workflow call (`uses: ./.github/workflows/x.yml`), and tauri-action's own `tauriScript:`
+// input naming a wrapper script that adds flags this module never sees. Those are the ones that were
+// tried; there will be others.
+//
+// The honest good news, so this reads as a bounded gap rather than an open door: adding a third
+// channel that DOES use tauri-action reds immediately — `sidecarBundleResources.test.ts`'s "the
+// derived leg set covers both release channels" pins the workflow list with `toEqual`, so a new
+// tauri-action workflow fails it by name and has to be dealt with deliberately. The gap is the OTHER
+// build shapes, not a third channel as such.
+//
+// **2. Tauri merges `tauri.<platform>.conf.json` with no `--config` flag at all** — via
 // `tauri-utils::config::parse::read_from`, on every build for that platform. That file class cannot
 // appear in any workflow's `args:`, so a derivation from the workflow is a derivation of ONE HALF of
 // the config the shipped app runs on. The other half is enumerated by listing `src-tauri/` and
 // classifying by shape; see `sidecarBundleResources.test.ts`, which composes the two and states which
-// is which at the point where it builds the chain. Do not read this module as "the shipped config".
+// is which at the point where it builds the chain.
+//
+// Do not read this module as "the shipped config", and do not read the two items above as a closed
+// count of what it misses — CLAUDE.md's rule is *"at least these"*, because the last three times
+// someone wrote down a remainder as a number, the number was wrong within the day.
 
 import { discoverWorkflows, parseWorkflowFile } from "./workflowShellSources";
 
@@ -250,12 +268,41 @@ export function shipOSForRunner(runner: string, where: string): ShipOS {
   );
 }
 
-/** Refuses an overlay path that does not live in the Tauri project directory — see {@link TAURI_PROJECT_DIR}. */
+/**
+ * Refuses an overlay path that does not live in the Tauri project directory — see
+ * {@link TAURI_PROJECT_DIR}.
+ *
+ * A `..` SEGMENT is refused before the prefix test, not after it. A bare `startsWith` is a string
+ * test, not a path test: `src-tauri/../../planted.conf.json` passes it while resolving outside the
+ * repo entirely (measured — that exact path was accepted by the first version of this function).
+ * The consequence is mild, which is why this is worth stating rather than assuming: such a file is
+ * still loaded, still merged, and still pinned, so the updater assertions fire on it regardless. What
+ * was broken was this refusal firing where its own doc comment says it does — a guard that reports
+ * clean on the input it names is worse than no guard, because it reads as coverage.
+ *
+ * RED-PROOFED (2026-08-28): with the `..` filter forced to match nothing, `tauriConfigChain.test.ts`
+ * goes to 1 failed / 23 passed, the failure being "refuses a --config that walks back OUT of the
+ * project directory with ..". Reverted. The complementary case is pinned too — a filename that merely
+ * contains `..` (`tauri..odd.conf.json`) is NOT a traversal and is still accepted, so this cannot be
+ * satisfied by refusing every dot-dot it sees.
+ */
 function assertOverlaysLiveInProjectDir(overlays: string[], where: string): void {
-  const stray = overlays.filter((p) => !p.replace(/\\/g, "/").startsWith(`${TAURI_PROJECT_DIR}/`));
+  const normalized = overlays.map((p) => ({ raw: p, path: p.replace(/\\/g, "/") }));
+  const traversing = normalized.filter((p) => p.path.split("/").includes(".."));
+  if (traversing.length > 0) {
+    throw new Error(
+      `${where}: --config overlay(s) containing a ".." path segment: ` +
+        `${traversing.map((p) => p.raw).join(", ")}. A path that walks up out of ` +
+        `${TAURI_PROJECT_DIR}/ is refused rather than resolved — the prefix test below is a STRING ` +
+        `test, and "${TAURI_PROJECT_DIR}/../.." satisfies it while naming a file somewhere else ` +
+        `entirely. If a config genuinely lives outside the project directory, say so deliberately.`,
+    );
+  }
+  const stray = normalized.filter((p) => !p.path.startsWith(`${TAURI_PROJECT_DIR}/`));
   if (stray.length === 0) return;
   throw new Error(
-    `${where}: --config overlay(s) outside ${TAURI_PROJECT_DIR}/: ${stray.join(", ")}. Either the ` +
+    `${where}: --config overlay(s) outside ${TAURI_PROJECT_DIR}/: ` +
+      `${stray.map((p) => p.raw).join(", ")}. Either the ` +
       `Tauri project moved (update TAURI_PROJECT_DIR in src/lib/tauriConfigChain.ts, which is a ` +
       `stated constant precisely so this reds) or a config is being loaded from somewhere the ` +
       `guards do not look.`,

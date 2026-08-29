@@ -159,16 +159,19 @@ describe("shipOSForRunner — runner label to shipped OS", () => {
  * because it never sees a line: `parseYaml` has already discarded every comment, and only the VALUES
  * of `with.args` and `runs-on` are read.
  *
- * **Red-proofed, measured 2026-08-28.** The fixture below was run through two line scanners of the
- * kind this repo keeps having to delete, and the results counted rather than assumed:
+ * **Red-proofed, and the scanners are COMMITTED rather than described.** The first version of this
+ * block stated "4 of 4 / 2 of 4 / 0 of 4" in prose, with the scanners that produced those numbers
+ * living only in a scratch file that was deleted. That is CLAUDE.md's *"if you cannot commit the
+ * generator, you have not measured anything a reviewer can check"* at small scale — the numbers were
+ * reproducible, but nothing in the tree let anyone check them, and nothing would notice if the fixture
+ * later drifted so that they stopped holding. {@link NAIVE_SCANNERS} and the test below now compute
+ * all three counts on every run.
  *
- *   - a bare `/--config\s+(\S+)/` per line picked up **4 of the 4 decoys** as live overlays;
- *   - the same scan with a WHOLE-LINE comment filter (`line.trim().startsWith("#")`) still picked up
- *     **2 of 4** — the `run:` heredoc body and the TRAILING comment. That is CLAUDE.md's "a
- *     whole-line-comment filter is not enough; a trailing comment walks straight through it",
- *     reproduced on this very fixture.
- *
- * `legsFromWorkflowDoc` reads **0 of 4**, and the test below is what keeps that true.
+ * That drift is the failure it now catches, red-proofed (2026-08-28): deleting the TRAILING decoy
+ * from the fixture — the single most plausible tidy-up, since it makes a long line shorter — takes
+ * `tauriConfigChain.test.ts` to 1 failed / 23 passed, naming the decoys the bare scanner still found.
+ * Without this test that edit was silent, and it would have quietly turned the assertion above into a
+ * tautology about a fixture with nothing left to defeat. Reverted.
  */
 describe("the derivation is comment-blind and script-blind by construction (CPE-1933 rule 2)", () => {
   const FIXTURE = `
@@ -188,11 +191,59 @@ jobs:
           args: --config src-tauri/tauri.sidecar.real.conf.json # --config src-tauri/tauri.sidecar.decoy-trailing.conf.json
 `;
 
+  /** The one real overlay in {@link FIXTURE}; everything else matching `--config` is a decoy. */
+  const REAL = "src-tauri/tauri.sidecar.real.conf.json";
+
+  /**
+   * The two line scanners this repo keeps having to delete, kept here so their numbers are computed
+   * rather than quoted. Neither is used by anything — they exist to be WRONG, on the record.
+   */
+  const NAIVE_SCANNERS: { name: string; scan: (yaml: string) => string[] }[] = [
+    {
+      name: "a bare /--config\\s+(\\S+)/ per line",
+      scan: (yaml) =>
+        yaml
+          .split("\n")
+          .flatMap((line) => [...line.matchAll(/--config\s+(\S+)/g)].map((m) => m[1])),
+    },
+    {
+      name: "the same scan with a WHOLE-LINE comment filter",
+      scan: (yaml) =>
+        yaml
+          .split("\n")
+          .filter((line) => !line.trim().startsWith("#"))
+          .flatMap((line) => [...line.matchAll(/--config\s+(\S+)/g)].map((m) => m[1])),
+    },
+  ];
+
   it("reads only the args VALUE — not a whole-line comment, a trailing comment, or a run: body", () => {
     const legs = legsFromWorkflowDoc("fixture.yml", parse(FIXTURE));
     expect(legs).toHaveLength(1);
-    expect(legs[0].overlays).toEqual(["src-tauri/tauri.sidecar.real.conf.json"]);
+    expect(legs[0].overlays).toEqual([REAL]);
     expect(legs[0].os).toBe("linux");
+  });
+
+  // The fixture is only worth anything if it really does contain four things a line scanner falls for.
+  // Asserting that here means a future edit that softens the fixture (drops a decoy, moves the
+  // trailing comment) reds, instead of quietly turning the test above into a tautology.
+  it("the fixture really does defeat line scanners: 4 of 4, then 2 of 4, against 0 of 4", () => {
+    const decoysFound = (paths: string[]) => paths.filter((p) => p !== REAL);
+
+    const [bare, wholeLineFiltered] = NAIVE_SCANNERS.map((s) => decoysFound(s.scan(FIXTURE)));
+
+    expect(bare, `${NAIVE_SCANNERS[0].name}: found ${bare.join(", ")}`).toHaveLength(4);
+
+    // CLAUDE.md, CPE-1933 rule 2: "a whole-line-comment filter is NOT enough — a trailing comment
+    // walks straight through it". These are the two survivors, named rather than counted, so the
+    // assertion says WHICH shapes beat the filter.
+    expect(wholeLineFiltered.sort()).toEqual([
+      "src-tauri/tauri.sidecar.decoy-heredoc.conf.json",
+      "src-tauri/tauri.sidecar.decoy-trailing.conf.json",
+    ]);
+
+    const structural = legsFromWorkflowDoc("fixture.yml", parse(FIXTURE)).flatMap((l) => l.overlays);
+    expect(decoysFound(structural), "the structural parse must read none of them").toEqual([]);
+    expect(structural).toEqual([REAL]);
   });
 
   it("a step that is not tauri-action contributes no chain, however it is spelled", () => {
@@ -211,21 +262,49 @@ jobs:
     expect(legs).toEqual([]);
   });
 
-  it("refuses a --config that points outside the Tauri project directory", () => {
-    expect(() =>
-      legsFromWorkflowDoc(
-        "fixture.yml",
-        parse(`
+  function legsForArgs(args: string) {
+    return legsFromWorkflowDoc(
+      "fixture.yml",
+      parse(`
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: tauri-apps/tauri-action@v0
         with:
-          args: --config /tmp/planted.json
+          args: ${args}
 `),
-      ),
-    ).toThrow(new RegExp(`outside ${TAURI_PROJECT_DIR}`));
+    );
+  }
+
+  it("refuses a --config that points outside the Tauri project directory", () => {
+    expect(() => legsForArgs("--config /tmp/planted.json")).toThrow(
+      new RegExp(`outside ${TAURI_PROJECT_DIR}`),
+    );
+  });
+
+  // Reviewer F3, measured: `startsWith("src-tauri/")` is a STRING test, and every path below
+  // satisfies it while naming a file somewhere else entirely. The consequence is mild — such a file
+  // is still loaded, merged and pinned, so the updater assertions fire regardless — but the refusal
+  // was reporting clean on the input its own doc comment named, which reads as coverage it did not
+  // have. Fixed by rejecting a `..` SEGMENT before the prefix test.
+  it("refuses a --config that walks back OUT of the project directory with ..", () => {
+    for (const path of [
+      "src-tauri/../../planted.conf.json",
+      "src-tauri/../planted.conf.json",
+      "src-tauri/sub/../../../planted.conf.json",
+      "src-tauri\\..\\..\\planted.conf.json",
+    ]) {
+      expect(() => legsForArgs(`--config ${path}`), path).toThrow(/".." path segment/);
+    }
+  });
+
+  // The complement, so the refusal is not just "throws on everything with a dot-dot in it": a
+  // filename that merely CONTAINS `..` is not a traversal and must still be accepted.
+  it("does not refuse a filename that merely contains dots", () => {
+    expect(legsForArgs("--config src-tauri/tauri..odd.conf.json")[0].overlays).toEqual([
+      "src-tauri/tauri..odd.conf.json",
+    ]);
   });
 });
 
