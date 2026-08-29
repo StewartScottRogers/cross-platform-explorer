@@ -2220,11 +2220,14 @@ pub(crate) fn claim_destination_handle<'a>(
         // owner of the tag rule. Its site carries the reasoning, the user-visible evidence, and three
         // sabotage results. Nothing to re-open.
         //
-        // **Scoped deliberately, because the true statement here depends on merge order** (PR #1103
-        // review). "`batch_media` was the *last* site on the bare bit" is true only once CPE-1957 /
-        // PR #1101 has landed — it narrows `vault_manager`'s wipe at both of its checks — and those two
-        // PRs were in flight together. So this says what is true of *these two* sites unconditionally,
-        // and leaves the crate-wide count to the ticket, which enumerates it (CPE-1932).
+        // **Scoped deliberately, and now belt-and-braces rather than necessary** (PR #1103 review). The
+        // scoping was written while CPE-1957 / PR #1101 was still in flight, because "`batch_media` was
+        // the *last* site on the bare bit" was true only once that landed — it narrows `vault_manager`'s
+        // wipe at both of its checks. It has landed, so the crate-wide statement is now true. The
+        // scoping stays anyway: this comment says what is true of *these two* sites unconditionally, so
+        // it cannot go stale on somebody else's merge, and the crate-wide count lives in one place —
+        // CPE-1959's ticket, which enumerates it (CPE-1932). A count written here would be the second,
+        // unguarded copy.
         //
         // `reparse_name_surrogate` is asked **only** when the reparse bit is already set, so the
         // ordinary case pays nothing, and it **fails closed** — an unreadable tag counts as a surrogate.

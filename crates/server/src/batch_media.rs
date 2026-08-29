@@ -5329,7 +5329,7 @@ mod tests {
         if surrogate_was_planted_for_test() {
             let err = late.err().expect(
                 "a surrogate tag planted after the path check must still be refused — on the handle, \
-                 which is the only thing left that can see it",
+                 which is what must answer first here",
             );
             assert!(
                 err.contains("(a symlink, a junction, or a mount point)"),

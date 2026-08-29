@@ -99,17 +99,21 @@ inputs:
 
 **Per-site verdicts, derived at run time (CPE-1932), not from PR #1066's "seven".** Enumerating
 `handle_facts(` in `crates/`+`src-tauri/`+`sidecar/` and splitting at each file's `mod tests` gives
-**nine production call sites**, not seven — `fsutil.rs:4237`/`4335` (CPE-1961/1963's staged/reopened
-identity reads) and `vault_manager.rs:1930` post-date that count. Of the nine, exactly **four** consult
-`is_reparse_point` at all (derived by grepping the field, same split):
+**nine production call sites**, not seven — `fsutil`'s staged and reopened identity reads (CPE-1961 and
+CPE-1963) and `vault_manager::overwrite_pinned_file`'s post-date that count. Of the nine, exactly **four**
+consult `is_reparse_point` at all (derived by grepping the field, same split).
+
+**Deliberately no line numbers below.** Round 3 carried five and every one had drifted by the end of the
+same PR — a second, unguarded copy of a fact the source already states, which is the defect this ticket
+is about. Function names do not drift:
 
 | site | position on this class | verdict |
 |---|---|---|
 | `batch_media::open_output_verified` | was bare bit → **now `reparse_name_surrogate`** | **changed here** |
-| `fsutil::claim_destination_handle` (the guard at `fsutil.rs:2258`, reached from `copy_file_onto_destination_handle` at `:1568`) | narrow since CPE-1896 | fine; note added that the split is closed |
-| `fsutil::overwrite_confirmed_no_follow` (3832) | narrow since CPE-1929 | fine; **its docblock claimed the opposite** — fixed |
-| `vault_manager::overwrite_pinned_file` (1942) | **narrow** — CPE-1957 / PR #1101 merged and narrowed it at **both** its checks (the by-path `probe.is_link` in `shred_dir_pinned` and the handle check) | not touched — that PR owns it |
-| `backup.rs:296`, `fsutil.rs:2752`, `3103`, `4237`, `4335` | use `.id`/`links` only | no position; nothing to do |
+| `fsutil::claim_destination_handle` (the guard lives here; reached from `copy_file_onto_destination_handle`) | narrow since CPE-1896 | fine; note added that the split is closed |
+| `fsutil::overwrite_confirmed_no_follow` | narrow since CPE-1929 | fine; **its docblock claimed the opposite** — fixed |
+| `vault_manager::overwrite_pinned_file` | **narrow** — CPE-1957 / PR #1101 merged and narrowed it at **both** its checks (the by-path `probe.is_link` in `shred_dir_pinned` and the handle check) | not touched — that PR owns it |
+| `backup::landed_inside`, and `fsutil`'s four identity-only reads (the claimed-destination, root-handle, staged and reopened ones) | use `.id`/`links` only | no position; nothing to do |
 
 A fifth consumer of the rule, `open_beneath::sys::name_surrogate_at`, is already narrow (CPE-1938).
 
