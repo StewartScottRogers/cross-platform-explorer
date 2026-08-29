@@ -21,7 +21,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { stripRustComments, rustStrSliceAfter } from "./rustSource";
+import { stripRustComments, rustStrSliceAfter, rustStrConstAfter } from "./rustSource";
 import guardCases from "./platformConfigGuard.cases.json";
 import {
   BASE_CONFIG,
@@ -503,14 +503,49 @@ describe("the config chain is DERIVED from the release workflows, and its ORDER 
 // merges automatically — `configChainForLeg` folds that enumerated half in, and the separate describe
 // block below (CPE-1873 finding 6 / CPE-1903) refuses it outright.
 //
-// Keep these two literals in lockstep with crates/updater-verify/src/pinned_pubkey.rs's
-// EXPECTED_TAURI_UPDATER_PUBKEY / EXPECTED_TAURI_UPDATER_ENDPOINTS — same value, same rotation
-// procedure (documented in that file's module doc).
-const EXPECTED_UPDATER_PUBKEY =
-  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUyMUU1NzRGNjhFMjU2MUEKUldRYVZ1Sm9UMWNlVXYvc283NmRaeHVhYkQrNGpQKzZ5aitWL1ErWWRxUGFWRXlQdXJDTkNENG4K";
-const EXPECTED_UPDATER_ENDPOINTS = [
-  "https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/latest.json",
-];
+// CPE-1987 — these two used to be LITERALS here, under a comment reading "Keep these two literals in
+// lockstep with crates/updater-verify/src/pinned_pubkey.rs". That is CPE-1933's shape on the root of
+// trust: a provenance claim with nothing checking it, and worse than no comment because the green
+// tests around it read as vouching for it. They are now READ out of that file at run time, comments
+// stripped first (`rustSource.ts`, the same machinery three hundred lines below reads
+// TAURI_PLATFORM_TOKENS with) so a commented-out old value cannot be mistaken for the live one.
+//
+// **What the copy was actually costing, stated precisely, because "drift" is the wrong word for it.**
+// A stale literal here could not drift SILENTLY — it is compared against the real merged config, so a
+// stale copy simply reds. What the copy bought an attacker was the opposite: this file's pin was
+// independent of the Rust one, so writing an attacker key into an OVERLAY *and* into this literal hid
+// it from every guard that could see it (the Rust pin only ever reads the BASE config, untouched in
+// that scenario). Deriving closes that: the value asserted against every merged leg is now the Rust
+// const itself.
+//
+// **The size of that attack, corrected to what actually reproduces (PR #1108 review, CLAIM-1).** The
+// first write-up here said "two edited files, six shipped legs, nothing red". Measured on the base
+// commit, the TWO-file version (overlay + this literal) is **3 failed / 44 passed**: `release.yml`'s
+// plain channel takes no overlay, so its three legs keep the real merged pubkey while the literal has
+// moved, and they say so. Only the three SIDECAR legs are compromised, and it is NOT silent. The
+// genuinely all-green shape needs a THIRD file — the overlay must also be added to `release.yml`'s
+// matrix `args:` — and that one does reproduce in full: whole suite green, attacker root of trust on
+// all six legs. The fix holds: at this file's head the two remaining files of that attack red
+// **6 failed / 42 passed**, every leg.
+//
+// **And what deriving gives up, so the next reader does not have to re-derive it.** The deleted
+// literal was also a THIRD copy, and a rotation that edits `tauri.conf.json` + `pinned_pubkey.rs`
+// together used to red HERE on the stale third copy. It no longer does — that rotation is now a
+// two-file self-consistent diff, which is exactly the scope `pinned_pubkey.rs`'s "What none of this
+// proves" section already declares out of bounds (nothing here consults a value from outside the
+// tagged commit). The trade is deliberate: it turns a shape that was green-when-compromised into one
+// that is red-when-compromised, at the cost of a review-surface bullet that was never a guarantee.
+const UPDATER_PIN_RS = stripRustComments(
+  readFileSync(join(process.cwd(), "crates", "updater-verify", "src", "pinned_pubkey.rs"), "utf8"),
+);
+const EXPECTED_UPDATER_PUBKEY = rustStrConstAfter(
+  UPDATER_PIN_RS,
+  "pub const EXPECTED_TAURI_UPDATER_PUBKEY",
+);
+const EXPECTED_UPDATER_ENDPOINTS = rustStrSliceAfter(
+  UPDATER_PIN_RS,
+  "pub const EXPECTED_TAURI_UPDATER_ENDPOINTS",
+);
 
 function mergedUpdaterConfig(leg: BuildLeg): { pubkey: unknown; endpoints: unknown } {
   const merged = mergedConfig(leg);
@@ -547,6 +582,36 @@ describe("shipped bundles — updater root of trust survives the FULL merge, eve
       `the tauri-action build discovery no longer sees both release channels. A channel that ` +
         `disappears from this list ships with its merged updater config asserted by nothing.`,
     ).toEqual([".github/workflows/release-sidecar.yml", ".github/workflows/release.yml"]);
+  });
+
+  // CPE-1987. The pin every leg below compares against is DERIVED from `pinned_pubkey.rs`, so this
+  // asserts the derivation landed on a value rather than on nothing. A vacuous derivation would not
+  // pass silently — an empty pubkey reds all 6 pubkey legs — but it would red with a message about the
+  // shipped config when the fault is in the reader, which is the wrong place to send the next person.
+  //
+  // It deliberately does NOT restate the key: a second copy of the value here is the exact thing this
+  // ticket deleted. It asserts the SHAPE — the base64 of "untrusted comment: minisign public key: ",
+  // minisign's own fixed preamble, not a secret and not per-key — plus a non-empty endpoint list of
+  // absolute https URLs.
+  //
+  // **Say what this leg is NOT, because its name invites the wrong reading (round 3).** Both
+  // assertions are satisfied by ANY minisign key, an attacker's included. It cannot detect a poisoned
+  // reader; it detects a reader that came back with something that is not a key at all. The check that
+  // the value is the RIGHT one is the six merged-config legs below, and the check that it was read off
+  // the live declaration is `uniqueAnchorIndex` in `rustSource.ts` (CPE-1987 SEC-1/SEC-2).
+  it("the pinned updater values were really read out of pinned_pubkey.rs", () => {
+    expect(
+      EXPECTED_UPDATER_PUBKEY.startsWith("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6"),
+      "the value derived from crates/updater-verify/src/pinned_pubkey.rs's " +
+        "EXPECTED_TAURI_UPDATER_PUBKEY is not a minisign public key. Every assertion below compares " +
+        "the shipped config against it, so a reader that came back with the wrong thing would be " +
+        "pinning the wrong thing -- and would say so in the language of a config override.",
+    ).toBe(true);
+    expect(EXPECTED_UPDATER_ENDPOINTS.length).toBeGreaterThanOrEqual(1);
+    expect(
+      EXPECTED_UPDATER_ENDPOINTS.filter((e) => !e.startsWith("https://")),
+      "a pinned updater endpoint is not an absolute https URL",
+    ).toEqual([]);
   });
 
   BUILD_LEGS.forEach((leg) => {

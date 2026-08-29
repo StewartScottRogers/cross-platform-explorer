@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { stripRustComments, rustStringLiteralAfter, rustStrSliceAfter } from "./rustSource";
+import {
+  stripRustComments,
+  rustStringLiteralAfter,
+  rustStrSliceAfter,
+  rustStrConstAfter,
+} from "./rustSource";
 
 /**
  * CPE-1950. `stripRustComments` / `rustStringLiteralAfter` came out of
@@ -157,10 +162,18 @@ describe("rustStrSliceAfter", () => {
       '// Was: pub const T: &[&str] = &["stale"];',
       'pub const T: &[&str] = &["current"];',
     ].join("\n");
-    // Raw source: the comment's copy comes first and wins -- the silent-wrong-value class.
-    expect(rustStrSliceAfter(hostile, "pub const T")).toEqual(["stale"]);
-    // Stripped first (what every caller does): the real declaration is what is read.
+    // Raw source: the comment's copy comes first. Before CPE-1987 this silently returned ["stale"] --
+    // the wrong-value class. Under the SEC-2 declaration match it is not a match at all (the line
+    // starts `// Was:`), so even unstripped the REAL declaration is what is read. Recorded because it
+    // is the third verdict this ticket changed, all in the safe direction.
+    expect(rustStrSliceAfter(hostile, "pub const T")).toEqual(["current"]);
+    // But that is a property of THIS comment shape, not of comments: a decoy at column 0 inside a
+    // BLOCK comment is a line-start declaration to the matcher, and only stripping removes it.
+    const blockHostile = ['/*', 'pub const T: &[&str] = &["stale"];', '*/', ...hostile.split("\n").slice(1)].join("\n");
+    expect(() => rustStrSliceAfter(blockHostile, "pub const T")).toThrow(/anchor is not unique/);
+    // Stripped first (what every caller does): the real declaration is what is read, both ways.
     expect(rustStrSliceAfter(stripRustComments(hostile), "pub const T")).toEqual(["current"]);
+    expect(rustStrSliceAfter(stripRustComments(blockHostile), "pub const T")).toEqual(["current"]);
   });
 
   it("reads the real TAURI_PLATFORM_TOKENS out of the shipped guard", () => {
@@ -177,5 +190,197 @@ describe("rustStrSliceAfter", () => {
       "android",
       "ios",
     ]);
+  });
+});
+
+/**
+ * CPE-1987. The scalar sibling of `rustStrSliceAfter`, added so the updater root-of-trust pubkey pin
+ * in `sidecarBundleResources.test.ts` could be READ out of `pinned_pubkey.rs` instead of asking a
+ * comment to keep two literals in lockstep.
+ */
+describe("rustStrConstAfter", () => {
+  const CONST = 'pub const K: &str = "abc";';
+
+  it("reads the value a `&str` const binds", () => {
+    expect(rustStrConstAfter(CONST, "pub const K")).toBe("abc");
+  });
+
+  it("throws — loudly — when the anchor is gone, rather than reading the next literal in the file", () => {
+    // CPE-1932: a renamed or deleted const must red. Returning some other declaration's literal is
+    // the silent-wrong-value class this module exists to close.
+    expect(() => rustStrConstAfter(CONST, "pub const RENAMED")).toThrow(/anchor not found/);
+  });
+
+  it("a comment quoting the OLD value cannot be mistaken for the real one (stripped first)", () => {
+    const hostile = [
+      '// Was: pub const K: &str = "stale";',
+      'pub const K: &str = "current";',
+    ].join("\n");
+    // Raw source: the comment's copy comes first. Before CPE-1987 this silently returned "stale".
+    // Under the SEC-2 declaration match a `// Was: …` line is not a declaration, so the real one is
+    // read even unstripped; a column-0 decoy inside a BLOCK comment still needs stripping, and reds
+    // without it. Both directions pinned, because "comments are handled" is the overclaim here.
+    expect(rustStrConstAfter(hostile, "pub const K")).toBe("current");
+    const blockHostile = ['/*', 'pub const K: &str = "stale";', "*/", 'pub const K: &str = "current";'].join("\n");
+    expect(() => rustStrConstAfter(blockHostile, "pub const K")).toThrow(/anchor is not unique/);
+    expect(rustStrConstAfter(stripRustComments(blockHostile), "pub const K")).toBe("current");
+    // Stripped first (what every caller does): the real declaration is what is read.
+    expect(rustStrConstAfter(stripRustComments(hostile), "pub const K")).toBe("current");
+  });
+
+  it("refuses a const that is not bound to a plain string literal", () => {
+    // The shape that matters: the const still exists but no longer HOLDS the value, so the next `"`
+    // in the file belongs to a later declaration. Reading it would certify the wrong value silently.
+    const indirect = ['pub const K: &str = OTHER;', 'pub const L: &str = "not mine";'].join("\n");
+    expect(() => rustStrConstAfter(indirect, "pub const K")).toThrow(/not bound to a plain string/);
+    expect(() => rustStrConstAfter('pub const K: &str = concat!("a", "b");', "pub const K")).toThrow(
+      /not bound to a plain string/,
+    );
+  });
+
+  it("still accepts the legitimate literal shapes (the complement of the refusal above)", () => {
+    // CPE-1900 rule 2: when you tighten a matcher, write the test that fails the LAZIEST passing
+    // implementation. An over-eager "must be exactly `= \"`" refusal would break both of these, which
+    // are ordinary Rust and carry no indirection at all.
+    expect(rustStrConstAfter('pub const K: &str =\n    "wrapped";', "pub const K")).toBe("wrapped");
+    expect(rustStrConstAfter('pub const K: &str = "a \\"q\\" b";', "pub const K")).toBe('a "q" b');
+  });
+
+  it("reads the real EXPECTED_TAURI_UPDATER_PUBKEY out of the shipped pin", () => {
+    const src = stripRustComments(
+      readFileSync(
+        join(process.cwd(), "crates", "updater-verify", "src", "pinned_pubkey.rs"),
+        "utf8",
+      ),
+    );
+    const pubkey = rustStrConstAfter(src, "pub const EXPECTED_TAURI_UPDATER_PUBKEY");
+    // Deliberately NOT a copy of the key: asserting the value here would re-create the third literal
+    // CPE-1987 deleted. This pins only that a minisign public key was actually read — the base64 of
+    // "untrusted comment: minisign public key: " — and `sidecarBundleResources.test.ts` is where the
+    // value itself is checked, against every shipped build leg's merged config.
+    expect(pubkey.startsWith("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6")).toBe(true);
+    expect(pubkey.length).toBeGreaterThan(80);
+  });
+});
+
+/**
+ * CPE-1987, PR #1108 review SEC-1 — **the three shapes that made a text scan and rustc disagree, each
+ * of which used to derive a decoy SILENTLY.** Demonstrated end to end by the reviewer at that PR's
+ * first head: overlay + `release.yml`'s matrix `args:` + one decoy const, **74/74 passed** with an
+ * attacker root of trust on all six shipped legs.
+ *
+ * Both readers are swept, because `EXPECTED_TAURI_UPDATER_ENDPOINTS` had the identical hole. The
+ * `_LEGACY` and `#[cfg]` shapes are the ones a normal-looking PR could carry; the raw-string shape is
+ * the one that survives comment stripping *by design*, because a raw string is code.
+ *
+ * The complement matters as much as the refusal here: an anchor that is genuinely unique must still
+ * be read, including when a LONGER name that merely contains it is nowhere in the file. The last two
+ * cases pin that, so a lazier "refuse if anything resembles the anchor twice" cannot pass.
+ */
+describe("a non-unique anchor is refused, never guessed (CPE-1987 SEC-1)", () => {
+  const REAL_STR = 'pub const K: &str = "REAL";';
+  const REAL_SLICE = 'pub const E: &[&str] = &["real"];';
+
+  // Each shape says what the DECLARATION match makes of it. Two of the three round-2 shapes are no
+  // longer refusals at all: they stopped being ambiguous once the match had to be a declaration, and a
+  // correct read beats a refusal. Only a genuine second DECLARATION is still refused.
+  const shapes: Array<{ name: string; before: string; verdict: "refuse" | "read" }> = [
+    { name: "a longer name with the anchor as its prefix", before: "_LEGACY", verdict: "read" },
+    {
+      name: "a #[cfg]-gated duplicate that never compiles on this host",
+      before: "cfg",
+      verdict: "refuse",
+    },
+    { name: "the anchor text inside an earlier raw string", before: "raw", verdict: "read" },
+    // CPE-1987 SEC-2, round 3. The two shapes that beat the COUNTING version of this rule: the real
+    // declaration is spelled so it does not match (`pub  const`, which no `cargo fmt --check` job in
+    // this repo would have caught), and the anchor is planted exactly ONCE somewhere stripping
+    // preserves because it is code. Occurrences: 1. The count was satisfied; the attacker value was
+    // derived. Both are now read correctly, because neither decoy is a line-start declaration.
+    { name: "SEC-2 variant D — decoy in a raw string, real decl `pub  const`", before: "D", verdict: "read" },
+    { name: "SEC-2 variant D2 — decoy in a #[doc] attribute, real decl `pub  const`", before: "D2", verdict: "read" },
+    // The complement of D: a decoy written as a real line-start declaration INSIDE a raw string is
+    // indistinguishable from a declaration by this rule, so it must still red rather than be read.
+    { name: "a line-start declaration inside a raw string", before: "rawDecl", verdict: "refuse" },
+  ];
+
+  function plant(kind: string, decl: string, anchor: string, decoy: string): string {
+    const spaced = decl.replace("pub const", "pub  const");
+    if (kind === "_LEGACY") return `${anchor}_LEGACY: ${decoy}\n${decl}`;
+    if (kind === "cfg") return `#[cfg(target_os = "android")]\n${anchor}: ${decoy}\n${decl}`;
+    if (kind === "raw") return `pub const NOTE: &str = r#"see ${anchor}: ${decoy}"#;\n${decl}`;
+    if (kind === "D") return `pub const NOTE: &str =\n    r#"${anchor}: ${decoy}"#;\n${spaced}`;
+    if (kind === "D2") return `#[doc = r#"Example: \`${anchor}: ${decoy}\`"#]\n${spaced}`;
+    return `pub const NOTE: &str = r#"\n${anchor}: ${decoy}\n"#;\n${decl}`;
+  }
+
+  shapes.forEach((shape) => {
+    const expectation =
+      shape.verdict === "refuse"
+        ? "the &str reader refuses rather than deriving the decoy"
+        : "the &str reader reads the REAL declaration, decoy ignored";
+
+    it(`${shape.name} — ${expectation}`, () => {
+      const src = plant(shape.before, REAL_STR, "pub const K", '&str = "DECOY";');
+      if (shape.verdict === "refuse") {
+        expect(() => rustStrConstAfter(stripRustComments(src), "pub const K")).toThrow(
+          /anchor is not unique/,
+        );
+      } else {
+        expect(rustStrConstAfter(stripRustComments(src), "pub const K")).toBe("REAL");
+      }
+    });
+
+    it(`${shape.name} — the &[&str] reader agrees`, () => {
+      const src = plant(shape.before, REAL_SLICE, "pub const E", '&[&str] = &["decoy"];');
+      if (shape.verdict === "refuse") {
+        expect(() => rustStrSliceAfter(stripRustComments(src), "pub const E")).toThrow(
+          /anchor is not unique/,
+        );
+      } else {
+        expect(rustStrSliceAfter(stripRustComments(src), "pub const E")).toEqual(["real"]);
+      }
+    });
+  });
+
+  it("the refusal names the declaration lines, so both candidates are findable", () => {
+    // Title corrected in round 3 (CLAIM-4 minor): the earlier one promised "the line of the SECOND
+    // occurrence", but every shape measured plants the decoy FIRST, so the line named second is the
+    // REAL declaration. Naming both is what is actually useful and what is actually done.
+    const src = [
+      '#[cfg(target_os = "android")]',
+      'pub const K: &str = "DECOY";',
+      'pub const K: &str = "REAL";',
+    ].join("\n");
+    expect(() => rustStrConstAfter(src, "pub const K")).toThrow(/declared at line\(s\) 2, 3/);
+  });
+
+  it("a name that appears ONLY off a declaration line is not found — loudly, not silently", () => {
+    // The safe direction of the declaration match, pinned so nobody 'fixes' it back into a substring
+    // search. Same class as a macro-generated const, or `pub\nconst K`.
+    const src = 'pub const NOTE: &str = r#"pub const K: &str = "DECOY";"#;';
+    expect(() => rustStrConstAfter(src, "pub const K")).toThrow(/anchor not found/);
+  });
+
+  it("a genuinely unique anchor is still read — the complement of the refusal", () => {
+    // The laziest passing implementation of the rule above refuses too much. These two are ordinary
+    // single-declaration files and must keep working, or the guard would have taken the derivation
+    // down with the decoy.
+    expect(rustStrConstAfter(REAL_STR, "pub const K")).toBe("REAL");
+    expect(rustStrSliceAfter(REAL_SLICE, "pub const E")).toEqual(["real"]);
+  });
+
+  it("a decoy sitting in a COMMENT is still handled by stripping, not by this rule", () => {
+    // The two mechanisms are independent and must not be confused for one another: stripping removes
+    // the comment entirely, so only one declaration remains and the live value is read. If this ever
+    // starts throwing "not unique", the strip has stopped running -- a different bug with a different
+    // fix.
+    //
+    // Scope, stated accurately (round 3 minor): on TODAY's `pinned_pubkey.rs` the strip changes no
+    // derived value, so making it the identity leaves `sidecarBundleResources.test.ts` GREEN. The
+    // stripping protection there is prospective and covered by fixtures like this one -- it is not a
+    // live measurement against the shipped file, and must not be described as one.
+    const src = ['// pub const K: &str = "DECOY";', 'pub const K: &str = "REAL";'].join("\n");
+    expect(rustStrConstAfter(stripRustComments(src), "pub const K")).toBe("REAL");
   });
 });

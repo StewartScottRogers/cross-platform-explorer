@@ -85,7 +85,10 @@ gh release edit v0.2.0 --draft=false
 
 The app the installer/`/run` puts on disk is the **sidecar** build (`Cross-Platform Explorer
 (Sidecar)`), so that is the channel auto-update follows. The updater endpoint in
-`src-tauri/tauri.conf.json` is:
+`src-tauri/tauri.conf.json` is quoted below **illustratively — this is not a pin, and nothing reads
+it**. The endpoint is pinned in `crates/updater-verify/src/pinned_pubkey.rs`
+(`EXPECTED_TAURI_UPDATER_ENDPOINTS`), which is the copy that must move on a change; if the two ever
+disagree, that file is right and this line is stale prose:
 
 ```
 https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/latest.json

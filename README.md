@@ -163,15 +163,18 @@ monitor** so the window is always visible; invalid values exit with an error. `c
 5. **Never commit `updater.key`** — it is already covered by `.gitignore`.
 
 **Rotating the key later (CPE-1873):** `plugins.updater.pubkey` (and `.endpoints`, so a rotation
-can't be undercut by silently repointing where the app fetches manifests from) are pinned in THREE
-places, all of which must move together in the same PR:
+can't be undercut by silently repointing where the app fetches manifests from) are pinned once and
+checked from several directions. Only the first bullet holds a value, and it is the only one a
+rotation edits (CPE-1987 — the second bullet used to carry a hand-copied duplicate):
 
 - `crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY` /
   `EXPECTED_TAURI_UPDATER_ENDPOINTS` — checked against the **base** `src-tauri/tauri.conf.json` by
   `cargo test -p cpe-updater-verify` (`ci.yml`, every push/PR to `main`) **and** by the
   `verify-release-artifacts` binary that `release.yml` runs on every tag push.
-- `src/lib/sidecarBundleResources.test.ts`'s pinned-updater-config assertions — checked against the
-  **fully merged** config (base + every `--config` overlay) for each shipped OS, because an overlay
+- `src/lib/sidecarBundleResources.test.ts`'s pinned-updater-config assertions — which **read the two
+  consts above out of `pinned_pubkey.rs` at run time** rather than restating them, and check them
+  against the **fully merged** config (base + every `--config` overlay) for each shipped OS and each
+  release channel — six build legs today, themselves derived from the workflows. An overlay
   file can silently override `plugins.updater.pubkey`/`.endpoints` the same way it can override
   `bundle.resources` (the original CPE-1270/1271 footgun this file guards). This is what actually
   runs before `release-sidecar.yml` — the build every install actually ships — is allowed to build.
@@ -185,11 +188,14 @@ rather than probing filenames: every format, every target, any casing. If you ev
 per-platform config, it may set anything **except** `plugins.updater` — route real key/endpoint
 changes through `tauri.conf.json` so the pins actually see them.
 
-Update all three constants to the new value, rotate the `TAURI_SIGNING_PRIVATE_KEY*` secrets above,
-and state the reason in the PR description. See `pinned_pubkey.rs`'s module doc for the full
+Update `tauri.conf.json` and the two constants in `pinned_pubkey.rs` to the new value — **those two
+files are the whole edit** (CPE-1987; the TypeScript guard reads the constants and follows on its own,
+and adding a *second declaration* of either constant name, `#[cfg]`-gated or merely prefix-sharing, is
+refused rather than guessed at). Rotate the `TAURI_SIGNING_PRIVATE_KEY*` secrets above, and state the
+reason in the PR description. See `pinned_pubkey.rs`'s module doc for the full
 walkthrough and — importantly — **what this does and does not prove**: every one of these checks
-compares two files read from the *same* commit/checkout. A rotation that updates the config and all
-three pins together is perfectly self-consistent and passes every one of them; nothing here consults
+compares two files read from the *same* commit/checkout. A rotation that updates the config and the
+pins together is perfectly self-consistent and passes every one of them; nothing here consults
 a value that lives outside the tagged commit (a repo secret, an org variable, a previously published
 release). That stronger property — proving continuity with the key **users already trust**, not just
 internal agreement within one commit — is exactly what CPE-1873's ticket calls option 2 ("source the
