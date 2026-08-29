@@ -2,13 +2,13 @@
 id: CPE-1502
 title: "EPIC: Network protocol — FTP/FTPS provider (cpe-ftp) ⭐ EASIEST-FIRST new protocol"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Backend
 tags: [epic]
 epic: CPE-616
 created: 2026-08-08
-closed:
+closed: 2026-08-29
 ---
 
 > **Network Filesharing program (parent CPE-616). FIRST net-new protocol — the "do the easiest first" pick.**
@@ -36,3 +36,13 @@ UI wiring (which F2/F3 already provide). Source: suppaftp (crates.io, maintained
 Foundation merged: CPE-1510 keychain + CPE-1511 vfs-route + CPE-1513 sidebar UI. FTP mirrors cpe-sftp/cpe-webdav
 exactly (a sync provider crate wrapping a connection-oriented protocol). Slice: CPE-1514 (cpe-ftp provider crate
 + ftp/ftps scheme in vfs::open + location.rs). Headless-buildable.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH TWO RESIDUALS. 1 child (CPE-1514) Done. Reachable: Network -> Add a connection -> scheme `ftp`.
+
+Verified: `crates/ftp` is a real provider (~2,000 lines, list/stat/read/write/mkdir/delete/rename, 24 unit tests, **no `todo!` or `unimplemented!`**), on suppaftp v10 with `rustls-ring` matching `cpe-sftp`'s backend as the epic specified. Scheme routing, the vfs `open` arm and the port-21 default all ship.
+
+RESIDUAL 1 - **FTPS is unreachable from the UI.** The backend selects TLS purely from the scheme word `ftps`, but `SUPPORTED_SCHEMES` lists only `"ftp"`, so `isSavableScheme("ftps")` is false and the dropdown never offers it - **an FTPS-only server cannot be saved.** The fix is one array entry plus a field hint. This is the one item in this batch a user would hit directly.
+RESIDUAL 2 - `FormAuthKind` offers only password/key/access_key, so `AuthMethod::Anonymous` cannot be picked explicitly; public FTP still works via the blank-username heuristic.
+Not yet E2E-tested against the QNAP NAS (CPE-1518, open and unparented).

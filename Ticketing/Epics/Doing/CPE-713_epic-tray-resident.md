@@ -42,3 +42,16 @@ background quick-launch.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Tray icon/menu + close-to-tray + launch-on-login unbuilt (only QuickAccess model).
+
+## Closeout audit 2026-08-29 - KEEP OPEN
+
+Both children Done. Platform-neutral (Tauri tray API), but incomplete on all three.
+
+**Shipped:** `tray.rs` builds a real tray - quick-access entries, Show/Hide, Quit, `tray://open-folder` events the frontend listens for, and `note_folder` keeping recents fresh. Close-to-tray is opt-in and default off, with a unit test covering all four combinations of tray-present x setting.
+
+**Three gaps, all named in the DoD:**
+1. **Launch-on-login is entirely unbuilt.** No autostart plugin, no `Run` key write, no LaunchAgent - a repo-wide grep returns nothing.
+2. **The tray icon is created unconditionally**, so the DoD line "with the feature off, no tray icon exists" cannot hold. There is no off switch.
+3. **Pinning a folder to the tray is unreachable.** `tray_quick.rs` has `pin`/`unpin`/`remove` but no command or UI calls them - only `touch` is reachable, so the menu can only ever show recents.
+
+Cost: a settings-gated `setup()`, an autostart plugin with reversible registration, and a pin menu item.

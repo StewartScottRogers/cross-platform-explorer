@@ -40,3 +40,17 @@ F1 keychain (CPE-1510) is merged. Building this backend crux next (headless-test
 crates/sftp & crates/webdav harnesses) before the GUI sidebar (CPE-1498), since it's the functional core and
 fully verifiable without eyes-on. Uses CPE-1510's `secret_store::secret_for(name)` for the secret + `known_hosts`
 for host-keys. HARD constraint: `fs_route::require_local` keeps local paths byte-for-byte unchanged.
+
+## Closeout audit 2026-08-29 - KEEP OPEN
+
+1 child (CPE-1511) Done. **A user can browse a remote folder but cannot open, preview, or copy any file on it.**
+
+**Shipped:** `crates/vfs/src/connect.rs` with `connected_provider`, a `ProviderPool` to avoid reconnects, and TOFU host-key refusal. Both `list_dir` and `list_dir_stream` branch on `Route::Remote` under `spawn_blocking`, with remote results streaming over the same channel and cancel registry as local ones. The hard constraint holds: the `Route::Local` arm is the identical pre-existing path, untouched.
+
+**Missing - two halves of the same slice:**
+1. `remote_read` and `remote_stat` exist and are unit-tested but are **called from nowhere** in `src-tauri` (zero hits outside `crates/vfs`). No preview, read or stat command routes remote.
+2. The F6 fold-in never happened: `transfer::{download_tree, upload_tree}` are referenced by **zero** Tauri commands and zero frontend code, and the generated bindings have no remote transfer surface. Nothing reaches the CPE-613 transfer queue.
+
+CPE-1511's own Work Log says this plainly - *"preview/read and transfer command-layer wiring is a later slice on this same epic"* - **and no such ticket was ever filed.**
+
+Cost: roughly one L slice. The same shape as the `list_dir` remote arm, repeated for the read and transfer commands, plus queue wiring for progress and cancel.

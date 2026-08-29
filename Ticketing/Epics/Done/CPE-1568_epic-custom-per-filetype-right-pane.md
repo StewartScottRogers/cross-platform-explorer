@@ -2,12 +2,12 @@
 id: CPE-1568
 title: "EPIC: Custom per-file-type right pane — view + sensible actions tailored to each file type"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 created: 2026-08-10
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed 2026-08-10 (user request).** Umbrella epic — decomposed just-in-time from the file-type-coverage
@@ -65,3 +65,11 @@ payloads stream. Do NOT fork the registry or fold in ContextMenu's boolean-prop 
 PURPOSE.md fast/small/predictable: viewers stream/cap; no heavy deps in the core (heavy format engines go via
 the sidecar pattern, cf. Binary Studio CPE-1561). Reuse the existing provider registry — do NOT fork a parallel
 one. Actions per type must be discoverable (context menu / action bar) and follow MENUS.md.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH ONE RESIDUAL. All 10 children Done.
+
+Verified: the architectural unlock shipped as specified - `PreviewAction`/`PreviewActionCtx`, an optional `actions?: PreviewAction[]` on `PreviewProvider`, and a generic action bar in `PreviewPane.svelte`. **One registry, not a fork**, which was the epic's main risk. All 8 planned slices have a provider entry (json, image, archive, font, notebook, yaml/toml, log) with components and tests. Actions are concrete rather than placeholder. The graceful unknown-type fallback holds: hex provider as last resort, then Details.
+
+RESIDUAL - two parenthetical actions from the slice list never shipped: image "set as wallpaper" and font "install". YAML/TOML has no explicit Validate button, but parse errors surface inline, which covers the intent.

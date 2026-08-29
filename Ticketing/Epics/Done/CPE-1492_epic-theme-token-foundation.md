@@ -2,12 +2,12 @@
 id: CPE-1492
 title: "EPIC: Theme-token foundation — the load-bearing prerequisite for cross-platform theming"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
 created: 2026-08-08
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed 2026-08-08 (sprint PM, theme-engine research pass — see research-library
@@ -55,3 +55,11 @@ tracks OS theme for free and must still match after the palette is restructured 
 
 Dispatch order: {1534 ∥ 1535} → 1536 → 1537. Not decomposed further — CPE-1493 (OS light/dark, the first
 epic that needs a real dark palette) is a follow-up epic once this seam has landed.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit). All 4 children Done.
+
+Verified: `src/app.css` is layered exactly as specified - palette primitives, semantic tokens at bare `:root` as the fallback, duplicated value-identically under `[data-theme="light"]`. `theme.ts` is a small runtime (`resolveTheme`/`applyTheme`/`watchSystemTheme`) with no framework and no new dependency, and `main.ts` stamps `dataset.theme` **before mount** to avoid a flash. Settings -> Appearance ships and persists.
+
+The "no component regressed to hard-coded hex" line is **guarded, not asserted**: `app.css.test.ts` carries a `BASELINE_TOTAL_HEX_OCCURRENCES` ratchet, so the claim is enforced on every push rather than believed.

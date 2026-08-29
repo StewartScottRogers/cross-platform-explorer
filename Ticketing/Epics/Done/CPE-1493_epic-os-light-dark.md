@@ -2,12 +2,12 @@
 id: CPE-1493
 title: "EPIC: OS light/dark detection + real dark palette (follow the system theme)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
 created: 2026-08-08
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed 2026-08-08 (sprint PM, theme-engine research pass).** Activated 2026-08-09 (sprint PM, bench
@@ -56,3 +56,11 @@ compliance) is genuinely subjective — CPE-1539 lands on contrast-test-green an
 attended visual sign-off pass once 1539+1540 are both live, rather than treating headless contrast
 math as a stand-in for taste. CPE-1494/1495/1496 (native accent, window materials, theme-picker a11y)
 remain the follow-up epics, sequenced after this one per the program's own dependency chain.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH ONE RESIDUAL. All 4 children Done.
+
+Verified: a real dark palette is authored (dark primitives plus a `[data-theme="dark"]` semantic layer and hljs overrides), and the contrast guard genuinely asserts - `app.css.dark-contrast.test.ts` plus the solid-fill and accent-text sweeps. OS detection is live via `matchMedia("(prefers-color-scheme: dark)")` with a `change` subscription; matchMedia was chosen over Tauri's `onThemeChanged` **and the reason is documented at the site** (it avoids the Linux flakiness the brief names). The System/Light/Dark picker always allows a manual override.
+
+RESIDUAL - the epic explicitly queued an **attended aesthetic sign-off** of the dark palette, and no record of that pass exists. The file itself warns not to read contrast-green as taste-approved. Headless contrast is green everywhere; only the subjective taste review is outstanding, and it needs a human, not a build.

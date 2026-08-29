@@ -2,13 +2,13 @@
 id: CPE-1497
 title: "EPIC: Network F1 — connection-secret storage in the app (OS keychain)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Backend
 tags: [epic]
 epic: CPE-616
 created: 2026-08-08
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed 2026-08-08 (sprint PM, Network/"mount anything" research — see research-library
@@ -41,3 +41,9 @@ pattern to lift), `crates/server/src/connections.rs` (secret-free profiles), `cr
   Network sidebar.
 Sequence for the program: CPE-1497 (this) → CPE-1498 (Network sidebar) → CPE-1499 (vfs::open command wiring →
 SFTP+WebDAV live).
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit). 1 child (CPE-1510) Done. Reachable: Network sidebar -> click a saved connection -> inline `NetworkSecretPrompt` with a "Remember (store in the OS keychain)" checkbox.
+
+Verified: `secret_store.rs` has `CONNECTION_SECRET_SERVICE = "cpe-connection"` and **no file-backed path at all**, which is the "never plaintext" DoD line met structurally rather than by policy. It reuses the existing `vault_manager::SecretAccess` seam instead of growing a second trait, so `cpe-server` stays keyring-free. The secret genuinely feeds `vfs::open` - `remote_provider_for` passes `SecretAccess` into `connected_provider`, which calls `secret_for`. Deleting a connection also deletes its keychain entry, so no orphan is left behind.

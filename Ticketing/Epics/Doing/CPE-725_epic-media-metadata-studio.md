@@ -90,3 +90,13 @@ ops + photo-map extras.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** EXIF/PDF/video/IPTC/XMP write-back + GPS photo-map + batch ops unbuilt (studio UI + audio ID3/FLAC shipped).
+
+## Closeout audit 2026-08-29 - KEEP OPEN
+
+All 25 children Done - the second-largest epic in the queue. Platform-neutral (pure-Rust codecs, no OS-specific paths).
+
+**Shipped, and it is substantial:** write-back for ID3v2, Vorbis comments, FLAC, EXIF, OGG, WAV, PDF, IPTC, XMP and MP4, with `write_jpeg` chaining EXIF+IPTC+XMP so all three coexist in one file. Undo is real - a checkpoint is created exactly once before the write, batch-safe, and the dialog only claims a checkpoint it actually made. Per-field revert, strip-editable, copy-from-first and apply-to-all across a selection all work. Properties' read-only EXIF is intact and the docs page ships.
+
+**Two DoD items never shipped:**
+1. **Shift-all-timestamps and find/replace batch ops.** A repo-wide grep finds nothing; only strip and copy-from-first exist. These are **small** - they compose over the existing `MetaEdit` pipeline.
+2. **The GPS photo map.** Latitude/longitude are read and written as plain fields, but nothing plots them - no map component, no tile handling. **This is the real work**, because the epic's own open question about offline tiles under the strict CSP was never answered.

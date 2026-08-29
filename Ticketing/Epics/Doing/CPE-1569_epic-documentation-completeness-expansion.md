@@ -75,3 +75,18 @@ Numbering: keep existing `NN-*.md` filenames; NEW pages use category-prefixed sl
 - Reuse the existing `DocsView` + page pipeline; if the corpus grows to hundreds of pages, add navigation/TOC
   + in-docs search as its own slice rather than sprawling flat files.
 - Screenshots (if used) via the gui-smoke harness (CPE-1148), not hand-captured.
+
+## Closeout audit 2026-08-29 - KEEP OPEN
+
+All 8 children Done, and the corpus genuinely grew: **37 pages / ~22k words -> 54 pages / 66,156 words**, every `Section` mapped, no stub pages left (thinnest is 210 words). Every Tier-1 MISSING page and every Tier-2 THIN item from the original audit now exists.
+
+A new guard shipped too: `src/docs.coverage.test.ts` reds when a new `*Dialog.svelte` has no doc mention - **and its allowlist-doesn't-rot test is what proves the gaps below are still real today rather than stale entries.**
+
+**Why it stays open: the epic's own instrument enumerates the remainder.**
+
+1. **13 shipped user-facing dialogs have no doc page**, sitting in `KNOWN_GAPS_ALLOWLIST`, which the file itself says CPE-1569's content slices close one at a time: ColorRules, ContentIndexSearch, FileNameSearch, InspectCrypto, KeyboardBindings, PasswordPrompt, RepairLink, ShredConfirm, SignCert, TransferConflict, VaultCreate, WatchRules, Workspaces. (A 14th, PatternSelect, is a documented false positive - ignore it.) The ones a user would hit first: **Workspaces, Color Rules, Watch rules, Content-index search, Find-by-name.**
+2. **Spotlight is undocumented** - the component and its hotkey settings ship, and the string "Spotlight" appears in **no** docs page. This was slice 11 and was never filed as a child.
+3. **Slice 12, the screenshot pass, never ran** - 0 of 54 pages contain an image.
+4. Minor: `05-agent-grid.md` is 210 words for a shipped Section; the depth pass covered Agent *Deck*, not the Grid.
+
+Cost to close: two content tickets (one for the 13 dialogs, one for Spotlight + Agent Grid depth), each retiring allowlist entries. Slice 12 is optional and can be dropped explicitly.

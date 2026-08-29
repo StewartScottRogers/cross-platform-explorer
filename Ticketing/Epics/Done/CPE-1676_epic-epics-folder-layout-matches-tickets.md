@@ -2,12 +2,12 @@
 id: CPE-1676
 title: "EPIC: Give the Epics queue the same status-folder layout as Tickets"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 created: 2026-08-12
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed + activated 2026-08-12** by the user, mid-sprint, with screenshots of both folders side by side.
@@ -138,3 +138,15 @@ Both predate this epic and were invisible until the boards were run side by side
   and a third guard test now fails on any epic that isn't `epic`-tagged.
 - **CPE-547** (`Tickets/Done/`) is a shipped, closed epic whose `status:` still read `In Progress`, so
   both boards showed it as active work. Fixed to `status: Done` + `closed:`.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit). Delivered directly in commit `9339670c` (2026-08-14) with no child tickets filed.
+
+Verified rather than assumed: `Ticketing/Epics/` holds exactly the five status folders and ZERO loose `.md` (the pre-migration shape), each carrying a `wiki.md` so empty folders survive a clone. `src/lib/epicsQueueLayout.test.ts` asserts no-loose-file, exactly-five-dirs, non-vacuous, and `status:` matching folder, plus the bonus epic-tag guard from the CPE-862 finding — ran it, 3/3 green.
+
+**All four readers confirmed on the new layout**, which was the real risk: a missed reader would make the board silently LIE rather than error. (1) `crates/server/src/ticket_board.rs` `epic_status_for_folder` with its unit test; (2) `src-tauri/src/lib.rs` `board_epics_impl`, which also still surfaces pre-migration closed epics from `Tickets/Done/`; (3) `sidecar/agent-board/src/board.rs`, its own `epic_status_for_folder` plus fixtures writing all five folders; (4) `ticket_mcp.rs` `walk_md` recurses `Ticketing/` wholesale, so it is depth-agnostic and the migration could not break it.
+
+The flat-`Epics/Done/` decision the epic asked to be recorded is explicit in `ticketing-organize.md`, which scopes date-nesting to `Tickets/Done/` only. `git log --follow` resolves through the migration commit, so history survived the `git mv`.
+
+Residual: none material. One acceptance line asked the boards be verified "by running them"; this audit verified via their unit tests and code rather than a live board launch — that live verification was done at implementation time, which is where the CPE-862 / CPE-547 findings recorded in this epic came from.

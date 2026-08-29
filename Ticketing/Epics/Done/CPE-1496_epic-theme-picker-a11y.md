@@ -2,12 +2,12 @@
 id: CPE-1496
 title: "EPIC: Theme picker + built-in themes + high-contrast / a11y"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
 created: 2026-08-08
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed 2026-08-08 (sprint PM, theme-engine research pass).** Activated 2026-08-09 (sprint PM, bench
@@ -70,3 +70,12 @@ portal read), justified the same way CPE-1494's own brief accepts it for the ide
 portal read; CPE-1494/1495 remain dormant, unpicked this sprint (native accent needs a live per-OS
 subscription like the one just deferred here; window materials/vibrancy is inherently attended/visual,
 declined for lights-out work per the sprint brief).
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH TWO RESIDUALS. All 4 children Done.
+
+Verified: high-contrast palettes are authored for both `hc-light` and `hc-dark` with their own contrast guards. Contrast is a **genuinely orthogonal axis** (`ContrastSetting = system|off|high`, composed as `hc-${base}`), not a fourth theme. The OS signal is real on all three platforms - Windows `SPI_GETHIGHCONTRAST`, macOS `accessibilityDisplayShouldIncreaseContrast`, Linux a timeout-bounded zbus read of `org.freedesktop.appearance/contrast` that fails to false. "Picker stays minimal, no marketplace" holds: two selects are the whole surface.
+
+RESIDUAL 1 - the OS high-contrast read is **one-shot at boot**. Flipping Windows high contrast while the app runs does nothing until relaunch. Deliberately descoped in CPE-1546 and **honestly stated in `35-appearance.md`**, so it is disclosed rather than silently broken.
+RESIDUAL 2 - macOS `accessibilityDisplayShouldReduceTransparency` and its change notification are named in Scope and are read nowhere.

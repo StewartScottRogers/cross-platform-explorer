@@ -2,13 +2,13 @@
 id: CPE-1517
 title: "EPIC: Network — LAN device & service discovery (auto-find NAS/servers: mDNS + SSDP/UPnP + SMB browse)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 epic: CPE-616
 created: 2026-08-09
-closed:
+closed: 2026-08-29
 ---
 
 > **ACTIVATED 2026-08-09 (Sprint, decide-and-log).** Decomposed just-in-time. Windows-native leg already
@@ -75,3 +75,11 @@ plain explorer is untouched.
 - **rsync** (QNAP supports it, port 873) and **AFP** (QNAP supports it, port 548, but Apple-deprecated in
   favour of SMB) are separate low-priority protocol candidates — capture as their own epics only if demand is
   real; do not fold into discovery.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH ONE RESIDUAL. All 4 children Done. Reachable: the "Discovered on your network" tier in the left pane, each row a one-click pre-filled Add-a-connection.
+
+Verified: v1 is Windows-native WNet enumeration behind `#[cfg(windows)]` with a non-Windows empty-Vec stub; v2 is cross-platform mDNS over 6 service types, and `map_mdns_service` **deliberately rejects `_afpovertcp`/`_http`/`_qnap` because no provider stands behind them** - advertising them would be a lie. Results merge and dedupe against saved connections and existing `net use` shares. CPE-1524's gate correctly withholds the Add affordance from an mDNS `nfs://` row that has no provider yet.
+
+RESIDUAL - discovery is neither opt-in, streamed, nor cancellable, contrary to the epic's "opt-in and quiet / streams results as they arrive" bullets: it fires unconditionally at startup and awaits both blocking sweeps before painting. Bounded at 6 s and fire-and-forget, so there is no visible hang. v3 SSDP/UPnP was explicitly staged as dormant and is not a gap.

@@ -77,3 +77,17 @@ Not actively being worked: all decomposed child tickets are Done. Remaining DoD 
 best-effort `xdg-mime`/`update-desktop-database`), mirroring the Windows registry glue. Windows + Linux
 now both apply end-to-end at the backend. **Remaining:** default-file-manager handshake (deferred), macOS
 apply glue (Mac-gated).
+
+## Closeout audit 2026-08-29 - KEEP OPEN
+
+All 8 children Done. Windows partial / Linux partial / macOS not implemented.
+
+**Shipped:** `shell_menu.rs` `windows_shell_plan` registers three HKCU verb surfaces (`Directory`, `Directory\Background`, `Drive`), with `every_installed_root_key_is_removed_on_uninstall` proving no registry residue. Linux glue writes and removes the `.desktop` file with best-effort `xdg-mime`. Default-file-manager registration ships with commands and a Settings UI; macOS is shown disabled with a "coming soon" note.
+
+**THE HEADLINE DEFECT - the registered verb does not open the clicked folder.** Both plans invoke the exe with a bare positional (`"{exe}" "%1"` on Windows, `Exec="{exe}" %F` on Linux), but the app only accepts `--open <dir>`. tauri-plugin-cli 2.4.1 returns `Err` on an undeclared positional, so `.ok()?` yields `None` and **the app launches at its default location instead of the folder you right-clicked.**
+
+The cause is a sequencing miss, not a design flaw: the shell verbs were written (CPE-1019/1020) *before* `--open` existed (CPE-1043) and the two were never reconciled. **The fix is one literal in each of two plan functions, plus a test.**
+
+Second gap: macOS has a `macos_shell_plan` that emits plist fragments but no apply glue - `install_shell_integration` returns an error off Windows/Linux.
+
+Not verifiable here: that the entry actually appears in Explorer after opt-in was confirmed only at the registry / `.desktop` level, not visually - that needs the built app.
