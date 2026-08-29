@@ -11,50 +11,49 @@
 // The app the user actually runs is the release-sidecar.yml build: the base `tauri.conf.json`
 // with a chain of `--config` overlays applied on top, in a specific order. Nothing verified that
 // the FINAL merged `bundle.resources` still contains every resource the runtime code resolves —
-// this test is that guard. It mirrors the exact overlay chain release-sidecar.yml's
-// `release-sidecar` job passes to `tauri-action` for each shipped OS (see its matrix + the
-// `args:` line under "Build and publish sidecar-enabled release").
+// this test is that guard.
+//
+// CPE-1900 — that chain used to be a `CONFIG_CHAIN` LITERAL here, with a comment asking the reader
+// to "keep this in lockstep" with `release-sidecar.yml`. Nothing read the workflow, so a fifth
+// `--config` overlay would have shipped into the config every install runs on while this file stayed
+// green and narrower than it looked. It is now derived — see the two-halves note on
+// {@link configChainForLeg}, which states which half is derived and which is enumerated.
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { stripRustComments, rustStrSliceAfter } from "./rustSource";
 import guardCases from "./platformConfigGuard.cases.json";
+import {
+  BASE_CONFIG,
+  TAURI_PROJECT_DIR,
+  deriveBuildLegs,
+  type BuildLeg,
+  type ShipOS,
+} from "./tauriConfigChain";
 
-const SRC_TAURI = join(process.cwd(), "src-tauri");
-
-type ShipOS = "windows" | "linux" | "macos";
+const SRC_TAURI = join(process.cwd(), TAURI_PROJECT_DIR);
 
 /**
- * The exact `--config` overlay chain release-sidecar.yml applies per shipped OS, base config
- * first (base is always implicit — tauri-action loads `tauri.conf.json` before any `--config`
- * overlay is applied). Keep this in lockstep with `.github/workflows/release-sidecar.yml`'s
- * `release-sidecar` job matrix (`overlay` / `pdfium_overlay`) and its `args:` line — if that
- * workflow's overlay chain changes, update this list to match or the guard stops reflecting what
- * actually ships.
+ * Every `tauri-action` build in the repo, matrix-expanded, with its `--config` overlay chain read out
+ * of the workflow's own `args:` — see `src/lib/tauriConfigChain.ts`. Derived at module load, so a
+ * discovery that comes back near-empty (or a workflow this guard cannot understand) fails collection
+ * loudly instead of leaving every assertion below sweeping nothing.
+ *
+ * This covers BOTH release channels, not just the sidecar one. The plain `release.yml` passes no
+ * `--config` overlay today, so its chain is the base config alone — but that is now a MEASUREMENT
+ * rather than an assumption, and the day someone adds an overlay there the updater pin below extends
+ * to it with nobody editing anything.
  */
-const CONFIG_CHAIN: Record<ShipOS, string[]> = {
-  windows: [
-    "tauri.conf.json",
-    "tauri.sidecar.conf.json",
-    "tauri.sidecar.windows.conf.json",
-    "tauri.sidecar.pdfium.windows.conf.json",
-  ],
-  linux: [
-    "tauri.conf.json",
-    "tauri.sidecar.conf.json",
-    "tauri.sidecar.unix.conf.json",
-    "tauri.sidecar.pdfium.linux.conf.json",
-  ],
-  macos: [
-    "tauri.conf.json",
-    "tauri.sidecar.conf.json",
-    "tauri.sidecar.unix.conf.json",
-    "tauri.sidecar.pdfium.macos.conf.json",
-  ],
-};
+const BUILD_LEGS: BuildLeg[] = deriveBuildLegs();
 
-function loadConfig(fileName: string): unknown {
-  return JSON.parse(readFileSync(join(SRC_TAURI, fileName), "utf8"));
+/** The channel `/run` installs and every install auto-updates from ([[always-install-sidecar-build]]). */
+const SIDECAR_WORKFLOW = ".github/workflows/release-sidecar.yml";
+
+/** The sidecar channel's legs, one per shipped OS. */
+const SIDECAR_LEGS: BuildLeg[] = BUILD_LEGS.filter((l) => l.workflow === SIDECAR_WORKFLOW);
+
+function loadConfig(repoRelativePath: string): unknown {
+  return JSON.parse(readFileSync(join(process.cwd(), repoRelativePath), "utf8"));
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -80,21 +79,113 @@ function mergeJson(base: unknown, overlay: unknown): unknown {
   return overlay;
 }
 
-/** The FULL merged config (base + every `--config` overlay, in order) for a shipped OS — the config
- *  that actually governs the release-sidecar.yml build for that OS. Shared by every guard in this
- *  file that needs to know what a shipped install's config really ends up containing. */
-function mergedConfig(os: ShipOS): Record<string, unknown> {
-  const configs = CONFIG_CHAIN[os].map(loadConfig);
+/**
+ * Every config file Tauri merges AUTOMATICALLY for one platform, with no `--config` flag — repo-
+ * relative, sorted. See the CPE-1903 block further down for the mechanism
+ * (`tauri-utils::config::parse::read_from`) and for why this is a directory LISTING classified by
+ * shape rather than a lookup of remembered filenames.
+ *
+ * Today this returns `[]` for every OS: no such file exists in the tree. That is the point — it is a
+ * measurement of the directory on each run, so the day one appears it enters the chain below instead
+ * of being invisible to it.
+ *
+ * Fail-closed twice over. TWO files for the same platform throws, because Tauri's `do_parse` falls
+ * through json -> json5 -> toml and picks one, and a guard that merged both would be describing a
+ * build nobody runs. A single file that is not strict JSON also throws, because no JSON5/TOML parser
+ * is carried here on purpose (same decision as `platformConfigUpdaterRefusal`) and silently skipping
+ * a file Tauri merges is precisely the failure this whole file exists to stop.
+ *
+ * **RED-PROOFED — this half can fire, and it fires somewhere new (2026-08-28, measured locally, every
+ * fixture deleted afterwards).** Before CPE-1900 the auto-merged half was covered ONLY by the CPE-1903
+ * refusal further down; it never entered a merged config, so the pins could not see it.
+ *
+ *   - `src-tauri/tauri.windows.conf.json` holding an attacker `plugins.updater` block: **5 failed /
+ *     36 passed**, and crucially the merged-config pin is now among them — both *windows* legs
+ *     (sidecar and plain) red on pubkey and endpoints, plus the CPE-1903 refusal. Only windows,
+ *     which is correct: that file governs no other platform's build.
+ *   - `src-tauri/Tauri.linux.toml` (a format this guard deliberately cannot parse): **8 failed / 33
+ *     passed**, refused rather than skipped.
+ *   - `tauri.macos.conf.json` and `tauri.macos.conf.json5` together: **8 failed / 33 passed**, the
+ *     ambiguity refused rather than guessed at.
+ */
+function autoMergedPlatformConfigs(os: ShipOS): string[] {
+  const matches = readdirSync(SRC_TAURI)
+    .filter(
+      (name) => isAutoMergedPlatformConfigName(name) && asciiLower(name).split(".")[1] === os,
+    )
+    .sort();
+  if (matches.length > 1) {
+    throw new Error(
+      `${os}: src-tauri/ holds ${matches.length} auto-merged per-platform config files ` +
+        `(${matches.join(", ")}). Tauri picks ONE of json/json5/toml, so which of these governs the ` +
+        `shipped build is ambiguous and this guard refuses to guess. Delete all but one.`,
+    );
+  }
+  for (const name of matches) {
+    try {
+      JSON.parse(readFileSync(join(SRC_TAURI, name), "utf8"));
+    } catch (err) {
+      throw new Error(
+        `${os}: ${name} is a config Tauri merges automatically into the shipped build, and it is not ` +
+          `strict JSON (${err instanceof Error ? err.message : String(err)}). This guard carries no ` +
+          `JSON5/TOML parser on purpose, so it cannot compute the merged config — refused rather ` +
+          `than skipped (CPE-1900/CPE-1903).`,
+      );
+    }
+  }
+  return matches.map((name) => `${TAURI_PROJECT_DIR}/${name}`);
+}
+
+/**
+ * THE model of "what config does the shipped app actually run on", for one build leg — repo-relative
+ * paths in the exact order Tauri applies them. RFC 7396 merge is order-dependent, so this is a
+ * sequence, never a set.
+ *
+ * **It has two halves, and they are covered by two different mechanisms. Saying which is which is the
+ * point of this comment (CPE-1900).**
+ *
+ *  1. **DERIVED** — the `--config` overlays, read out of `release-sidecar.yml`'s own `args:` by
+ *     `src/lib/tauriConfigChain.ts` (structural YAML parse, matrix expanded). Nothing here is copied;
+ *     an overlay added to the workflow enters this chain on the same commit.
+ *  2. **ENUMERATED** — the auto-merged `tauri.<platform>.conf.*`, which Tauri reads with NO flag at
+ *     all. This half CANNOT be derived from the workflow: there is no flag in `args:` to read, by
+ *     construction. It is instead a listing of `src-tauri/` classified by shape
+ *     ({@link isAutoMergedPlatformConfigName}, whose platform-token list is itself read out of the
+ *     Rust guard), which is the CPE-1932 answer when derivation is impossible.
+ *
+ * Order between the two halves is Tauri's: `read_from` merges the per-platform file onto the base
+ * before the CLI applies a single `--config`, so it sits between them.
+ *
+ * **What NEITHER half covers — AT LEAST these, and the list is open.** A closed count of blind spots
+ * is a claim like any other, and this repo has been wrong about one twice (CLAUDE.md, CPE-1933 rule 2,
+ * round 9). Known today:
+ *
+ *   - A config supplied at build time by something that is not a committed file: a runner-side patch
+ *     of `tauri.conf.json` (`release.yml` really does patch `bundle.windows` for code signing), or a
+ *     `TAURI_CONFIG` environment variable. A property of the runner, not of the tree — no test reading
+ *     this checkout can see either.
+ *   - A build not driven by a `uses: tauri-apps/tauri-action` step with its overlays in `with.args`.
+ *     `src/lib/tauriConfigChain.ts`'s header lists the four shapes measured to yield zero legs
+ *     silently (a bare `run: npx tauri build --config …`, a composite action, a reusable-workflow
+ *     call, tauri-action's `tauriScript:`) and says why the floors do not catch them.
+ */
+function configChainForLeg(leg: BuildLeg): string[] {
+  return [BASE_CONFIG, ...autoMergedPlatformConfigs(leg.os), ...leg.overlays];
+}
+
+/** The FULL merged config for one build leg — the config that actually governs that shipped build. */
+function mergedConfig(leg: BuildLeg): Record<string, unknown> {
+  const configs = configChainForLeg(leg).map(loadConfig);
   const merged = configs.reduce((acc, cfg) => mergeJson(acc, cfg));
   if (!isPlainObject(merged)) {
-    throw new Error(`${os}: merged tauri config chain did not produce a JSON object`);
+    throw new Error(`${leg.where}: merged tauri config chain did not produce a JSON object`);
   }
   return merged;
 }
 
-/** Final `bundle.resources` value (array | object | undefined) after applying an OS's full overlay chain. */
-function mergedBundleResources(os: ShipOS): unknown {
-  const merged = mergedConfig(os);
+/** Final `bundle.resources` value (array | object | undefined) after applying a leg's full chain. */
+function mergedBundleResources(leg: BuildLeg): unknown {
+  const merged = mergedConfig(leg);
   return isPlainObject(merged.bundle) ? merged.bundle.resources : undefined;
 }
 
@@ -160,10 +251,22 @@ const REQUIRED_RESOURCES: RequiredResource[] = [
 ];
 
 describe("shipped sidecar bundle — every runtime-required resource is bundled (CPE-1271)", () => {
-  (["windows", "linux", "macos"] as const).forEach((os) => {
-    it(`${os}: merged bundle.resources includes every REQUIRED_RESOURCES entry`, () => {
-      const destinations = resourceDestinations(mergedBundleResources(os));
-      const missing = REQUIRED_RESOURCES.map((r) => ({ ...r, dest: r.dest(os) })).filter(
+  // CPE-1900: the legs are DERIVED, so this refusal is what stops the derivation from quietly
+  // returning fewer builds than ship. A guard that sweeps two OSes reports the same green as one that
+  // sweeps three.
+  it("the sidecar channel derives exactly one build leg per shipped OS", () => {
+    expect(
+      SIDECAR_LEGS.map((l) => `${l.os} (${l.runner})`).sort(),
+      `${SIDECAR_WORKFLOW} did not derive one tauri-action build leg per shipped OS. Either the ` +
+        `workflow's matrix changed, or src/lib/tauriConfigChain.ts stopped recognising its build ` +
+        `step — both leave a shipped OS guarded by nothing while this file stays green.`,
+    ).toEqual(["linux (ubuntu-latest)", "macos (macos-latest)", "windows (windows-latest)"]);
+  });
+
+  SIDECAR_LEGS.forEach((leg) => {
+    it(`${leg.os}: merged bundle.resources includes every REQUIRED_RESOURCES entry`, () => {
+      const destinations = resourceDestinations(mergedBundleResources(leg));
+      const missing = REQUIRED_RESOURCES.map((r) => ({ ...r, dest: r.dest(leg.os) })).filter(
         (r) => !destinations.has(r.dest),
       );
       expect(
@@ -171,8 +274,8 @@ describe("shipped sidecar bundle — every runtime-required resource is bundled 
         missing
           .map(
             (r) =>
-              `${os}: the shipped sidecar bundle would NOT include "${r.dest}" — ${r.id}, resolved at ` +
-              `runtime by ${r.consumer}`,
+              `${leg.os}: the shipped sidecar bundle would NOT include "${r.dest}" — ${r.id}, ` +
+              `resolved at runtime by ${r.consumer}. Chain: ${configChainForLeg(leg).join(" -> ")}`,
           )
           .join("\n"),
       ).toEqual([]);
@@ -189,18 +292,216 @@ describe("shipped sidecar bundle — every runtime-required resource is bundled 
   });
 });
 
+/** Every ordering of `items`. Small by construction — the real chains are 4 entries, 24 orderings. */
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  return items.flatMap((item, i) =>
+    permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
+  );
+}
+
+/**
+ * A key-order-INDEPENDENT rendering of a merged config, for asking "is this the same configuration?".
+ *
+ * A plain `JSON.stringify` is the wrong oracle here and the difference is not academic: `mergeJson`
+ * spreads the base and then assigns the overlay's keys, so merging the same files in a different order
+ * yields the same configuration with its keys in a different insertion order.
+ *
+ * Measured while writing this, **per leg, because the gap is not the same on each and quoting one
+ * leg's number as the chain's would repeat the very error this function exists to fix** (of 24
+ * orderings): `JSON.stringify` calls **21** "different" on all three legs, while the canonical
+ * comparison finds **16 / 12 / 12** (windows / linux / macos) — so **5 / 9 / 9** of them differ in key
+ * insertion order alone. Any of those raw 21s would have been quoted as evidence that ordering
+ * matters more than it does.
+ */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (isPlainObject(v)) {
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "undefined";
+}
+
+/**
+ * CPE-1900 — the chain is a SEQUENCE, and both halves of that (which files, in which order) have to be
+ * guarded separately.
+ *
+ * The membership half is structural: `deriveBuildLegs` reads the workflow, so a `--config` overlay
+ * added there enters the chain with nobody editing anything. The ORDER half is the one a derivation
+ * can still get wrong on its own — a `.sort()`, a `reverse()`, a de-dupe, a `Set` round-trip — and
+ * every one of those produces a chain with exactly the right membership and a DIFFERENT merged config
+ * than the one that ships. A membership-only check calls that correct.
+ *
+ * **RED-PROOFED, both halves separately (2026-08-28, measured locally on this commit; every sabotage
+ * reverted, `git status --porcelain` clean afterwards).**
+ *
+ *  - MEMBERSHIP, sabotage 1 — a fourth `--config` overlay added to `release-sidecar.yml`'s `args:`
+ *    naming a file that is not committed. RED across the two test files: **13 failed / 49 passed of
+ *    62**, each failure printing the full derived chain and naming
+ *    `src-tauri/tauri.sidecar.injected.conf.json`.
+ *  - MEMBERSHIP, sabotage 2 — the same fourth overlay, this time with the file present and carrying
+ *    an attacker `plugins.updater.pubkey`/`.endpoints`. This is the one that matters: the overlay
+ *    SHIPS and rewrites the root of trust. RED: **6 failed / 56 passed**, exactly the three shipped
+ *    OSes x {pubkey, endpoints}.
+ *    **And the measurement that says why this ticket existed:** with that same sabotage in place, the
+ *    OLD hand-copied guard — `git show HEAD:src/lib/sidecarBundleResources.test.ts`, run unmodified —
+ *    was **20 passed / 20, exit 0**. A green suite over a shipping build whose updater key belongs to
+ *    someone else.
+ *  - ORDERING, sabotaged separately from membership so the pair is not proved by one change. Making
+ *    `configOverlaysFromArgs` return `[...out].sort()`: **3 failed / 38 passed** in this file, all
+ *    three in the describe block below, naming both orders — and every membership assertion (the
+ *    resource guard, the updater pin) stayed GREEN, which is the AC's point restated as a
+ *    measurement. `[...out].reverse()`: identical, 3 failed / 38 passed here plus 3 in
+ *    `tauriConfigChain.test.ts`.
+ *    Note WHY membership stays green under a reversal, because it bounds what this leg proves: the
+ *    base config is prepended by `configChainForLeg` and so stays first, and all 6 base-first
+ *    orderings of today's chain agree (measured below). The ordering leg is therefore the only thing
+ *    standing between a reordered chain and a silent pass.
+ *
+ * The last test below is the one that stops this pair from being decorative. An ordering guard over a
+ * chain whose merge happens to be order-INVARIANT proves nothing, and it would read exactly like this
+ * one. So it measures, per leg, how many of the chain's 24 orderings actually compute a different
+ * merged config from the shipped one — and refuses if the answer is zero.
+ */
+describe("the config chain is DERIVED from the release workflows, and its ORDER is load-bearing (CPE-1900)", () => {
+  BUILD_LEGS.forEach((leg) => {
+    it(`${leg.where}: the derived overlay COUNT is the number of --config flags in the args`, () => {
+      // Nothing counted overlays before (Reviewer, F6): dropping the FIRST overlay from the chain
+      // left this file at 40/41, and the single red was the order-vacuity test — which caught it only
+      // INCIDENTALLY, because a 3-file chain still has orderings that differ. Dropping the LAST one
+      // red 9 tests, for unrelated reasons. A guard whose failure depends on which element went
+      // missing is not counting; it is noticing side effects.
+      //
+      // RED-PROOFED (2026-08-28): with `configOverlaysFromArgs` returning `out.slice(1)`, this file
+      // goes to 4 failed / 43 passed and three of those four are THIS assertion, one per sidecar leg,
+      // each printing "the derived chain has 2 overlay(s) but the workflow passes 3 --config
+      // flag(s)" with both lists. Before this test the same sabotage was 40/41. Reverted.
+      //
+      // A regex sweep of the flag occurrences, not another token walk — the same "different
+      // mechanism" discipline as the ordering assertion below.
+      const flagCount = (leg.args.match(/(?:^|\s)(?:--config|-c)(?:=|\s)/g) ?? []).length;
+      expect(
+        leg.overlays.length,
+        `${leg.where}: the derived chain has ${leg.overlays.length} overlay(s) but the workflow ` +
+          `passes ${flagCount} --config flag(s).\n  derived: ${leg.overlays.join(", ") || "(none)"}` +
+          `\n  args:    ${leg.args}\n` +
+          `An overlay the extractor drops is a file that SHIPS into the merged config with no ` +
+          `assertion over it at all — the exact shape of the bug this ticket closed.`,
+      ).toBe(flagCount);
+    });
+
+    it(`${leg.where}: the derived overlay order is the workflow's own order`, () => {
+      // A DIFFERENT mechanism from the tokenizer that produced the list: substring position in the
+      // leg's own resolved `args:` string. Re-running the token walk cannot notice a token walk that
+      // sorts; a positional scan can.
+      const positions = leg.overlays.map((p) => leg.args.indexOf(p));
+      expect(
+        positions.filter((p) => p < 0),
+        `${leg.where}: a derived overlay path does not appear in the args string it was derived ` +
+          `from -- the extractor is rewriting paths. args: ${leg.args}`,
+      ).toEqual([]);
+      const inArgsOrder = [...leg.overlays].sort(
+        (a, b) => leg.args.indexOf(a) - leg.args.indexOf(b),
+      );
+      expect(
+        leg.overlays,
+        `${leg.where}: the derived --config chain is not in the order the workflow passes it.\n` +
+          `  derived:  ${leg.overlays.join(" -> ")}\n` +
+          `  workflow: ${inArgsOrder.join(" -> ")}\n` +
+          `RFC 7396 merge is order-dependent, so a reordered chain computes a config that is NOT the ` +
+          `one that ships, while every membership check stays green.`,
+      ).toEqual(inArgsOrder);
+    });
+
+    it(`${leg.where}: every file in the merged chain exists and is strict JSON`, () => {
+      const chain = configChainForLeg(leg);
+      const broken = chain.filter((p) => {
+        try {
+          loadConfig(p);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      expect(
+        broken,
+        `${leg.where}: the release workflow passes config file(s) that cannot be read as JSON from ` +
+          `this checkout: ${broken.join(", ")}. Full chain: ${chain.join(" -> ")}. Either the ` +
+          `workflow names a file that is not committed, or a committed config is malformed -- both ` +
+          `mean the build this guard describes is not the build that runs.`,
+      ).toEqual([]);
+      expect(chain[0], `${leg.where}: the base config must be first in the chain`).toBe(BASE_CONFIG);
+      expect(
+        new Set(chain).size,
+        `${leg.where}: the chain repeats a file: ${chain.join(" -> ")}`,
+      ).toBe(chain.length);
+    });
+  });
+
+  // Does the order actually MATTER for the real chains, or is this file's ordering guard decorative?
+  // Measured rather than assumed — CLAUDE.md, "do not name a backstop without checking it can fire".
+  //
+  // MEASURED 2026-08-28 on this commit, key-order-independent (see `canonicalJson`): of the 24
+  // orderings of each sidecar leg's 4-file chain, **16 (windows) / 12 (linux) / 12 (macos)** compute a
+  // genuinely different merged config than the shipped order. So the guard above can fire.
+  //
+  // The same run says something the assertion alone would not, and it is the more useful half. All
+  // **6** base-first orderings agree with the shipped one, on every OS. Today's three overlays write
+  // DISJOINT keys — `tauri.sidecar.conf.json` sets productName/identifier/createUpdaterArtifacts, the
+  // per-OS one sets bundle.targets + an OBJECT-form bundle.resources, the pdfium one adds two more
+  // keys to that same object — so they commute with each other, and the only position that is
+  // load-bearing right now is the base's: its ARRAY-form `bundle.resources` either replaces the
+  // overlays' object or is replaced by it, which is CPE-1270's footgun deciding the answer.
+  //
+  // That is exactly why the assertion above pins the FULL SEQUENCE and not just "base first". Overlay
+  // commutativity is a property of today's three files, not of the mechanism; the first overlay that
+  // writes a key another overlay also writes makes them non-commutative, silently, and nothing would
+  // announce it. A guard scoped to what is load-bearing today would have to be widened by whoever
+  // adds that file — which is the kind of "remember to update the guard" this ticket exists to delete.
+  //
+  // release.yml's legs have a 1-file chain -- 1 ordering, nothing to permute -- so they are excluded
+  // rather than silently counted as "0 differing", which would read as a failure of this measurement
+  // instead of a chain with no order to get wrong.
+  it("reordering the real chain really does change the merged config (so the guard above can fire)", () => {
+    const multiFile = BUILD_LEGS.filter((leg) => configChainForLeg(leg).length > 1);
+    expect(
+      multiFile.length,
+      "no derived build leg has a multi-file config chain, so the ordering guard above is vacuous",
+    ).toBeGreaterThanOrEqual(3);
+    for (const leg of multiFile) {
+      const chain = configChainForLeg(leg);
+      const shipped = canonicalJson(mergedConfig(leg));
+      const differing = permutations(chain).filter((order) => {
+        const merged = order.map(loadConfig).reduce((acc, cfg) => mergeJson(acc, cfg));
+        return canonicalJson(merged) !== shipped;
+      }).length;
+      expect(
+        differing,
+        `${leg.where}: NONE of the ${chain.length}! orderings of its config chain produces a ` +
+          `different merged config, so this file's ordering assertions cannot fail and must not be ` +
+          `read as coverage. Chain: ${chain.join(" -> ")}`,
+      ).toBeGreaterThan(0);
+    }
+  });
+});
+
 // CPE-1873 (round 2 — independent Security Auditor, DEMONSTRATED not inferred): the updater
 // root-of-trust pin in crates/updater-verify only ever reads the BASE `tauri.conf.json`. The build
-// every install actually ships is release-sidecar.yml's: base config + this file's own `CONFIG_CHAIN`
-// of `--config` overlays. Tauri's `--config` merge (RFC 7386 recursive object merge — the same
+// every install actually ships is release-sidecar.yml's: base config + the `--config` overlay chain
+// derived from that workflow. Tauri's `--config` merge (RFC 7386 recursive object merge — the same
 // mechanism the guard above proves overrides `bundle.resources`, CPE-1270) lets any overlay in that
 // chain override `plugins.updater.pubkey` / `.endpoints` too. Proven: adding an updater override block
 // to `tauri.sidecar.conf.json` alone (base file untouched) left crates/updater-verify's entire test
 // suite green, including its base-config pin, while the actual shipped sidecar channel's root of trust
 // was attacker-controlled. This guard checks the full merged `--config` overlay chain instead, so an
-// override anywhere in CONFIG_CHAIN is caught regardless of which file introduced it. It does NOT (by
-// itself) cover a config file Tauri merges automatically outside of `--config` entirely — see the
-// separate describe block below (CPE-1873 finding 6) for that.
+// override anywhere in the chain is caught regardless of which file introduced it. CPE-1900 made that
+// chain derived rather than copied, and widened this from the three sidecar OSes to every derived
+// build leg of every release channel. The `--config` half alone still does NOT cover a config Tauri
+// merges automatically — `configChainForLeg` folds that enumerated half in, and the separate describe
+// block below (CPE-1873 finding 6 / CPE-1903) refuses it outright.
 //
 // Keep these two literals in lockstep with crates/updater-verify/src/pinned_pubkey.rs's
 // EXPECTED_TAURI_UPDATER_PUBKEY / EXPECTED_TAURI_UPDATER_ENDPOINTS — same value, same rotation
@@ -211,36 +512,65 @@ const EXPECTED_UPDATER_ENDPOINTS = [
   "https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/latest.json",
 ];
 
-function mergedUpdaterConfig(os: ShipOS): { pubkey: unknown; endpoints: unknown } {
-  const merged = mergedConfig(os);
+function mergedUpdaterConfig(leg: BuildLeg): { pubkey: unknown; endpoints: unknown } {
+  const merged = mergedConfig(leg);
   const plugins = isPlainObject(merged.plugins) ? merged.plugins : undefined;
   const updater = plugins && isPlainObject(plugins.updater) ? plugins.updater : undefined;
   return { pubkey: updater?.pubkey, endpoints: updater?.endpoints };
 }
 
-describe("shipped sidecar bundle — updater root of trust survives the FULL overlay merge (CPE-1873)", () => {
-  (["windows", "linux", "macos"] as const).forEach((os) => {
-    it(`${os}: merged plugins.updater.pubkey equals the pinned value (no overlay override)`, () => {
-      const { pubkey } = mergedUpdaterConfig(os);
+// CPE-1900 — CPE-1873's injection re-run after the restructure, so "did not regress" is a measurement
+// and not a hope. An attacker `plugins.updater.pubkey`/`.endpoints` was written into EACH file of the
+// shipped chain in turn (2026-08-28, locally, each file restored with `git checkout --` afterwards;
+// `git status --porcelain` clean at the end). Every one reds, and reds exactly the shipped OSes that
+// file actually governs — `sidecarBundleResources.test.ts` alone, of 41 tests:
+//
+//   tauri.conf.json                        12 failed / 29 passed   all 6 legs (both channels, 3 OSes)
+//   tauri.sidecar.conf.json                 6 failed / 35 passed   3 sidecar legs (all shipped OSes)
+//   tauri.sidecar.unix.conf.json            4 failed / 37 passed   linux + macos
+//   tauri.sidecar.windows.conf.json         2 failed / 39 passed   windows
+//   tauri.sidecar.pdfium.windows.conf.json  2 failed / 39 passed   windows
+//   tauri.sidecar.pdfium.linux.conf.json    2 failed / 39 passed   linux
+//   tauri.sidecar.pdfium.macos.conf.json    2 failed / 39 passed   macos
+//
+// Read the right-hand column as the point rather than the counts: a per-OS overlay reds the OSes it
+// ships to and no others, which is what a guard describing real builds should do. "All three OSes red
+// for every file" would mean the legs were not really distinct.
+describe("shipped bundles — updater root of trust survives the FULL merge, every channel (CPE-1873)", () => {
+  // CPE-1900 widened this from the three hand-listed sidecar OSes to EVERY derived build leg, which
+  // today is 6: release-sidecar.yml's 3 plus release.yml's 3. The plain channel passes no `--config`
+  // overlay, so its chain is the base config plus whatever Tauri auto-merges — previously asserted
+  // only by the Rust base-config pin, and not at all for the auto-merged half.
+  it("the derived leg set covers both release channels", () => {
+    expect(
+      [...new Set(BUILD_LEGS.map((l) => l.workflow))].sort(),
+      `the tauri-action build discovery no longer sees both release channels. A channel that ` +
+        `disappears from this list ships with its merged updater config asserted by nothing.`,
+    ).toEqual([".github/workflows/release-sidecar.yml", ".github/workflows/release.yml"]);
+  });
+
+  BUILD_LEGS.forEach((leg) => {
+    it(`${leg.where}: merged plugins.updater.pubkey equals the pinned value`, () => {
+      const { pubkey } = mergedUpdaterConfig(leg);
       expect(
         pubkey,
-        `${os}: the FINAL merged config's plugins.updater.pubkey does not match the pinned value -- ` +
-          `some file in the overlay chain (${CONFIG_CHAIN[os].join(" -> ")}) overrides it. This IS the ` +
-          `shipped sidecar channel's actual root of trust; an override here is a live compromise, not a ` +
-          `lint nit. See crates/updater-verify/src/pinned_pubkey.rs (CPE-1873) for the rotation ` +
-          `procedure if this is deliberate -- update the pin there too, in the same commit.`,
+        `${leg.where}: the FINAL merged config's plugins.updater.pubkey does not match the pinned ` +
+          `value -- some file in the chain (${configChainForLeg(leg).join(" -> ")}) overrides it. ` +
+          `This IS a shipped channel's actual root of trust; an override here is a live compromise, ` +
+          `not a lint nit. See crates/updater-verify/src/pinned_pubkey.rs (CPE-1873) for the ` +
+          `rotation procedure if this is deliberate -- update the pin there too, in the same commit.`,
       ).toEqual(EXPECTED_UPDATER_PUBKEY);
     });
 
-    it(`${os}: merged plugins.updater.endpoints equals the pinned value (no overlay override)`, () => {
-      const { endpoints } = mergedUpdaterConfig(os);
+    it(`${leg.where}: merged plugins.updater.endpoints equals the pinned value`, () => {
+      const { endpoints } = mergedUpdaterConfig(leg);
       expect(
         endpoints,
-        `${os}: the FINAL merged config's plugins.updater.endpoints does not match the pinned value -- ` +
-          `some file in the overlay chain (${CONFIG_CHAIN[os].join(" -> ")}) overrides it. A changed ` +
-          `endpoint can silently downgrade users to an older, genuinely-signed but vulnerable build ` +
-          `forever, even with the pubkey pin intact. See crates/updater-verify/src/pinned_pubkey.rs ` +
-          `(CPE-1873).`,
+        `${leg.where}: the FINAL merged config's plugins.updater.endpoints does not match the pinned ` +
+          `value -- some file in the chain (${configChainForLeg(leg).join(" -> ")}) overrides it. A ` +
+          `changed endpoint can silently downgrade users to an older, genuinely-signed but vulnerable ` +
+          `build forever, even with the pubkey pin intact. See ` +
+          `crates/updater-verify/src/pinned_pubkey.rs (CPE-1873).`,
       ).toEqual(EXPECTED_UPDATER_ENDPOINTS);
     });
   });
@@ -250,7 +580,8 @@ describe("shipped sidecar bundle — updater root of trust survives the FULL ove
 // with no `--config` flag and no workflow involvement — `tauri-utils::config::parse::read_from` reads
 // `tauri.conf.json` and then merges a per-platform file from the same directory via RFC 7396, on every
 // build for that platform. Whatever that file sets wins, `plugins.updater.pubkey`/`.endpoints`
-// included, and it appears in no `--config` chain, so CONFIG_CHAIN above cannot see it.
+// included, and it appears in no `--config` chain, so no derivation from a workflow's `args:` can
+// see it — which is why this half is ENUMERATED from the directory instead (see `configChainForLeg`).
 //
 // CPE-1873 round 3 closed this by hardcoding three `.json` filenames. Tauri's real surface is FIFTEEN:
 // `ConfigFormat::into_platform_file_name` crosses three formats (`tauri.<t>.conf.json`,
@@ -296,7 +627,7 @@ function asciiLower(s: string): string {
  * <platform token> `.` <at least one more segment> — never by a particular spelling of the tail, so a
  * format Tauri adds tomorrow is covered without anyone editing a list. Deliberately NOT matched:
  * `tauri.conf.json` / `Tauri.toml` (the base config, pinned by value above) and `tauri.sidecar.*`
- * (the explicit `--config` overlays, covered by CONFIG_CHAIN) — their second segment is not a
+ * (the explicit `--config` overlays, covered by the derived chain) — their second segment is not a
  * platform token, which is exactly the property Tauri itself keys on.
  */
 function isAutoMergedPlatformConfigName(fileName: string): boolean {
@@ -405,9 +736,10 @@ describe("shipped bundle — no auto-merged per-platform Tauri config overrides 
         `\n\nTauri picks these up with NO --config flag: read_from() merges ` +
         `tauri.<platform>.conf.json / .json5 / Tauri.<platform>.toml next to tauri.conf.json via RFC ` +
         `7396 on every build for that platform, so such a file is invisible to the base-config pin, ` +
-        `invisible to the CONFIG_CHAIN guard above, and ships on the plain AND sidecar channels alike. ` +
+        `invisible to any derivation from a workflow's --config args, and ships on the plain AND ` +
+        `sidecar channels alike. ` +
         `If deliberate: it must not set plugins.updater at all -- route any real key/endpoint change ` +
-        `through tauri.conf.json (or a --config overlay already in CONFIG_CHAIN) and update ` +
+        `through tauri.conf.json (or a --config overlay the release workflow already passes) and update ` +
         `crates/updater-verify/src/pinned_pubkey.rs in the same commit. If not deliberate: STOP, this ` +
         `commit's builds are not trustworthy.`,
     ).toEqual([]);

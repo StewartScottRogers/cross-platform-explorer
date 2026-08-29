@@ -330,6 +330,29 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
   workflows' argv and **executes** the real binary with it), `src/lib/keymap.test.ts` (joins two data
   modules), `src/lib/components/MacroRunConfirm.test.ts` (walks a `format!` literal out of
   `fsutil.rs`, comments stripped first), `src/lib/channelPurityCoverage.test.ts`.
+
+  **A derivation that covers only half its input is still a claim (CPE-1900).** The shipped app's
+  merged Tauri config used to be a `CONFIG_CHAIN` literal in `sidecarBundleResources.test.ts` with a
+  comment asking the reader to keep it in lockstep with `release-sidecar.yml`; a fifth `--config`
+  overlay would have shipped while the guard stayed green and narrower than it read.
+  `src/lib/tauriConfigChain.ts` derives it instead — structurally, via the app's own YAML parser
+  (`parseWorkflowFile`), never a line scan, so `release-sidecar.yml`'s heavy commentary is gone before
+  a string is read. Measured on the fixture that pins this: a bare `/--config\s+(\S+)/` per line reads
+  **4 of 4** planted decoys as live overlays, and the same scan with a whole-line comment filter still
+  reads **2 of 4** (the `run:` body and the trailing comment). But the workflow is only ONE HALF of
+  what the build merges — Tauri also merges `tauri.<platform>.conf.*` with **no flag at all**, so that
+  half cannot come from any `args:` line and is ENUMERATED from the directory instead. Say at the site
+  which half is which; a guard shaped like a derivation reads as covering everything it merges.
+  Two more rules this one paid for. **Order is part of the answer**: RFC 7396 merge is
+  order-dependent, so a chain is a sequence — red-proof the ordering leg SEPARATELY from the
+  membership leg (a `.sort()` in the extractor left every membership assertion green), and then
+  measure whether reordering the real chain actually changes anything, or the ordering leg is
+  decorative. And **compare configs canonically**: `JSON.stringify` called 21 of 24 orderings
+  "different" on every leg, where the real counts are **16 / 12 / 12** (windows / linux / macos) — the
+  rest differ in key insertion order alone. Note the shape of that near-miss, because it is the
+  cheapest one to repeat: the first write of this said "21 … of which 5 differed only in key order",
+  which is the **windows** leg's number quoted without naming a leg, in the very sentence correcting an
+  oracle's scope. **A measurement that varies per case is reported per case, or not at all.**
 - **There are TWO npm projects (CPE-1945).** The root, and **`gui-smoke/`** — which has its own
   `package.json`, its own `package-lock.json`, its own advisories, and its own CI job. Any
   dependency/advisory statement must say which project it covers, or cover both: `gui-smoke/` went

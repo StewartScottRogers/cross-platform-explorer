@@ -46,7 +46,8 @@
 //!
 //! Deliberately NOT matched: `tauri.conf.json` / `tauri.conf.json5` / `Tauri.toml` (the base config —
 //! pinned by value in [`crate::pinned_pubkey`]) and `tauri.sidecar.*.conf.json` (the explicit
-//! `--config` overlays — covered by `src/lib/sidecarBundleResources.test.ts`'s `CONFIG_CHAIN`). Their
+//! `--config` overlays — covered by the chain `src/lib/tauriConfigChain.ts` derives from the release
+//! workflows and `src/lib/sidecarBundleResources.test.ts` merges). Their
 //! second dot-segment is not a platform token, which is exactly the property Tauri itself keys on.
 //!
 //! # The semantics, which CPE-1873 round 3 got right and this round preserves
@@ -278,8 +279,8 @@ pub fn platform_config_override_message(dir: &Path, hits: &[PlatformConfigOverri
          sidecar channel alike.\n\
          \n\
          If this is a DELIBERATE, authorized change: it must not set `plugins.updater` at all. Put any \
-         real key/endpoint change through `src-tauri/tauri.conf.json` (or a `--config` overlay already \
-         listed in `CONFIG_CHAIN`) so the existing pins actually see it, update \
+         real key/endpoint change through `src-tauri/tauri.conf.json` (or a `--config` overlay the \
+         release workflow already passes) so the existing pins actually see it, update \
          `crates/updater-verify/src/pinned_pubkey.rs`'s constants in the same commit, and record why in \
          the ticket that authorized it -- see that file's rotation procedure.\n\
          \n\

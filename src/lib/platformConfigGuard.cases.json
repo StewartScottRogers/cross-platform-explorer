@@ -22,7 +22,7 @@
     { "name": "the base config is NOT auto-merged (other guards pin it by value)", "fileName": "tauri.conf.json", "autoMerged": false },
     { "name": "the base config in json5 is not auto-merged either", "fileName": "tauri.conf.json5", "autoMerged": false },
     { "name": "the base TOML config is not auto-merged", "fileName": "Tauri.toml", "autoMerged": false },
-    { "name": "an explicit --config overlay is CONFIG_CHAIN's business, not this guard's", "fileName": "tauri.sidecar.conf.json", "autoMerged": false },
+    { "name": "an explicit --config overlay is the derived chain's business, not this guard's", "fileName": "tauri.sidecar.conf.json", "autoMerged": false },
     { "name": "a per-platform --config overlay: second segment is `sidecar`, not a platform token", "fileName": "tauri.sidecar.windows.conf.json", "autoMerged": false },
     { "name": "json, macos", "fileName": "tauri.macos.conf.json", "autoMerged": true },
     { "name": "json, windows", "fileName": "tauri.windows.conf.json", "autoMerged": true },
