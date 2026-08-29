@@ -34,7 +34,8 @@
 //!
 //! **Neither of the above ever reads an overlay file.** The build every install actually ships is
 //! `release-sidecar.yml`'s: the base config with a chain of `--config` overlays applied on top
-//! (`src/lib/sidecarBundleResources.test.ts`'s `CONFIG_CHAIN`), and Tauri's own `--config` merge
+//! (that chain is DERIVED from the workflow's own `args:` line by `src/lib/tauriConfigChain.ts` and
+//! merged by `src/lib/sidecarBundleResources.test.ts` — CPE-1900), and Tauri's own `--config` merge
 //! (RFC 7386 recursive merge) lets an overlay override `plugins.updater.pubkey`/`.endpoints` the same
 //! way it can override `bundle.resources` — the exact footgun CPE-1270/1271 already documented for
 //! that key, now independently demonstrated for this one (CPE-1873 attempt 2, Security Auditor: one

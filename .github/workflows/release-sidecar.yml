@@ -111,7 +111,8 @@ jobs:
   #
   # Worse, the Security Auditor demonstrated the pin ALONE is insufficient even where it does run: this
   # channel's actual config is the base `tauri.conf.json` with a chain of `--config` overlays applied
-  # (see `src/lib/sidecarBundleResources.test.ts`'s `CONFIG_CHAIN`), and Tauri's own `--config` merge
+  # (the `args:` line below, read back out of THIS FILE by `src/lib/tauriConfigChain.ts` — CPE-1900
+  # made that a derivation rather than a literal copied into the test), and Tauri's own `--config` merge
   # lets an overlay silently override `plugins.updater.pubkey`/`.endpoints` — the same mechanism
   # CPE-1270/1271 already documented overriding `bundle.resources`. A one-line addition to
   # `tauri.sidecar.conf.json` (base file untouched) passed the base-config pin at EXIT=0 while
@@ -165,7 +166,16 @@ jobs:
         run: npm ci
 
       - name: Updater pubkey/endpoints pin — FULL merged overlay chain, per shipped OS (CPE-1873)
-        run: npx vitest run src/lib/sidecarBundleResources.test.ts
+        # CPE-1900: this used to name ONE test file (`src/lib/sidecarBundleResources.test.ts`) — the
+        # same enumeration mistake CPE-1903 removed from the `cargo test` step above, for the same
+        # reason. That ticket split the guard in two: the merged-config assertions stayed in that
+        # file, but the DERIVATION they now depend on (`src/lib/tauriConfigChain.ts`: which `--config`
+        # overlays this workflow passes, in which order) is proved in `tauriConfigChain.test.ts`,
+        # which the named-file form would silently never run on the release path. Run the whole suite
+        # instead, so a guard added tomorrow gates this workflow without anyone editing this line.
+        # `ci.yml`'s `frontend` job already runs exactly this on ubuntu-latest (n=83, max 5.9 min for
+        # `npm ci` + `npm run check` + vitest together), so the added time is measured, not guessed.
+        run: npm test
 
   release-sidecar:
     needs: [create-release, verify-updater-pin]
