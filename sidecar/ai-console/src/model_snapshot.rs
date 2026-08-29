@@ -141,9 +141,42 @@ pub fn verify_snapshot(snapshot: &ModelSnapshot, signature_hex: &str, trusted_ke
 }
 
 /// Anti-rollback (CPE-451): accept `incoming` only when it is strictly newer than what's installed
-/// (or nothing is installed yet). Mirrors `sidecar_host::catalog::CatalogEntry::is_upgrade_over` /
-/// `gate_manifest` semantics. Callers MUST have [`verify_snapshot`]'d the incoming snapshot first;
-/// this enforces the monotonic-version rule only.
+/// (or nothing is installed yet). Callers MUST have [`verify_snapshot`]'d the incoming snapshot
+/// first; this enforces the monotonic-version rule only.
+///
+/// **This deliberately conflates `==` with `<`, and that is safe here only because nothing reports
+/// a reason (CPE-1939).** The agent catalog was split into
+/// `sidecar_host::catalog::VersionStanding` — `Newer` / `Same` / `Older` — by CPE-1924, because the
+/// console has to tell "you already have the latest published catalog" (routine, calm, green) apart
+/// from "the published index has gone backwards" (a real upstream regression, amber). This function
+/// keeps the single boolean, and the split would buy nothing today: the only production caller is
+/// `Console::refresh_snapshot`, whose four rejection paths — no host / fetch failed, malformed JSON,
+/// unverifiable signature, and not-newer — all return the same bare `false`, and its own only
+/// production caller (`handle_models`) discards even that. There is no surface a reason could reach.
+///
+/// **That last paragraph is a claim about `console.rs`, and it is the PREMISE of this decision, not
+/// decoration — so read it as unverified (CPE-1933).** It was checked by inspection twice on
+/// 2026-08-28 (CPE-1939, author and reviewer) and is **pinned by no test**: nothing re-reads
+/// `console.rs` to confirm those four `return false` are still bare, or that `handle_models` still
+/// discards the bool. Deriving it would mean parsing another module's control flow for a helper
+/// that has one caller, which is not worth the machinery — but the safety argument above is only as
+/// current as that grep. **Re-run it (`refresh_snapshot` in `sidecar/ai-console/src/console.rs`)
+/// before relying on this comment**, rather than trusting it because the crate's tests are green.
+///
+/// **What would make it a live bug**, i.e. what to watch for: the moment anything downstream turns
+/// this refusal into words for a user — a "model list is up to date" line, a staleness badge, a
+/// diagnostics entry naming why the snapshot was not adopted — the two situations need different
+/// sentences, and a boolean cannot supply them. That is precisely how CPE-1911/1924 played out on
+/// the agent side: the collapsed counter was harmless right up until someone had to explain it.
+/// At that point, do not add a second comparison beside this one — give this function a
+/// `VersionStanding`-shaped return derived from ONE `cmp`, the way `CatalogEntry::version_standing`
+/// does, so the trust decision and the reported reason cannot drift apart.
+///
+/// No provenance claim is made about the host's implementation: the previous doc comment pointed at
+/// `CatalogEntry::is_upgrade_over`, which since CPE-1924 no longer owns a comparison (it delegates
+/// to `version_standing`), so the claim had gone stale exactly the way CPE-1933 describes. Different
+/// crate, different artifact, no shared code — this is not a second copy of the host's rule that
+/// could disagree with it, and nothing here is derived from it.
 pub fn accept_snapshot(current_version: Option<u64>, incoming: &ModelSnapshot) -> bool {
     current_version.is_none_or(|v| incoming.version > v)
 }

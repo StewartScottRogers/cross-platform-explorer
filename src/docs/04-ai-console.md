@@ -70,8 +70,8 @@ it anywhere.
 **What the result message means.** "Check for updates now" spells out which situation you're
 actually in, rather than reporting every outcome as the same reassuring line:
 
-- *Updated N agents* — new definitions were published, verified, and installed. The agent list
-  re-renders with them straight away.
+- *Updated N agents* — new definitions were published, verified, and installed, and **nothing in
+  that publish was rejected**. The agent list re-renders with them straight away.
 - *You already have the latest published agents* — the published catalog offers exactly the
   versions you're running. Routine and healthy; nothing to do. This is what an ordinary check
   returns most of the time, between one release and the next.
@@ -79,12 +79,12 @@ actually in, rather than reporting every outcome as the same reassuring line:
   reconsider at all.
 - *The published agent catalog has gone backwards* — the catalog is offering **older** versions
   than the ones you already have, so they weren't installed. The message says how many entries are
-  affected ("1 of the 4 published agent entries…"), so a single bad entry doesn't read as a
-  wholesale failure. Updates are only ever accepted going forwards, which is exactly why nothing
-  was installed here.
-- *The published catalog looks corrupted or mis-signed* — the catalog listing verified, but the
-  individual agent definitions it named didn't, so nothing was installed. Again, your existing
-  agents are untouched and safe to use.
+  affected ("1 of the 5 published agent entries…"), so a single bad entry doesn't read as a
+  wholesale failure. Updates are only ever accepted going forwards, which is exactly why those
+  entries weren't installed.
+- *The published catalog looks corrupted or mis-signed* — the catalog listing verified, but agent
+  definitions it named didn't, so those weren't installed. Again, your existing agents are
+  untouched and safe to use.
 - *The published catalog was refused* — the catalog **listing** itself was rejected, before anything
   it names was acted on. The listing is downloaded to a temporary folder first, so that much did
   happen; what did not is anything that follows from trusting it — no agent definitions were
@@ -105,8 +105,16 @@ actually in, rather than reporting every outcome as the same reassuring line:
   file has to be deleted by hand. **Roll back a version…** reports the same thing for the same
   reason — it needs the same record to know what it is rolling back from.
 
-**Otherwise, if you see the amber bar there is nothing to fix on your machine.** Every one of the
-other states leaves your installed agents exactly as they were, and they keep working. The problem
+**One publish can land in several of these states at once.** Two agents can install cleanly while a
+third is offered at an older version, or fails its own signature check. When that happens you are
+told about the **problem**, not the success: the message leads with the rejection and then says how
+many agents did update ("…2 other agents were updated normally"). A rejected signature is never
+hidden behind a success count. Whatever did install is still installed, and the agent list still
+re-renders with it.
+
+**Otherwise, if you see the amber bar there is nothing to fix on your machine.** Apart from the
+mixed publish just described — where the agents that passed really were installed — every one of
+these states leaves your installed agents exactly as they were, and they keep working. The problem
 is on the publishing side, and the message clears itself the next time a good, newer catalog is
 published — so the useful response is to carry on and check again later, not to reset or roll
 anything back.
