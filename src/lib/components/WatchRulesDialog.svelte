@@ -264,8 +264,17 @@
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
   .dialog { width: 680px; max-width: 95vw; background: var(--surface); border: 1px solid var(--dialog-border); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
   h2 { font-size: 16px; margin-bottom: 12px; }
-  .rules { max-height: 34vh; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused): the rule list is filled after the
+     dialog opens, and a centred dialog re-centres when it grows, moving every control above it. At
+     the 700px harness window `34vh` is 238px and binds; the floor engages below 412px, the cap above
+     824px. */
+  .rules { height: clamp(140px, 34vh, 280px); overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+  /* CPE-1983 — centred, and only because `.rules` is now a fixed height (the same second half of the
+     fix `OrganizeDialog`'s `.empty` carries): a one-line placeholder pinned to the corner of a 238px
+     bordered box reads as a failed render rather than an empty one. Safe because `.empty` renders
+     only under `{#if list.length === 0}` and is therefore never mounted alongside a `.rule`, so this
+     cannot centre a list; `height: 100%` resolves against `.rules`'s definite height. */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; display: grid; place-items: center; height: 100%; }
   .rule { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); font-size: 12.5px; }
   .rule.disabled { opacity: 0.5; }
   .rname { font-weight: 600; flex: 0 0 auto; }

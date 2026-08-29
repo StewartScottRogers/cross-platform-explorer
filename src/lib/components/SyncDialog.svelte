@@ -244,8 +244,22 @@
   .auto-note { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-bottom: 12px; }
   .warn-text { color: var(--warn); font-size: 12px; }
   .warn-text.small { font-size: 11px; margin-top: 6px; }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). This is the one in the sweep that
+     grows CONTINUOUSLY rather than once: log lines arrive while the sync runs, so under a centred
+     dialog the whole dialog crept upward line by line, with Close sitting below it and the plan
+     summary above. `px` rather than `vh`: a fixed line-height log. 140px is exactly the old cap.
+     THE DISCRIMINATOR, stated because it is not the obvious one. `.log` is `{#if log.length}`-gated,
+     which is the same property the seven allowlisted boxes were excused on — so gating alone is NOT
+     what separates a fix from an allowlist row here. The real split is what happens AFTER arrival:
+     the seven only ever arrive (their contents are already whole when the panel mounts), while this
+     one arrives AND then grows, line by line, for the whole duration of the sync. A fixed height
+     cannot remove the arrival, but it removes the per-line creep, which is the worst variant in the
+     sweep — every line was a fresh half-line of upward movement under a resting pointer.
+     NO CENTRED PLACEHOLDER (unlike the seven sibling declarations — six `.empty` rules plus
+     MacroRunConfirm's scoped `.ops li.dim`): this box renders `{#each log}` and
+     nothing else, and it only exists once there is at least one line. */
   .log {
-    margin-bottom: 14px; max-height: 140px; overflow: auto;
+    margin-bottom: 14px; height: 140px; overflow: auto;
     background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px;
     padding: 8px; font-size: 11px; font-family: var(--mono);
   }

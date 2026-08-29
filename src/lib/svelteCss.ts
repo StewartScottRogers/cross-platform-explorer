@@ -52,6 +52,116 @@ export function svelteStyle(componentSource: string): string {
   return stripCssComments(blocks[0][1]);
 }
 
+/** One flat declaration block: its selector text, its body, and the at-rule prelude enclosing it. */
+export interface StyleRule {
+  /** The selector as written, whitespace-collapsed (e.g. `.cp-row.selected`, `.a, .b`). */
+  selector: string;
+  /** Everything between the braces. */
+  block: string;
+  /** The enclosing at-rule prelude (`@media (max-width: 700px)`), or `""` at the top level. */
+  atRule: string;
+}
+
+/**
+ * EVERY declaration block in a component's `<style>`, comments stripped, at-rules descended into
+ * (CPE-1983).
+ *
+ * `styleBlock` above answers "what does `.foo` say" for a class you already know about. This answers
+ * "what rules are in here at all", which is what an ENUMERATING guard needs — CPE-1968 fixed the two
+ * dialogs its ticket named, and the class was closed for exactly those two because nothing could ask
+ * the repo the general question.
+ *
+ * WHY A BRACE SCANNER AND NOT A REGEX, measured rather than assumed. The obvious
+ * `/(?:^|\}|\{)\s*([^{}]+?)\s*\{([^{}]*)\}/g` CONSUMES the closing `}` of each rule, so the next
+ * rule can no longer match its own `(?:^|\}|\{)` opener and every SECOND rule is skipped. That is not
+ * a hypothetical: it is what the first draft of CPE-1983's sweep did.
+ *
+ * THE SUBSTANTIVE CONSEQUENCE, which is what this paragraph is for: the naive regex loses
+ * `CopilotDialog`'s `.op-list` and `.op-results` and `MacroRunConfirm`'s `.ops` — three of the very
+ * instances CPE-1983's ticket NAMES. That is reproducible any day, and `dialogBodyReflow.test.ts`
+ * pins the mechanism directly with a consecutive-rules case.
+ *
+ * HISTORICAL, NOT REPRODUCIBLE: the first draft reported "9 hits over 8 files" against a correct
+ * answer of "28 over 21". Those were counts under that draft's own filters, and both sides move with
+ * the filters and with the tree — review round 2 re-ran the comparison and got 12/11 against 22/19.
+ * Recorded as provenance in the same spirit as CLAUDE.md's 31/7/4 tally: treat the pair as history,
+ * never as a measurement you can reproduce. The live number is whatever the guard prints today.
+ *
+ * An enumerator that silently halves its input is the CPE-1932 failure with extra steps, so the scan
+ * is a real scanner: brace depth, with string interiors skipped so a `{` or `}` inside `content: "…"`
+ * cannot unbalance it.
+ */
+export function styleRules(componentSource: string, opts: { stripComments?: boolean } = {}): StyleRule[] {
+  const strip = opts.stripComments !== false;
+  // `stripComments: false` exists ONLY so a caller can measure what the stripper buys IT, rather than
+  // inherit someone else's measurement of what it buys `styleBlock` (CLAUDE.md: "re-measure a 'this
+  // safeguard bought nothing' note in the file it ships in"). Production reads always strip.
+  const body = strip ? svelteStyle(componentSource) : rawStyleBody(componentSource);
+  return scanRules(body, "");
+}
+
+/** The `<style>` body with comments left in. Same uniqueness rule as `svelteStyle`. */
+function rawStyleBody(componentSource: string): string {
+  const blocks = [...componentSource.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)];
+  if (blocks.length !== 1) {
+    throw new Error(`expected exactly one <style> block in the component, found ${blocks.length}`);
+  }
+  return blocks[0][1];
+}
+
+function scanRules(css: string, atRule: string): StyleRule[] {
+  const out: StyleRule[] = [];
+  let prelude = "";
+  let i = 0;
+  while (i < css.length) {
+    const ch = css[i];
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      prelude += ch;
+      i++;
+      while (i < css.length && css[i] !== quote) {
+        if (css[i] === "\\") prelude += css[i++] ?? "";
+        prelude += css[i++] ?? "";
+      }
+      prelude += css[i++] ?? "";
+      continue;
+    }
+    if (ch === "{") {
+      let depth = 1;
+      let j = i + 1;
+      while (j < css.length && depth > 0) {
+        const c = css[j];
+        if (c === '"' || c === "'") {
+          j++;
+          while (j < css.length && css[j] !== c) {
+            if (css[j] === "\\") j++;
+            j++;
+          }
+        } else if (c === "{") depth++;
+        else if (c === "}") depth--;
+        j++;
+      }
+      const body = css.slice(i + 1, j - 1);
+      const selector = prelude.replace(/\s+/g, " ").trim();
+      // A body containing braces is a nested/at-rule wrapper, not a declaration block. Descend.
+      if (selector.startsWith("@") || /\{/.test(body)) out.push(...scanRules(body, selector));
+      else out.push({ selector, block: body, atRule });
+      prelude = "";
+      i = j;
+      continue;
+    }
+    if (ch === "}") {
+      // An unbalanced closer: reset rather than carry stray text into the next selector.
+      prelude = "";
+      i++;
+      continue;
+    }
+    prelude += ch;
+    i++;
+  }
+  return out;
+}
+
 /**
  * The one CSS declaration block for `.className` in a Svelte component's `<style>`.
  * Throws rather than guessing when the selector is absent or declared more than once.

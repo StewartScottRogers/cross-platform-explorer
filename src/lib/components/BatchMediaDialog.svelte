@@ -765,8 +765,12 @@
     padding: 6px 8px;
   }
 
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). The output-name preview re-renders as
+     the format/quality/naming controls above it change, so under a centred dialog those controls
+     moved out from under the pointer mid-adjustment. `px` rather than `vh`: a fixed-pitch list whose
+     rows do not scale with the window. 200px is exactly the old cap. */
   .preview {
-    max-height: 200px;
+    height: 200px;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -775,7 +779,12 @@
     font-size: 12px;
     font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; font-family: inherit; }
+  /* CPE-1983 — centred, and only because `.preview` is now a fixed height (the same second half of
+     the fix `OrganizeDialog`'s `.empty` carries): "Add an operation above to see a preview." pinned
+     to the corner of a 200px monospace box reads as a failed render rather than an empty one. Safe
+     because `.empty` is the `{#if ops.length === 0}` branch and `.rowp` is the `{:else}` one, so the
+     two structurally cannot co-exist; `height: 100%` resolves against `.preview`'s definite height. */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; font-family: inherit; display: grid; place-items: center; height: 100%; }
   .rowp {
     display: grid;
     grid-template-columns: 1fr auto 1fr 1.2fr;

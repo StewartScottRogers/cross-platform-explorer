@@ -187,8 +187,19 @@
   label.check {
     gap: 6px;
   }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). This box re-renders on every
+     keystroke in the pattern/find/replace inputs directly above it, so under a centred dialog the
+     inputs slid up and down under the pointer AS THE USER TYPED. A `px` bound rather than a `vh` one
+     here because the preview is a fixed-pitch list whose row height does not scale with the window;
+     220px is exactly the old cap, so the box is never larger than it used to be.
+     NO CENTRED PLACEHOLDER, unlike the seven sibling declarations in this ticket (six `.empty` rules
+     plus MacroRunConfirm's scoped `.ops li.dim`), and it is an absence rather
+     than an oversight: this box renders `{#each items}` and nothing else — there is no empty-state
+     child to centre, because the dialog is only opened on a non-empty selection. If an empty-selection
+     path is ever added, it needs `display: grid; place-items: center; height: 100%` the way
+     `CheckpointDialog`'s `.empty` has it, or it will render as a blank 220px box. */
   .preview {
-    max-height: 220px;
+    height: 220px;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius);

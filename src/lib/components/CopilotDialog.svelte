@@ -349,7 +349,23 @@
   .violations-title { font-weight: 600; font-size: 12.5px; color: var(--text); margin-bottom: 4px; }
   .violations ul { margin: 0 0 0 18px; padding: 0; font-size: 12.5px; color: var(--text); }
 
-  .op-list { max-height: 32vh; overflow: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). CORRECTED IN ROUND 2, and the
+     correction is the point of CPE-1933: round 1's comment here described "per-op checkboxes inside
+     it" and an "Apply / Cancel row". Neither exists — there are no checkboxes in this component at
+     all, and the buttons are `Edit instruction` / `Confirm — run this plan`. The FIX was right and
+     the stated REASON was invented, which is exactly the failure mode a comment asserting facts
+     about nearby code has.
+     What it actually buys: `.op-list` lives inside `{#if planResult && …}`, so like the seven boxes
+     this ticket allowlisted its ARRIVAL is a reflow that no height can remove. What a fixed height
+     DOES remove is the arrival's dependence on the plan's SIZE — a 2-op plan and a 40-op plan now
+     displace the instruction textarea above it by the same amount, so the distance the prompt box
+     travels stops being a function of what the model happened to return. That is less than the ten
+     other fixes buy and it is stated as less. At the 700px harness window `32vh` is 224px and binds;
+     the floor engages below 500px, the cap above 812px.
+     NO CENTRED PLACEHOLDER (unlike the seven sibling declarations — six `.empty` rules plus
+     MacroRunConfirm's scoped `.ops li.dim`): this box renders `{#each ops}` and
+     nothing else, and it only exists when a plan does. */
+  .op-list { height: clamp(160px, 32vh, 260px); overflow: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
   .op-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .op-row:last-child { border-bottom: none; }
   .op-kind { flex: 0 0 auto; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; background: var(--surface-alt); color: var(--text); border: 1px solid var(--border-strong); }

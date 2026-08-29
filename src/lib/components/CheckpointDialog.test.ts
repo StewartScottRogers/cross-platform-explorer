@@ -7,6 +7,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { styleRules, declaration, lengthToPx, contentIndependentHeightReason } from "../svelteCss";
+import { stripRustComments } from "../rustSource";
 
 const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
 vi.mock("../invoke", () => ({
@@ -570,5 +574,315 @@ describe("CheckpointDialog (CPE-1125)", () => {
         expect(screen.queryByTestId("outcome-copy-held-paths")).toBeNull();
       });
     });
+  });
+});
+
+/**
+ * CPE-1983 — THE RED-PROOF: a click aimed at **Refresh** while the first list is still loading.
+ *
+ * THE DEFECT this replaces the eyeball for. `.list` used to be `max-height: 30vh; overflow: auto`
+ * with no `height`, i.e. content-driven: a few tens of px while `onMount(loadList)`'s two round-trips
+ * were in flight, then up to 30vh (210px at the harness window) once the checkpoints rendered.
+ * `.backdrop` centres the dialog, so that growth is split evenly above and below and **everything
+ * above `.list` slides UP by half of it** — the help button, the path input, **Refresh**, the label
+ * input and **Create checkpoint**, five interactive controls.
+ *
+ * WHY THIS ONE RANKED ABOVE THE ONE CPE-1968 FIXED. In `OrganizeDialog` the mis-landed click landed
+ * on the preview box and `.dialog`'s `on:click|stopPropagation` swallowed it in silence. Here the box
+ * that arrives under the pointer is `.list`, and `.list` contains `Revert…` buttons. The consequence
+ * is not a lost click; it is a destructive control armed by a click aimed at Refresh. It also re-runs
+ * on every Refresh and after `doCreate`, so it is not only an on-open hazard.
+ *
+ * WHY A MODEL, and what this one is anchored to. jsdom has no layout engine, so the shift cannot be
+ * measured by rendering. What CAN be modelled honestly is the ONE axis the defect lives on, from the
+ * component's own declarations, read at run time (CPE-1933, never recalled). This dialog has a prose
+ * `<p>` above the controls whose wrapped height jsdom cannot know — so the model is anchored at the
+ * TOP OF `.paths` rather than at the dialog's top, and every band it needs is below that anchor and
+ * has a declared height. The unknown prose block is above the anchor and cancels out of every term.
+ *
+ * WHAT THE MODEL ASSUMES, so a reader can check it rather than trust it:
+ *   - `.paths`, `.create-row` and `.list` stack in that order with nothing between them. Asserted from
+ *     the markup below, and the two conditional rows that CAN appear between them (`.err`, `.note`)
+ *     are asserted absent in the run that does the hit-test.
+ *   - each of `.paths` and `.create-row` is one row as tall as the 30px controls in it. `.path`,
+ *     `.label-input` and `.btn` all declare `height: 30px`; that they agree is asserted, not assumed.
+ *   - for the OLD content-driven shape, the loading height is taken as `.empty`'s declared VERTICAL
+ *     PADDING alone. That is a deliberate LOWER bound — it ignores the "Loading…" text line, which
+ *     jsdom cannot measure — and therefore makes the modelled shift an UPPER bound. The conclusion
+ *     does not rest on the exact number: the test derives the loading height at which the aimed point
+ *     would just re-enter `.paths` and asserts it is far above any one-line box.
+ *
+ * WHAT IT THEREFORE DOES NOT PROVE: which ROW of `.list` is under the point (that is a text-metrics
+ * question), that wry's webview lays this out as modelled, or anything about the other dialogs — the
+ * repo-wide leg is `src/lib/dialogBodyReflow.test.ts`.
+ *
+ * INDEPENDENTLY CROSS-CHECKED IN A REAL BROWSER, which is the leg a model most needs and least
+ * deserves on its own. `scripts/dev-harness/checkpoint-dialog/` mounts this same component in
+ * headless Chrome at the same 1000x700 viewport and reports Refresh's measured screen position. With
+ * the pre-CPE-1983 CSS re-applied (`legacy=1`, `list=many`), it measures:
+ *
+ *     Refresh top @t=100ms : 320.6px     .list top @t=100ms : 396.6px
+ *     Refresh top now      : 236.6px     .list top now      : 312.6px
+ *     Refresh moved        :  84.0px     click aimed at Refresh now over: **.list (Revert…)**
+ *
+ * and with the shipped CSS, 0.0px with Refresh at 236.6px and `.list` at 312.6px in all four of
+ * loading, empty, two checkpoints and twelve. **The ABSOLUTE band positions are what the hit-test
+ * consumes** — the shift alone is weak evidence, because every term of it cancels.
+ *
+ * THE TWO METHODS DISAGREE BY 9px AND THAT IS THE MODEL BEHAVING AS DOCUMENTED, not a defect: the
+ * model reports 93px because it takes the loading box as `.empty`'s padding alone (24px), a stated
+ * LOWER bound that makes the shift an UPPER bound. The browser's real loading box is 42px — the same
+ * 24px of padding plus one 18px text line, which is exactly the term jsdom cannot measure. Where the
+ * two disagree the browser is right; the model is deliberately conservative in the direction that
+ * over-states the hazard, and both agree on the only thing the hit-test asks: the point lands in
+ * `.list`.
+ */
+describe("CPE-1983 — a click aimed at Refresh mid-load lands where it was aimed", () => {
+  const SRC = readFileSync(join(process.cwd(), "src", "lib", "components", "CheckpointDialog.svelte"), "utf8");
+
+  /**
+   * The harness window's height, DERIVED from the app's own `.inner_size(w, h)` rather than pasted —
+   * the same derivation `OrganizeDialog.test.ts` uses, and for the same reason. Rust comments are
+   * stripped first so a commented-out or quoted copy cannot answer (CPE-1933 rule 2).
+   */
+  const VIEWPORT_H = (() => {
+    const rust = stripRustComments(readFileSync(join(process.cwd(), "src-tauri", "src", "lib.rs"), "utf8"));
+    const hits = [...rust.matchAll(/\.inner_size\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/g)];
+    expect(hits.length, "expected exactly one `.inner_size(w, h)` call in src-tauri/src/lib.rs").toBe(1);
+    return parseFloat(hits[0][2]);
+  })();
+
+  /**
+   * The one top-level rule whose SELECTOR LIST contains `.cls`.
+   *
+   * `styleBlock` cannot answer here: this component groups three rows into
+   * `.paths, .create-row, .revert-one { … }`, and a `.paths {`-anchored regex does not match a
+   * grouped selector — it would report "found 0" and the model would be written around whatever the
+   * author reached for instead. Reading the enumerated rules is the fix, not a looser regex.
+   */
+  function ruleFor(cls: string): string {
+    const hits = styleRules(SRC).filter(
+      (r) => !r.atRule && r.selector.split(",").some((s) => s.trim() === `.${cls}`),
+    );
+    if (hits.length !== 1) {
+      throw new Error(`expected exactly one top-level rule naming \`.${cls}\`, found ${hits.length}`);
+    }
+    return hits[0].block;
+  }
+
+  /** A declaration of `.cls` resolved to px, or a throw naming what was missing. */
+  function px(cls: string, prop: string): number {
+    const raw = declaration(ruleFor(cls), prop);
+    if (raw === undefined) throw new Error(`.${cls} declares no \`${prop}\``);
+    return lengthToPx(raw, VIEWPORT_H);
+  }
+
+  /** The height of the 30px control rows, asserted to be one number rather than assumed. */
+  function controlRowHeight(): number {
+    const heights = ["path", "label-input", "btn"].map((c) => px(c, "height"));
+    expect(new Set(heights).size, `.path/.label-input/.btn no longer agree on a height: ${heights}`).toBe(1);
+    return heights[0];
+  }
+
+  /**
+   * `.list`'s height in a phase. With a definite `height` both phases agree — that IS the fix. With
+   * the old `max-height`-only shape they do not, which is the defect.
+   */
+  function listHeight(phase: "loading" | "settled"): number {
+    const block = ruleFor("list");
+    const definite = declaration(block, "height");
+    if (definite) return lengthToPx(definite, VIEWPORT_H);
+    if (phase === "settled") {
+      const cap = declaration(block, "max-height");
+      if (!cap) throw new Error(".list declares neither a height nor a max-height");
+      return lengthToPx(cap, VIEWPORT_H);
+    }
+    // The stated LOWER bound on the loading box: `.empty`'s vertical padding, with no text line.
+    return 2 * px("empty", "padding");
+  }
+
+  interface Band {
+    name: string;
+    top: number;
+    bottom: number;
+  }
+
+  /** The three bands below the `.paths` anchor, for a given phase. Offsets are from `.paths`' top. */
+  function bands(phase: "loading" | "settled"): Band[] {
+    const row = controlRowHeight();
+    const gap = px("paths", "margin-bottom"); // the grouped `.paths, .create-row, .revert-one` rule
+    let y = 0;
+    return (
+      [
+        ["paths", row, gap],
+        ["create-row", row, gap],
+        ["list", listHeight(phase), 0],
+      ] as [string, number, number][]
+    ).map(([name, h, m]) => {
+      const band = { name, top: y, bottom: y + h };
+      y += h + m;
+      return band;
+    });
+  }
+
+  const bandNamed = (list: Band[], name: string) => list.find((b) => b.name === name)!;
+  const bandAt = (list: Band[], y: number) =>
+    list.find((b) => y >= b.top && y < b.bottom)?.name ?? "(between the modelled bands)";
+
+  it("stacks paths, create-row, list in that order in the markup", () => {
+    const markup = SRC.slice(0, SRC.indexOf("<style>"));
+    const order = ["paths", "create-row", "list"].map((c) => markup.indexOf(`class="${c}"`));
+    expect(order, "expected all three stacked rows in the markup").not.toContain(-1);
+    expect(order, "expected paths, create-row, list in markup order").toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it("gives .list the SAME height while loading as once the checkpoints render", () => {
+    expect(
+      declaration(ruleFor("list"), "max-height"),
+      "`.list` declares a max-height again. Paired with no `height` that makes the box a function of " +
+        "its CONTENT, so it grows when onMount(loadList) lands and the centred dialog slides Refresh " +
+        "(and four other controls) up out from under the pointer — CPE-1983.",
+    ).toBeUndefined();
+
+    const reason = contentIndependentHeightReason(ruleFor("list"), VIEWPORT_H);
+    expect(reason, `\`.list\` must have a height that cannot depend on the checkpoint list. It ${reason}.`).toBeNull();
+
+    expect(bandNamed(bands("settled"), "paths")).toEqual(bandNamed(bands("loading"), "paths"));
+  });
+
+  it("swallows a click that lands on the dialog body, so a mis-landed click is silent", () => {
+    expect(SRC).toMatch(/<div class="dialog"[^>]*on:click\|stopPropagation/);
+  });
+
+  it("centres the dialog vertically, which is why a height change moves the rows above it", () => {
+    expect(ruleFor("backdrop")).toMatch(/place-items:\s*center/);
+  });
+
+  it("red-proof: the click aimed at Refresh at t=0 still hits Refresh once the list lands", async () => {
+    // Hold `checkpoint_list` open so the dialog is genuinely in its loading state when the point is
+    // taken, then release it — the same shape as a slow disk.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "checkpoint_list") {
+        await held;
+        return CHECKPOINTS;
+      }
+      if (cmd === "checkpoint_failures_list") return [];
+      return null;
+    });
+
+    render(CheckpointDialog, { initialPath: "/work/proj" });
+
+    // t=0: the list has not landed. This is the instant the pointer is over Refresh.
+    expect(screen.queryByTestId("cp-m-2"), "no checkpoint may have rendered yet").toBeNull();
+    expect(screen.queryByTestId("error"), "the model has no `.err` row; this run must not have one").toBeNull();
+    expect(screen.queryByTestId("note"), "the model has no `.note` row; this run must not have one").toBeNull();
+    const aimed = bandNamed(bands("loading"), "paths");
+    const aimY = (aimed.top + aimed.bottom) / 2;
+
+    release();
+    await screen.findByTestId("cp-m-2");
+
+    // The dialog is centred, so growing `.list` by Δ moves `.paths` UP by Δ/2 — which means the point
+    // the pointer is still resting on is now Δ/2 FURTHER DOWN the dialog than it was.
+    const shift = (listHeight("settled") - listHeight("loading")) / 2;
+    const landedIn = bandAt(bands("settled"), aimY + shift);
+
+    // RED-PROOF, run and recorded here rather than only in the PR body (CPE-1933 rule 3). With
+    // `.list` reverted to `max-height: 30vh` (no `height`): `shift` = **93px**, `landedIn` resolves
+    // to **"list"**, this test dispatches its click at `Revert…` instead of Refresh, and
+    // `confirm-revert` is on screen when it asserts — a click aimed at Refresh put a destructive
+    // action one Enter away. **2 of 32 red in this file** (this test and the inverted height
+    // assertion above), plus the repo-wide `dialogBodyReflow.test.ts` leg naming
+    // `CheckpointDialog.svelte#list`: 3 of 47 across the two files.
+    // Note which leg did NOT red, because it says what each is for: "loading and settled do not move
+    // the rows above the list" stayed green, correctly — it compares the DOM outside `.list`, and the
+    // defect was geometric, not structural. Neither leg subsumes the other.
+    // Restored; 32/32 green with `height: clamp(160px, 30vh, 260px)`, where `landedIn` is "paths" and
+    // `shift` is 0.
+    const target =
+      landedIn === "paths"
+        ? screen.getByTestId("refresh-btn")
+        : landedIn === "create-row"
+          ? screen.getByTestId("create-btn")
+          : // WHICH row of `.list` is under the point is a text-metrics question jsdom cannot answer.
+            // The first row is taken deliberately: it is the worst case, and the worst case is the
+            // whole reason this component was ranked above the one CPE-1968 fixed.
+            screen.getByTestId("revert-btn-m-2");
+
+    invokeMock.mockClear();
+    await fireEvent.click(target);
+
+    expect(
+      screen.queryByTestId("confirm-revert"),
+      `a click aimed at the centre of the Refresh row while the list was loading landed in ` +
+        `"${landedIn}" once it rendered — the dialog re-centred and the row moved ${shift}px. In this ` +
+        "dialog that is not a swallowed click: `.list` carries `Revert…`, so the stray click ARMS A " +
+        "DESTRUCTIVE ACTION. `.list` must have a height that does not depend on the checkpoint list.",
+    ).toBeNull();
+
+    expect(
+      invokeMock,
+      `the click landed in "${landedIn}" instead of on Refresh, so the list was never re-read`,
+    ).toHaveBeenCalledWith("checkpoint_list", { root: "/work/proj" });
+  });
+
+  it("the hazard does not depend on the modelled loading height being exact", () => {
+    // The model's one unmeasurable input is how tall the "Loading…" box is. So rather than defend a
+    // number, derive the number at which the conclusion would flip: the loading height above which
+    // the aimed point stays inside `.paths`. Anything below it lands in `.list`.
+    const row = controlRowHeight();
+    const gap = px("paths", "margin-bottom");
+    const listTop = 2 * row + 2 * gap;
+    const settled = lengthToPx(
+      declaration(ruleFor("list"), "max-height") ?? declaration(ruleFor("list"), "height")!,
+      VIEWPORT_H,
+    );
+    // aim (row/2) + (settled - loading)/2 >= listTop  ⇔  loading <= settled + row - 2*listTop
+    const flipsAt = settled + row - 2 * listTop;
+
+    expect(
+      flipsAt,
+      `a "Loading…" box shorter than ${flipsAt}px puts the click in \`.list\`. That is only a real ` +
+        "hazard if it is comfortably above a one-line box (padding plus one 12.5px line), which is " +
+        "what makes the red-proof's conclusion independent of the text metrics jsdom cannot measure.",
+    ).toBeGreaterThan(2 * px("empty", "padding") + 20);
+  });
+
+  it("loading and settled do not move the rows above the list", async () => {
+    // LEG 2, the DOM one, which is what makes the geometric leg sufficient: the geometry speaks only
+    // for `.list`; it would miss a node appearing ABOVE the controls. So render two list sizes and
+    // assert everything outside `.list` is byte-identical.
+    const outsideList = (): string => {
+      const clone = (document.querySelector(".dialog") as HTMLElement).cloneNode(true) as HTMLElement;
+      clone.querySelector('[data-testid="checkpoint-list"]')!.innerHTML = "";
+      return clone.innerHTML;
+    };
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "checkpoint_list") return CHECKPOINTS;
+      if (cmd === "checkpoint_failures_list") return [];
+      return null;
+    });
+    const { unmount } = render(CheckpointDialog, { initialPath: "/work/proj" });
+    await screen.findByTestId("cp-m-2");
+    const withTwo = outsideList();
+    unmount();
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "checkpoint_list") return [CHECKPOINTS[0]];
+      if (cmd === "checkpoint_failures_list") return [];
+      return null;
+    });
+    render(CheckpointDialog, { initialPath: "/work/proj" });
+    await screen.findByTestId("cp-m-2");
+
+    expect(
+      outsideList(),
+      "the number of checkpoints changed something OUTSIDE `.list`, so the centred dialog re-centres " +
+        "and the controls above the list move under the pointer (CPE-1983). Only `.list`'s CONTENTS " +
+        "may differ between list sizes.",
+    ).toEqual(withTwo);
   });
 });

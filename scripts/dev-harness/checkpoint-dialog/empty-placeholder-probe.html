@@ -1,0 +1,74 @@
+<!doctype html>
+<!--
+  CPE-1983 round 2 — does a centred empty placeholder actually fill and centre inside the two PARENT
+  SHAPES this ticket pinned to a fixed height?
+
+  WHY IT IS COMMITTED. The review round's visual finding was that six fixed boxes needed
+  `display: grid; place-items: center; height: 100%` on their placeholder child (the second half of
+  CPE-1968's fix, which round 1 did not carry over). Only ONE of those six was photographed in the
+  real component. The other five sit in FLEX COLUMNS, where `height: 100%` on an item is exactly the
+  kind of thing that quietly does not do what it reads like — so it was measured rather than assumed,
+  and CLAUDE.md is explicit that a measurement a reviewer cannot re-run is not a measurement.
+
+  Run:
+    chrome --headless=new --disable-gpu --hide-scrollbars --virtual-time-budget=2000 \
+      --screenshot=probe.png file:///<abs path>/empty-placeholder-probe.html
+  or just open it in a browser. The readout at the bottom is the whole result.
+
+  WHAT IT MEASURED, 2026-08-28, Chrome headless=new at 600x900:
+    a (flex column, .jobs/.rules/.list/.ops) : parent 200.0  child 198.0  fills=true  offset 0.0px
+    b (plain block, .list/.preview)          : parent 200.0  child 198.0  fills=true  offset 0.0px
+    c (<ul> flex column, .ops)               : parent 200.0  child 198.0  fills=true  offset 0.0px
+
+  AND THE ARTIFACT THAT ALMOST BECAME A FINDING, kept here because it is the reason the reset below is
+  copied in deliberately: with the `* { box-sizing: border-box }` line REMOVED, case `b` reads
+  child h=216 against a 200px parent, fills=false, and the text sits 8.0px BELOW centre — `height: 100%`
+  plus padding under content-box. That is a property of the probe without the app's reset, not of the
+  app, which sets that reset globally at src/app.css:1070. A probe that does not reproduce its host's
+  reset measures a different page.
+
+  Dev-only; not part of the production build, and not wired into any CI job.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>CPE-1983 — empty placeholder centring probe</title>
+    <style>
+      /* src/app.css:1070 — the app's global reset, reproduced on purpose. See the header. */
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { margin: 0; font: 13px system-ui, sans-serif; background: #fff; }
+      .box { border: 1px solid #999; margin: 10px; width: 400px; }
+      /* The flex-column parents: BackupDashboard `.jobs`, ColorRules `.rules`, WatchRules `.rules`,
+         Workspaces `.list`, MacroRunConfirm `.ops`. */
+      .flexcol { height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+      /* The plain-block parents: CheckpointDialog `.list`, BatchMediaDialog `.preview`. */
+      .blockbox { height: 200px; overflow: auto; }
+      /* Exactly what the six placeholders now declare. */
+      .empty { color: #666; padding: 8px 2px; display: grid; place-items: center; height: 100%; }
+      ul.flexcol { list-style: none; }
+      #out { font: 12px ui-monospace, Consolas, monospace; white-space: pre; padding: 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="box flexcol" id="a"><div class="empty" id="ae">No rules yet.</div></div>
+    <div class="box blockbox" id="b"><div class="empty" id="be">No checkpoints yet.</div></div>
+    <ul class="box flexcol" id="c"><li class="empty" id="ce">Nothing to run.</li></ul>
+    <div id="out">measuring…</div>
+    <script>
+      function report(label, parentId, childId) {
+        const p = document.getElementById(parentId).getBoundingClientRect();
+        const c = document.getElementById(childId).getBoundingClientRect();
+        const offset = c.top + c.height / 2 - (p.top + p.height / 2);
+        return (
+          `${label}: parent ${p.height.toFixed(1)}  child ${c.height.toFixed(1)}  ` +
+          `fills=${Math.abs(c.height - p.height) < 3}  offset ${offset.toFixed(1)}px`
+        );
+      }
+      document.getElementById("out").textContent = [
+        report("a (flex column)      ", "a", "ae"),
+        report("b (plain block)      ", "b", "be"),
+        report("c (<ul> flex column) ", "c", "ce"),
+      ].join("\n");
+    </script>
+  </body>
+</html>

@@ -395,12 +395,34 @@
   .x { width: 28px; height: 28px; display: grid; place-items: center; color: var(--text-dim); }
   .x:hover { color: var(--text); }
   .warn { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
-  .ops { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; overflow: auto; max-height: 40vh; }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). CORRECTED IN ROUND 2: round 1 said
+     this list is "empty when the confirm appears and full a moment later". It is not — while
+     `onMount`'s plan is in flight `.ops` DOES NOT EXIST, and a one-line `Planning…` div stands in its
+     place (the `{:else if plan === null}` branch above). So the growth is a one-line div being
+     REPLACED by a list, with the confirm buttons below it — the click a user aims at Cancel is the
+     one that must not land on Run. Same trade, different mechanism, and the mechanism is what a
+     comment is for.
+     TWO properties hold the height, and they are NOT redundant: `.dialog` is `display: flex;
+     flex-direction: column`, where a flex item's default `flex-shrink: 1` lets `height` be
+     overridden by the free-space algorithm the moment the dialog reaches its own `max-height: 84vh`.
+     `flex: 0 0 auto` is what makes the declared height actually hold. CPE-1968 measured the same pair
+     in MacrosDialog: with the height in place and `flex` alone deleted, 1 of 16 red — so each is
+     red-proofed separately, never as a pair.
+     At the 700px harness window `40vh` is 280px and binds; the floor engages below 400px, the cap
+     above 800px. */
+  .ops { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; overflow: auto; height: clamp(160px, 40vh, 320px); flex: 0 0 auto; }
   .ops li {
     font-family: ui-monospace, monospace; font-size: 12px; padding: 6px 9px; border-radius: 6px;
     background: var(--surface-alt); border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all;
   }
-  .ops li.dim { color: var(--text-faint); font-family: inherit; }
+  /* CPE-1983 — centred, and only because `.ops` is now a fixed height (the same second half of the
+     fix `OrganizeDialog`'s `.empty` carries): "Nothing to run for the current selection." pinned to
+     the corner of a 280px box reads as a failed render rather than an empty one. Safe because this
+     `<li>` is the `{#if plan.length === 0}` branch, so it is the sole child whenever it exists.
+     Scoped `.ops li.dim` rather than `.dim`, deliberately: the bare `.dim` also styles the
+     "Planning…" line, which is a SIBLING of `.ops` in an auto-height parent where `height: 100%`
+     would resolve against nothing. */
+  .ops li.dim { color: var(--text-faint); font-family: inherit; display: grid; place-items: center; height: 100%; }
   .op-kind { color: var(--accent-text); font-weight: 600; margin-right: 4px; }
   .op-arrow { color: var(--text-faint); }
   .results { margin-bottom: 8px; }
