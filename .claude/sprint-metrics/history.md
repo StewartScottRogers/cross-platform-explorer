@@ -4930,3 +4930,57 @@ finds the classes it asks about; the ones it does not ask about are found by the
 This is the same shape as everything else in this shift, one level out: *the guard was green because
 nothing put the failing input in front of it.* Here the "guard" was three humans-equivalent reviews and
 the missing input was an operating system.
+
+## A correction copied is a claim, and `\b` thinks a hyphen is a word boundary
+
+2026-08-29, PRs #1106 (CPE-1986) and #1107 (CPE-1983), same review round.
+
+Two findings from the same night that are the same lesson at different scales.
+
+### 1. Inheriting a correction as boilerplate
+
+CPE-1957 shipped a genuinely true clause at its sabotage sites: *"the figures below read one lower than
+what you will measure here"* — true, because that ticket's own new test moved the baseline after the
+figures were taken.
+
+CPE-1986 copied the shape and wrote *"the figures below read **five** lower."* **Measured: every one of its
+three figures already sums to the shipping tree's total.** They were taken *in* that tree, so a re-run
+reproduces them exactly — which the Reviewer did, to the number.
+
+**The clause's whole job is to tell the next reader whether their measurement means the numbers went
+stale — and as written, an honest re-run CONTRADICTS the comment and fires the neighbouring "these are
+stale, re-run them" instruction.**
+
+**The rule: a correction is a measurement, not a template.** Copying one into a new site without
+re-deriving it produces a claim that is false in a *more* confusing way than the defect it was invented to
+prevent, because it comes pre-endorsed by having been right somewhere else.
+
+### 2. `\b` treats a hyphen as a word boundary
+
+CPE-1983's guard matched elements with `class="[^"]*\blist\b[^"]*"`. In a regex, `-` is a non-word
+character, so `\blist\b` matches **`drift-list`**, and `\blog\b` matches **`log-line`**, and `\bres\b`
+matches **`res-outcome`**. The scan reported **five multi-element boxes where there are three.**
+
+**And the same matcher backs the `role="dialog"` exclusion**, which is the dangerous half: **a body class
+that happened to be a hyphen-substring of its dialog root's class would have been silently removed from
+the population.** A guard over "all the X in this repo" that quietly drops one is the exact defect that
+ticket exists to close, hiding inside its own implementation.
+
+Fixed by tokenising the class attribute. **Population unchanged at 22 — the counts were not**, which is
+worth noting: the headline number survived, so nothing in the top-line result would have revealed it.
+
+**Two rules fall out:**
+- **Never use `\b` to match a CSS class, an identifier, or anything hyphen-separated.** Split on whitespace
+  and compare tokens. The same trap applies to `kebab-case` config keys, CLI flags, and file stems.
+- **When a matcher backs both an inclusion and an EXCLUSION, its false positives change direction.** A loose
+  match that over-reports on the inclusion side under-reports on the exclusion side — and only one of those
+  is visible in the output.
+
+### And the fix that made the fact derived rather than restated
+
+The good move afterwards: the scan now **records the element list per box, and a leg fails on any
+undeclared multi-element row.** So the property that was wrong — "this key names one element" — is now
+checked rather than assumed, and cannot recur behind a single-element-shaped reason.
+
+That is the general repair for this class. **When a scan's output is a key, and the key can name more than
+one thing, make the count part of the record and assert on it.**
