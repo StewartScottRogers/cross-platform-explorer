@@ -4877,3 +4877,56 @@ argument."*
 That is the correct instinct, and it is the mirror image of everything else in this shift. **Changing a
 measured-looking number on the strength of an argument is how the wrong kind of confidence gets in** — the
 same defect as writing an unmeasured claim, arriving from the opposite direction.
+
+## Three careful parties, one platform, and the matrix caught what none of us did
+
+2026-08-28 21:31, PR #1103 (CPE-1959) — CI red after `APPROVE` + `SEC PASS`.
+
+The PR added a test seam that plants a GUID reparse point. It calls `fsutil::make_guid_reparse_point`,
+which is `#[cfg(windows)]`, **from code that is not itself Windows-gated**:
+
+```
+error[E0425]: cannot find function `make_guid_reparse_point` in module `crate::fsutil`
+    --> src/batch_media.rs:2137:33
+note: found an item that was configured out
+    --> src/fsutil.rs:7506:8   #[cfg(windows)]
+error: could not compile `cpe-server` (lib test) due to 1 previous error
+```
+
+Four jobs red — `Server crates` on ubuntu **and** macos, `MSRV`, and the verdict rollup. **Windows
+green.**
+
+**What makes this worth writing down is who missed it.** The author ran the full suite and both clippy
+feature modes. An independent Reviewer re-ran every sabotage, re-derived the enumeration, audited the
+security posture, and confirmed the release lib compiles. The Foreman read both reports. **All three of us
+were on Windows, and all three of us were green.**
+
+There is a memory in this repo that says exactly this — *CI runs a 3-OS backend matrix; local
+Windows-only `cargo test` misses platform failures* — and it still happened, because nothing in the
+review loop **asks** the platform question. Every leg of the gauntlet was rigorous within its platform.
+
+### The cheap check that would have caught it, and runs anywhere
+
+**Grep the new code for every `#[cfg(windows)]` symbol it names and confirm each call site is itself
+gated.** That is a derivation, not a build; it needs no cross toolchain and no second machine. It belongs
+in a dispatch brief the moment a PR adds a call into platform-gated code — which is most of `crates/server`.
+
+Two supporting habits:
+
+- **`cargo check --all-targets --target x86_64-unknown-linux-gnu`** where the toolchain exists — and where
+  it does not, **say so plainly** rather than reporting "clippy clean" as though it covered every target.
+  "Clean in both feature modes" is a claim about *features*, and it reads as a claim about *platforms*.
+- **A test that cannot arm on a platform must take the skip path there, loudly** — not compile out
+  silently and not pass. This PR already had the right machinery for that (`surrogate_was_planted_for_test`
+  reporting false so the leg prints what went uncovered); the defect was that the call site never reached
+  the question.
+
+### The wider point
+
+The gauntlet is thorough along the axes it enumerates: correctness, claims, security, sabotage pairs,
+ordering, vacuity. **Platform was not one of the axes, so nobody's rigour touched it.** A review process
+finds the classes it asks about; the ones it does not ask about are found by the matrix, or by a user.
+
+This is the same shape as everything else in this shift, one level out: *the guard was green because
+nothing put the failing input in front of it.* Here the "guard" was three humans-equivalent reviews and
+the missing input was an operating system.
