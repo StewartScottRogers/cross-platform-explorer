@@ -115,12 +115,40 @@ behaviour is its own reviewed decision). Stated at that function; **wants its ow
 has the same property and is **not** closed — an xattr cannot be overwritten in place through any portable
 API, so it would buy a weaker guarantee while reading like this one. Declared, not implied.
 
+**Review round 2 (#1106, `SEC PASS` + `CHANGES REQUESTED`) — three comment-only claim-scope fixes, no
+code change.**
+
+- **F1 — the "+5" clause was false and was inherited as boilerplate.** All three sabotage figures
+  (2,465+1, 2,439+27, 2,464+2) sum to **2,466**, the *shipping* tree's total, because they were measured
+  in this tree — so a re-run reproduces them exactly, and the clause telling the reader to expect five
+  fewer would have fired the sibling comment's "these are stale, re-run them" instruction on an honest
+  re-run. CPE-1957's "+1" clause is genuinely true there (its figures sum to the *pre-fix* total); this
+  copied the shape without re-deriving it. Both sites now say the figures were measured in this tree and
+  each sums to 2,466. `VAULT-SECURITY.md` never carried the clause but its paragraph now states the same
+  thing positively.
+- **F2 — "reachable" was the wrong word, and my own test doc said so 3,400 lines away.** The pair proves
+  **covered**, not reachable. Ran the third sabotage myself rather than quoting the Reviewer's number:
+  `same_object_or_refuse` returning its probe unconditionally + `overwrite_pinned_file`'s write-open
+  failure returning `Ok(())` gives **2,460 / 6** with `alternate data streams could not be listed`
+  appearing **0 times in the whole run** — independently reproducing the Reviewer's figure. Mechanism:
+  for a file the write-open touches the same object first, for a directory the identity probe does. Now
+  documented as a **deliberate, unreachable-from-the-walk backstop**, in the shape CPE-1929 requires and
+  the surrogate refusal two functions up already uses. Corrected at `vault_manager.rs` **and** in
+  `VAULT-SECURITY.md`, which carried the same false word and which the finding did not cite.
+- **F3 — "the two residuals" → "at least these residuals"** (CLAUDE.md round-9 rule).
+
+Re-verified after the edits: `cargo clippy --locked --all-targets -- -D warnings` clean in both feature
+modes, `cargo test --lib` **2,466 / 0 / 14**.
+
 **Numbers** (Windows 11, `cargo test --lib`, `crates/server`): baseline **2,461 / 0 / 14** at `2f7b3206`,
 re-measured **identical** at `9bfb21d7` after rebasing (all three sabotage figures were re-run there and
 came back the same, so #1103's 511 lines in `batch_media` moved nothing here);
-**2,466 / 0 / 14** in the shipped tree — **five new tests**. CPE-1929 pair on the new refusal: disabled
-**2,465 / 1**, predicate forced to lie **2,439 / 27** — both red, so it is reachable, not shadowed.
-Red-proof of the wiring: both `shred_alternate_streams` calls removed → **2,464 / 2**.
+**2,466 / 0 / 14** in the shipped tree — **five new tests**. Every figure below was measured in the
+shipped tree and each sums to 2,466. CPE-1929 pair on the new refusal: disabled **2,465 / 1**, predicate
+forced to lie **2,439 / 27** — both red, so it is **covered** (by a direct-call test), not shadowed; the
+third sabotage says it is **not reachable from the walk** (**2,460 / 6**, message absent), so it is kept
+as a declared backstop. Red-proof of the wiring: both `shred_alternate_streams` calls removed →
+**2,464 / 2**.
 `cargo clippy --locked --all-targets -- -D warnings` clean in both feature modes (default and `index`).
 A real non-Windows `cargo check` is **impossible on this machine** (five transitive C deps need
 `x86_64-linux-gnu-gcc`), so the platform axis was derived instead: the ten new `#[cfg(windows)]` attributes

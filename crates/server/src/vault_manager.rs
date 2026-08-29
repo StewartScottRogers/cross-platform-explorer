@@ -2217,16 +2217,31 @@ fn shred_alternate_streams(
         // **CPE-1929 sabotage pair, run by hand on WINDOWS 11** (`cargo test --lib`, `crates/server`;
         // baseline **2,461 passed / 0 failed / 14 ignored** at base `2f7b3206`, and **re-measured at
         // `9bfb21d7` after rebasing — identical, so #1103's 511 lines in `batch_media` moved nothing
-        // here, and all three figures below were re-run there and came back the same**; **2,466 in the
-        // tree this ships in** — the same baseline plus this ticket's five new tests, so the figures
-        // below read five lower than what you will measure here). Disabling this refusal (returning
-        // `Ok(())` from the arm) is **2,465 / 1** —
+        // here, and both figures below were re-run there and came back the same**; **2,466 in the tree
+        // this ships in** — the same baseline plus this ticket's five new tests. Both figures below were
+        // measured **in this tree** and each sums to 2,466, so they are exactly what a re-run measures
+        // here; a different number means they are stale and must be re-run, not adjusted.) Disabling
+        // this refusal (returning `Ok(())` from the arm) is **2,465 / 1** —
         // `cpe_1986_an_unlistable_object_refuses_the_session_wipe_and_is_waved_through_by_create_vault`.
-        // Forcing the predicate to lie (`alternate_stream_names` always `Err`) is **2,439 / 27**. Both
-        // legs red, so this refusal is reachable and covered, not a guard shadowed by an earlier one.
+        // Forcing the predicate to lie (`alternate_stream_names` always `Err`) is **2,439 / 27**.
+        //
+        // **Both legs red, so this refusal is COVERED — by a direct-call test — and NOT reachable from
+        // the walk.** Those are different claims and only the first follows from the pair; an earlier
+        // draft of this comment said "reachable" and was wrong. Measured by the third sabotage CPE-1929
+        // prescribes for exactly this shape (neuter everything upstream and read who reports the
+        // failure): with `same_object_or_refuse` returning its probe unconditionally and
+        // `overwrite_pinned_file`'s write-open failure returning `Ok(())` instead of refusing, the suite
+        // is **2,460 / 6** and the string `alternate data streams could not be listed` appears **zero
+        // times in the whole run**. The mechanism is that both earlier guards
+        // touch the same object first — for a file `overwrite_pinned_file`'s write-open runs before
+        // this, so anything that makes `FindFirstStreamW` fail makes that open fail first; for a
+        // directory `same_object_or_refuse`'s probe runs before it. So this is kept as a **deliberate
+        // backstop** for a filesystem that reports a listing failure where the earlier guards succeed,
+        // and `cpe_1986_an_unlistable_object_...` reaches it only by calling this function directly.
+        // Do not be alarmed that no ordinary tree can trip it; that is the expected result.
         // **The platform is named because it is the axis nobody checks:** on Linux and macOS the whole
         // `#[cfg(windows)]` arm is absent and neither leg exists at all, so a green run there says
-        // nothing about either number.
+        // nothing about any of these numbers.
         Err(why) => match aliases {
             AliasPolicy::UnlinkAliasesInsteadOfOverwriting => {
                 return Err(VaultError::Format(format!(
@@ -5394,8 +5409,9 @@ mod tests {
     /// **Red-proofed on Windows 11** (`cargo test --lib`, `crates/server`, baseline **2,461 passed /
     /// 0 failed / 14 ignored** at base `2f7b3206`, **re-measured identical at `9bfb21d7` after
     /// rebasing, where this red-proof was also re-run and returned the same numbers**; **2,466 in the
-    /// tree this ships in** — the same baseline plus this ticket's five new tests, so the figures below
-    /// read five lower than what you will measure here). Commenting out both
+    /// tree this ships in** — the same baseline plus this ticket's five new tests. The figure below was
+    /// measured **in this tree** and sums to 2,466, so it is exactly what a re-run measures here; a
+    /// different number means it is stale and must be re-run, not adjusted.) Commenting out both
     /// `shred_alternate_streams` calls in `shred_dir_pinned`
     /// gives **2,464 passed / 2 failed**: this test, reporting the named stream still readable under
     /// `UnlinkAliasesInsteadOfOverwriting` — that is the live bug, reproduced — and

@@ -305,7 +305,7 @@ as a normal location; locking **re-seals that session directory back into the bl
       attributes (`$EFS`, `$INDEX_ALLOCATION`, `$BITMAP`, `$REPARSE_POINT`) are filesystem metadata, not
       places an ordinary write puts a user's plaintext: a **declared residual**.
 
-    **Windows only, and the two residuals that leaves are declared, not implied.** *(1)* Streams are NTFS;
+    **Windows only, and at least these residuals are declared rather than implied.** *(1)* Streams are NTFS;
     on Linux and macOS the analogue is **extended attributes**, including `com.apple.ResourceFork` (where
     a macOS resource fork lives) and `com.apple.FinderInfo`. They have the same property — writing the
     file's data does not touch them, and `unlink` frees their storage unwritten — so the same class of
@@ -319,11 +319,22 @@ as a normal location; locking **re-seals that session directory back into the bl
     CPE-1929 sabotage pair on the new refusal, run by hand on **Windows 11** (`cargo test --lib`,
     `crates/server`, baseline 2,461 / 0 / 14 at `2f7b3206` and re-measured **identical** at `9bfb21d7`
     after rebasing — where all three figures below were re-run and came back the same; 2,466 in the
-    shipping tree): disabling it is
-    **2,465 / 1**, forcing its predicate to lie is **2,439 / 27** — both legs red, so it is reachable and
-    covered rather than shadowed. Red-proof of the wiring: removing both `shred_alternate_streams` calls
+    shipping tree; every figure here was measured **in that tree** and each sums to 2,466, so they are
+    what a re-run measures — a different number means they are stale and must be re-run, not adjusted):
+    disabling it is **2,465 / 1**, forcing its predicate to lie is **2,439 / 27**.
+
+    Both legs red means it is **covered — by a direct-call test — and NOT reachable from the walk**;
+    those are different claims and only the first follows from the pair. Measured by the third sabotage
+    CPE-1929 prescribes for this shape: with `same_object_or_refuse` returning its probe unconditionally
+    and `overwrite_pinned_file`'s write-open failure returning `Ok(())` instead of refusing, the suite is
+    **2,460 / 6** and the message
+    `alternate data streams could not be listed` appears **zero times in the whole run** — for a file the
+    write-open touches the same object first, and for a directory the identity probe does, so whatever
+    makes `FindFirstStreamW` fail trips one of them first. It is therefore kept as a **deliberate
+    backstop** for a filesystem that reports a listing failure where the earlier guards succeed, and no
+    ordinary tree can trip it. Red-proof of the wiring: removing both `shred_alternate_streams` calls
     from `shred_dir_pinned` is **2,464 / 2**. On Linux and macOS the whole arm is `#[cfg]`'d out and
-    neither number exists, which is why the platform is named beside every one of them.
+    none of these numbers exists, which is why the platform is named beside every one of them.
   - **One lock at a time, per vault** (SEC-847 reviewer blocker A). The re-seal and the wipe are slow and
     hold no mutex, so two concurrent `lock` calls for the same vault interleaved: the second re-sealed the
     tree the first was already shredding and wrote *that* over the vault, **both returning `Ok`** over a
