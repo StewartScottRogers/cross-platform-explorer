@@ -254,6 +254,76 @@ as a normal location; locking **re-seals that session directory back into the bl
     catches junctions `is_symlink()` may not). Alongside it, a **message phrase** — "was a real one when
     the wipe started" — was dropped for being untrue of the wipe's own root. Calling both of those
     "guards" was loose in a paragraph whose point is precision about what is load-bearing (PR #861 review).
+  - **Alternate data streams — the wipe used to report success over retained plaintext** (CPE-1986).
+    Found by PR #1101's Security Auditor while confirming a *different* fix (CPE-1957, the cloud-placeholder
+    half of the same shape), measured under the **production** alias policy
+    (`UnlinkAliasesInsteadOfOverwriting`, the one `wipe_session_dir` passes) and reproduced here before
+    anything was changed: `wipe_ok=true main_all_zero=true ads_readable=true ads_still_secret=true`. The
+    lock said "Locked", the default stream was genuinely zeroed, and the secret was still on the volume.
+
+    The mechanism is that `read_dir` returns **names** and an overwrite through a name writes the
+    **default (`::$DATA`) data stream**. On NTFS a file — *and a directory* — may carry any number of
+    **named `$DATA` streams** beside it, each its own run of extents. `remove_dir_all` then unlinks the
+    file record and frees those extents **without writing them**. Nothing in the walk could see them and
+    nothing in the module mentioned them, so this was an **unstated** residual rather than a declared one,
+    which is what made it a defect: as in CPE-1957, *a skip is indistinguishable from a success at the
+    API*, and every assertion that existed on this path was satisfied by not touching the data. Streams
+    need no privilege to plant (`type secret > file.txt:hidden`) and survive a copy onto NTFS, and they
+    also arrive by ordinary means — `Zone.Identifier` from any browser or mail client, `AFP_AfpInfo` from
+    a Mac over SMB — so "only odd tooling does this" was never a safe assumption.
+
+    Closed by `vault_manager::shred_alternate_streams`: `FindFirstStreamW`/`FindNextStreamW`
+    (`FindStreamInfoStandard`) enumerate the object's streams, and each **named** `$DATA` stream is
+    overwritten through `overwrite_pinned_file` — the same function, and therefore the same refusals, the
+    default stream already goes through. That reuse is sound because a stream is not a second object:
+    measured, a handle opened at `file:name` reports the same volume serial and file index as the file
+    itself, the file's link count, no directory bit (even on a directory's stream) and no reparse tag, and
+    `metadata().len()` returns the **stream's** length. Called from `shred_dir_pinned` — for each file
+    **and for the directory itself** — never from inside `overwrite_pinned_file`, which would recurse.
+
+    Four decisions, each taken deliberately rather than by default:
+    - **An unshreddable stream refuses the whole wipe**, retryable, exactly as a busy default stream
+      already does. Over-refusing at a wipe costs retained plaintext (CPE-1957's lesson), but a refusal
+      happens *before* `remove_dir_all`, so what is retained is plaintext still sitting in the session
+      directory — visible, in a known place, retryable — rather than plaintext in extents with no name.
+      A silent skip is the one answer that is never right, because it is the defect.
+    - **An aliased file's streams are left alone**, like its default stream: they live in the same file
+      record, reachable through the other name, so writing them would destroy the other name's data. This
+      is SEC-847's hard-link rule applied one level in, and it is asked *before* enumeration so an
+      enumeration failure cannot refuse a wipe over an object that was never going to be touched.
+    - **Enumeration failure splits by alias policy**, for the reason `same_object_or_refuse` already
+      splits: refused for the session tree (the app's own directory on a local volume, where the call does
+      not fail), waved through for `create_vault`'s shred-original (a folder the *user* picked, possibly
+      on FAT/exFAT, where refusing would break a legitimate feature against an attacker its threat model
+      says is absent). `ERROR_HANDLE_EOF` is "no streams", not a failure — measured, that is what a
+      directory with none returns. **Not measured:** no FAT-formatted volume was available, so what
+      `FindFirstStreamW` returns on one is not quoted here.
+    - **Only `$DATA` streams are shredded.** `FindStreamInfoStandard` returned nothing else in any
+      measurement taken (an EFS-encrypted file reported `::$DATA` alone; so did one carrying a GUID
+      reparse point), so the filter is an **unexercised safety valve**, kept so that a build or filter
+      driver reporting a non-`$DATA` attribute cannot turn every wipe into a refusal. Non-`$DATA` NTFS
+      attributes (`$EFS`, `$INDEX_ALLOCATION`, `$BITMAP`, `$REPARSE_POINT`) are filesystem metadata, not
+      places an ordinary write puts a user's plaintext: a **declared residual**.
+
+    **Windows only, and the two residuals that leaves are declared, not implied.** *(1)* Streams are NTFS;
+    on Linux and macOS the analogue is **extended attributes**, including `com.apple.ResourceFork` (where
+    a macOS resource fork lives) and `com.apple.FinderInfo`. They have the same property — writing the
+    file's data does not touch them, and `unlink` frees their storage unwritten — so the same class of
+    residue exists there and is **not** closed. An xattr cannot be overwritten in place through any
+    portable API (setting a same-length zeroed value is a request ext4/APFS may satisfy by allocating
+    elsewhere), so a Unix arm would buy a weaker guarantee while reading like this one; it wants its own
+    ticket. *(2)* `secure_shred::shred_file` — the explorer's user-facing **Shred** command, a different
+    feature — has the identical residual on both platforms and was deliberately left alone rather than
+    widened into by this ticket; it is stated at that function.
+
+    CPE-1929 sabotage pair on the new refusal, run by hand on **Windows 11** (`cargo test --lib`,
+    `crates/server`, baseline 2,461 / 0 / 14 at `2f7b3206` and re-measured **identical** at `9bfb21d7`
+    after rebasing — where all three figures below were re-run and came back the same; 2,466 in the
+    shipping tree): disabling it is
+    **2,465 / 1**, forcing its predicate to lie is **2,439 / 27** — both legs red, so it is reachable and
+    covered rather than shadowed. Red-proof of the wiring: removing both `shred_alternate_streams` calls
+    from `shred_dir_pinned` is **2,464 / 2**. On Linux and macOS the whole arm is `#[cfg]`'d out and
+    neither number exists, which is why the platform is named beside every one of them.
   - **One lock at a time, per vault** (SEC-847 reviewer blocker A). The re-seal and the wipe are slow and
     hold no mutex, so two concurrent `lock` calls for the same vault interleaved: the second re-sealed the
     tree the first was already shredding and wrote *that* over the vault, **both returning `Ok`** over a

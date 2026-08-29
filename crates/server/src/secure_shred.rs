@@ -55,6 +55,19 @@ pub struct ShredReport {
 ///
 /// Returns `Err` (never panics) if the path can't be stat'd, a pass can't open/write/sync the file,
 /// or the final removal fails.
+///
+/// # Declared residual: this overwrites the DEFAULT data stream only (CPE-1986)
+///
+/// On Windows, `OpenOptions::open(path)` opens a file's default (`::$DATA`) stream, so a **named**
+/// alternate data stream on `path` is never written and the `remove_file` below frees its extents
+/// intact — the shred reports success over retained plaintext. The same is true of extended attributes
+/// (and therefore of a macOS resource fork) on Unix. CPE-1986 closed exactly this in the vault's
+/// session wipe (`vault_manager::shred_alternate_streams`, which enumerates with
+/// `FindFirstStreamW`/`FindNextStreamW` and shreds each stream through a pinned handle) and
+/// **deliberately did not widen into this function**, whose failure modes are a different, user-facing
+/// feature and want their own reviewed ticket rather than a drive-by change to when the Shred command
+/// refuses. Stated here rather than left silent, because an unstated residual in a wipe path is the
+/// defect. See `docs/design/VAULT-SECURITY.md` → "Alternate data streams".
 pub fn shred_file(path: &str, scheme: ShredScheme) -> Result<ShredReport, String> {
     let size_bytes = std::fs::metadata(path)
         .map_err(|e| format!("cannot stat {path}: {e}"))?
