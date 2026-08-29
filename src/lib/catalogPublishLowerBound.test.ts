@@ -1485,6 +1485,12 @@ function guardLogicalLines(): string[] {
  * `(read …)`, `jq f|mapfile -t a`, `{ read …; }`) went from bound to `[]` in the diff that fixed
  * four others. Round 9 re-measured those six against bash and only TWO of them bind in the enclosing
  * shell at all — see `filledTargets`' OVER-reported bullet.
+ * Closed in round 12, the NINTH, and the fourth consecutive instance of "fixed at one entrance":
+ * `quotedEnd` skipped `\` and `$` inside a `"` span but not a nested BACKTICK, so
+ * `` read -d "`printf "%s" ";"`" -r h6 `` spilled a `;` as a bare metacharacter and answered
+ * `["REPLY"]` while bash bound `h6`. Closing it made `quotedEnd` self-recursive, which needed a
+ * DEPTH cap on top of round 11's memo — the memo bounds work, not stack, and the guard's own
+ * 2000-deep backtick nest threw `RangeError` in the whole-file run while passing under `-t`.
  * Closed in round 11, the EIGHTH, and it was on round 10's own blind-spot list with the wrong
  * direction beside it: `quotedEnd` did not skip expansions while `expansionEnd` skipped quoted
  * spans, so `"$(echo ")")"` closed at the inner quote and emitted the expansion's `)` as a
@@ -1640,6 +1646,14 @@ function guardLogicalLines(): string[] {
  *     need to be — same subshell argument as the pipe and the parens above (measured: `v=$(read -r
  *     x)` leaves `x` UNSET), and round 9's expansion span restores the `[]` that round 8's tokenizer
  *     had turned back into `["x"]`.
+ * ROUND 12 CLOSED THE FOURTH INSTANCE OF THE SAME CLASS, and the sequence is the point: round 10
+ * F2 was `shellTokens` holding `$(…)` but not `` `…` ``; round 11 was `expansionEnd` skipping quoted
+ * spans while `quotedEnd` did not skip expansions; round 12 is `quotedEnd` skipping expansions but
+ * not BACKTICKS. Each fix covered the entrance in front of it and left the sibling open, and each
+ * was found by executing bash over shapes nobody had written down rather than by reading the diff.
+ * The span table above now states the closure condition from the GRAMMAR (POSIX keeps three
+ * characters special inside `"…"`; all three are handled) instead of describing the code, because
+ * a description of the code is exactly what read as complete for two rounds running.
  * ROUND 11 CLOSED THE ONE ROUND 10 LISTED, which is the more interesting correction: the shape was
  * enumerated, in the right half, under the right "at least these" framing — and the DIRECTION
  * written beside it ("a short span, i.e. extra tokens, not a swallow") was wrong. Extra tokens are
@@ -1661,6 +1675,21 @@ function guardLogicalLines(): string[] {
  * hides a live `read` from a default-DENY scan — the same fail-open the `fail-OPEN branch` test
  * measures away for `dropSingleQuoted`'s unterminated `'`. It is now an ordinary character, and the
  * `an unterminated `"` does not swallow the rest of the line` row is the red-proof.
+ * ROUND 12's red-proofs, no-jq baseline **27 passed / 60 skipped**:
+ *   * the backtick clause off (`if (false && ((c === "`" && q !== "`") || …))`) -> **3 failed /
+ *     24 passed**: the corpus with 12 fail-open lines (the new `dqBtickOddQuote` spelling, 4
+ *     free-text options x 3 binding contexts), the ordinary-shapes table naming all four defect
+ *     rows AND the unterminated-backtick row, and the termination guard's balanced backtick nest.
+ *     The BALANCED backtick control stays green under it, so the fix is not what makes ordinary
+ *     `` "`f x`" `` work — the same measurement round 11 made for `$( )`.
+ *   * the depth cap off (`if (false && nestDepth > MAX_SPAN_DEPTH)`) -> **1 failed**, the
+ *     termination guard, `RangeError: Maximum call stack size exceeded`. That is the sabotage that
+ *     found the cap was needed in the first place, kept as its red-proof.
+ *   * the memo off, cap in place (`const hit = undefined` in both) -> **1 failed**, the termination
+ *     guard, `expected 5914 to be less than 1000`. Both bounds are live and neither covers the
+ *     other: without the memo the cost is exponential below the cap, without the cap the stack
+ *     blows above it.
+ *
  * ROUND 11's red-proofs, no-jq baseline **27 passed / 60 skipped** (round 10's 26 plus the
  * termination guard). Round 11's review found no new defect — it found that round 10 had written
  * the wrong DIRECTION on a shape it correctly enumerated, and the fix turned a listed gap into a
@@ -1792,6 +1821,23 @@ const TAKES_ARG = { read: "adinNptu", mapfile: "dnOsuCc" } as const;
  */
 type SpanMemo = Map<number, number>;
 /**
+ * How deep the span walkers may recurse before refusing. The memo bounds the WORK; it does not bound
+ * the STACK, and round 12 found that out by running it rather than by reading it: `quotedEnd` now
+ * recurses into ITSELF for a nested backtick, so the guard's own 2000-deep unterminated nest threw
+ * `RangeError: Maximum call stack size exceeded`. It threw in the whole-file run and PASSED under
+ * `-t` on the same commit, because the ambient stack differs — a depth guard that depends on how
+ * much stack the caller happened to leave is not a guard, and "it passed in isolation" is exactly
+ * how this would have shipped.
+ *
+ * 64 is far past anything real shell writes (the guard script's deepest is 2) and the refusal is the
+ * direction already measured for an unterminated nest: -1, so the quote is an ordinary character and
+ * nothing is swallowed. A capped refusal is deliberately NOT memoized — the cap is a property of the
+ * path taken to an index, not of the index, and caching it would let a deep query poison a shallow
+ * one. Both bounds are needed and they are not substitutes: without the memo the cost is exponential
+ * BELOW this depth (measured at n=36), and without the cap the stack blows above it.
+ */
+const MAX_SPAN_DEPTH = 64;
+/**
  * The end index (inclusive) of the quoted span that starts at `line[i]`, which must be one of
  * `"`, `'` or a backtick — or -1 when it never closes on this line. `'` takes NOTHING literally
  * except its own closer (the shell expands nothing inside it, and a backslash is a plain
@@ -1813,12 +1859,13 @@ type SpanMemo = Map<number, number>;
  * (measured: `"$(printf 'v: %s' "$x")"`, `"prefix $(printf '%s' "$x") suffix"`,
  * `"$(printf '%s' "cb")"`, `read -d "$(printf '%s' "$x")"` — all bound, all agreed). No live
  * exposure either: the guard script's two `read` lines carry no substitution and the taint set is 12
- * at rounds 7 through 11. It is closed in CODE rather than written down because that is what this
+ * at rounds 7 through 12. It is closed in CODE rather than written down because that is what this
  * file's own policy says to do with a fail-open, and round 10 left the two sentences disagreeing.
  */
-function quotedEnd(line: string, i: number, memo: SpanMemo = new Map()): number {
+function quotedEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDepth = 0): number {
   const hit = memo.get(i);
   if (hit !== undefined) return hit;
+  if (nestDepth > MAX_SPAN_DEPTH) return -1; // NOT memoized — see `MAX_SPAN_DEPTH`
   const save = (v: number): number => {
     memo.set(i, v);
     return v;
@@ -1836,11 +1883,43 @@ function quotedEnd(line: string, i: number, memo: SpanMemo = new Map()): number 
       continue;
     }
     if (c === "$") {
-      const e = expansionEnd(line, j, memo);
+      // -1 here is AMBIGUOUS — `$` may not open an expansion at all (`"$x"`, `"cost: $5"`) — so it
+      // falls through to "ordinary character". That is the only branch in this function where -1 is
+      // not conclusive. Measured, the fall-through is fail-CLOSED on an actually-unterminated
+      // `"$(echo " -r x`: bash rejects the line and the walk over-reports `x`.
+      const e = expansionEnd(line, j, memo, nestDepth + 1);
       if (e !== -1) {
         j = e;
         continue;
       }
+    }
+    // ROUND 12. POSIX keeps exactly THREE characters special inside `"…"` — `$`, a backtick, `\` —
+    // and rounds 10/11 handled two of them. A nested BACKTICK substitution carrying an odd `"` was
+    // therefore read as closing the outer span at that inner quote, and the substitution's body
+    // spilled out as bare tokens INCLUDING A METACHARACTER, which ends the command. Four shapes,
+    // all bound by bash 5.3.15, all answering the fallback at round 11's head:
+    //     read -p "`echo ")"`" -r h1               -> ["REPLY"]     (spills `)`)
+    //     mapfile -C "`printf ")"`" -c 1 -t h2     -> ["MAPFILE"]   (spills `)`)
+    //     read -p "pre`echo ")"`post" -r h4        -> ["REPLY"]     (spills `)`)
+    //     read -d "`printf "%s" ";"`" -r h6        -> ["REPLY"]     (spills `;` — and a delimiter
+    //                                                 computed by a substitution is ordinary code)
+    // The `q === "`"` half is the mirror — a quote nested inside a backtick substitution — taken in
+    // the same diff rather than left as the next round's entrance.
+    //
+    // THE -1 IS MEASURED, NOT REASONED, which is this file's own rule and the condition this fix
+    // was taken under. Unlike the `$` branch above, -1 is unambiguous here (`c` IS a backtick, so
+    // the span is genuinely unterminated), but "unambiguous" does not say which answer is safe. Both
+    // were run against this line, which puts a live `read` between an unterminated backtick and a
+    // later quote — `msg="`echo ; read -r sneaky < <(jq -r .n f) "end"`:
+    //     refuse (-1)   -> 16 tokens, `["sneaky"]`                     <- shipped
+    //     fall through  -> ONE token, the whole line, and `[]`
+    // The fall-through swallows the live `read` to end of line, which is the exact fail-open rounds
+    // 9 and 11 closed elsewhere. Refusing costs a short span (extra tokens) and reports the `read`.
+    if ((c === "`" && q !== "`") || (q === "`" && (c === '"' || c === "'"))) {
+      const e = quotedEnd(line, j, memo, nestDepth + 1);
+      if (e === -1) return save(-1);
+      j = e;
+      continue;
     }
     if (c === q) return save(j);
   }
@@ -1870,9 +1949,10 @@ function quotedEnd(line: string, i: number, memo: SpanMemo = new Map()): number 
  * span via `quotedEnd`, and an UNTERMINATED quote inside the expansion returns -1, which is this
  * function's stated fail direction rather than a second swallow.
  */
-function expansionEnd(line: string, i: number, memo: SpanMemo = new Map()): number {
+function expansionEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDepth = 0): number {
   const hit = memo.get(i);
   if (hit !== undefined) return hit;
+  if (nestDepth > MAX_SPAN_DEPTH) return -1; // NOT memoized — see `MAX_SPAN_DEPTH`
   const save = (v: number): number => {
     memo.set(i, v);
     return v;
@@ -1888,7 +1968,7 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map()): numb
       continue;
     }
     if (c === '"' || c === "'" || c === "`") {
-      const q = quotedEnd(line, j, memo);
+      const q = quotedEnd(line, j, memo, nestDepth + 1);
       if (q === -1) return save(-1); // unterminated inside the expansion: refuse, never swallow
       j = q;
       continue;
@@ -1933,26 +2013,38 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map()): numb
  *   `\X`        | this loop, inline    | n/a, exactly 2 chars   | a trailing `\` is guarded by
  *               |                      |                        | `i + 1 < line.length` and is an
  *               |                      |                        | ordinary character
- *   `"…"`       | `quotedEnd`          | honours `\`, and holds | ordinary character (round 9)
- *               |                      | an embedded `${…}` /   |
- *               |                      | `$(…)` whole via       |
+ *   `"…"`       | `quotedEnd`          | POSIX keeps exactly    | ordinary character (round 9)
+ *               |                      | THREE special inside   |
+ *               |                      | `"…"` and all three    |
+ *               |                      | are handled: `\`       |
+ *               |                      | (round 9), `$` via     |
  *               |                      | `expansionEnd` (round  |
- *               |                      | 11). `'` is literal    |
- *               |                      | inside `"` per POSIX   |
+ *               |                      | 11), a backtick via    |
+ *               |                      | `quotedEnd` (round 12) |
  *   `'…'`       | `quotedEnd`          | nothing is special     | ordinary character
  *               |                      | inside `'…'`, `\`      |
  *               |                      | included — so this is  |
  *               |                      | the one branch that    |
  *               |                      | does NOT recurse       |
- *   `` `…` ``   | `quotedEnd`          | same as `"…"`          | falls through to the
- *               |                      |                        | metacharacter branch, i.e. its
- *               |                      |                        | own token (SHELL_META has it)
+ *   `` `…` ``   | `quotedEnd`          | `\`, and a nested `"`  | falls through to the
+ *               |                      | or `'` span (round 12, | metacharacter branch, i.e. its
+ *               |                      | the mirror of the row  | own token (SHELL_META has it)
+ *               |                      | above)                 |
  *   `${…}`      | `expansionEnd`       | skips `'`/`"`/backtick | -1, so the `$` is an ordinary
  *   `$(…)`      | `expansionEnd`       | spans via `quotedEnd`  | character — never a swallow
  *   `$((…))`    | `expansionEnd`       | (round 10's F1 fix)    |
  *
- * The `"…"` and `${…}` rows are MUTUALLY recursive as of round 11, memoized per line (`SpanMemo`),
- * and `…terminates on a pathological nested span…` is the guard that the memo stays.
+ * WRITE THE THIRD COLUMN FROM THE GRAMMAR, NOT FROM THE CODE. Round 11's version of the `"…"` row
+ * said "honours `\`, and holds an embedded `${…}` / `$(…)` whole … `'` is literal inside `"` per
+ * POSIX" — an accurate description of what the code did, which is why it read as complete. It named
+ * the one character that IS literal inside `"` and silently omitted the one that is not, so the
+ * table documented the hole instead of exposing it. POSIX names three; count them.
+ *
+ * The `"…"`, `` `…` `` and `${…}` rows are MUTUALLY recursive (rounds 11-12), and `quotedEnd` is
+ * additionally self-recursive. Both bounds live at `SpanMemo` and `MAX_SPAN_DEPTH`: the memo bounds
+ * the work, the cap bounds the stack, neither substitutes for the other, and
+ * `…terminates on a pathological nested span…` is the guard for both — with one generator per
+ * recursive edge, since a guard that only drives the `$(` nest says nothing about the backtick one.
  *
  * AT LEAST these are still not held, and the halves are stated separately (CLAUDE.md's round-9
  * rule — never a count, and say which half each is in):
@@ -1969,7 +2061,7 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map()): numb
  *     at all (`logicalLines` joins `\`-continuations only). That is `shellScriptLines`' job.
  * Round 7's regex and round 8's loop both swallowed to end of line on an unterminated `"`, which
  * hides text from a default-deny scan; nothing in the script trips any of this today (the live
- * taint set is 12 at rounds 7 through 11), so these were latent holes rather than shipped
+ * taint set is 12 at rounds 7 through 12), so these were latent holes rather than shipped
  * fail-opens — and they are closed in the code rather than written down, because the file's stated
  * premise is default-deny and its headline is fail-open zero.
  *
@@ -3010,6 +3102,53 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
         lines: ['read -p "$(printf \'v: %s\' "$x")" -r n0 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$n0\" >&2"],
         want: ["n0"],
       },
+      // ── Round 12: the same class a FOURTH time, one spelling along again. Round 10 F2 was
+      // `shellTokens` holding `$(…)` but not `` `…` ``; round 11 was `expansionEnd` skipping quoted
+      // spans while `quotedEnd` did not skip expansions; this is `quotedEnd` skipping expansions but
+      // not BACKTICKS. POSIX keeps exactly three characters special inside `"…"` — `$`, a backtick,
+      // `\` — and the fix had covered two. All four bind in bash 5.3.15, all four answered the
+      // fallback at round 11's head, and in each the spilled token is a metacharacter that ends the
+      // command, so under this file's own membership rule they may not be listed — only closed.
+      {
+        label: "a `\"` span holds a BACKTICK substitution that itself holds a `\"`",
+        lines: ['read -p "`echo ")"`" -r h1 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$h1\" >&2"],
+        want: ["h1"],
+      },
+      {
+        label: "...and the same nesting on `mapfile`'s callback",
+        lines: ['mapfile -C "`printf ")"`" -c 1 -t h2 < <(jq -r .n f)', "printf '%s\\n' \"${h2[0]}\" >&2"],
+        want: ["h2"],
+      },
+      {
+        label: "...and with text on BOTH sides of the substitution inside the span",
+        lines: ['read -p "pre`echo ")"`post" -r h4 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$h4\" >&2"],
+        want: ["h4"],
+      },
+      {
+        // The sharpest of the four: the spilled metacharacter is `;`, and a delimiter computed by a
+        // command substitution is an ordinary thing to write.
+        label: "...and a `-d` delimiter computed by a backtick, spilling a `;`",
+        lines: ['read -d "`printf "%s" ";"`" -r h6 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$h6\" >&2"],
+        want: ["h6"],
+      },
+      {
+        // The control, same role as round 11's balanced row: a backtick inside `"` with BALANCED
+        // inner quotes was correct at round 11's head and still is, so the fix cannot be mistaken
+        // for what makes ordinary `` "`f x`" `` work. It needs an ODD `"` inside the substitution.
+        label: "a BALANCED backtick inside `\"` was always right, and still is",
+        lines: ['read -p "`echo "a" "b"`" -r k3 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$k3\" >&2"],
+        want: ["k3"],
+      },
+      {
+        // The DIRECTION of the new refusal, measured rather than reasoned (round 12's condition for
+        // taking the fix). An unterminated backtick inside `"`, a live `read` after it, and a later
+        // `"` on the line: refusing the span reports `sneaky`, while falling through swallows the
+        // whole line into ONE token and answers `[]`. This row pins the direction that does not
+        // swallow — the same fail-open rounds 9 and 11 closed elsewhere.
+        label: "an unterminated backtick inside `\"` refuses the span rather than swallowing the line",
+        lines: ['msg="`echo ; read -r sneaky < <(jq -r .n f) "end"', "printf '%s\\n' \"$sneaky\" >&2"],
+        want: ["sneaky"],
+      },
     ];
     const got = cases.map(({ lines }) => {
       const parsed = logicalLines(lines.join("\n"));
@@ -3060,13 +3199,13 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
    * figures in this docblock that its own runner contradicted (a "295 of which bash binds" that the
    * runner put at 225, and an over-report count quoted as a line count). The live figures are in the
    * assertion messages, which compute them; this table is provenance for the tokenizer comparison,
-   * which no assertion prints. Recorded at round 11's head, bash 5.3.15, Windows:
-   *     {"lines":615,"bashBinds":357,"declaredNonBinding":246,
-   *      "r7":[135,0],"r8":[153,136],"now":[0,238],"onlyR7":68,"onlyR8":86}
-   * i.e. of 615 generated lines bash binds on 357; the round-7 tokenizer fails open on 135 and the
-   * round-8 one on 153, 68 of them exclusive to round 7 and 86 exclusive to round 8 — the trade,
+   * which no assertion prints. Recorded at round 12's head, bash 5.3.15, Windows:
+   *     {"lines":705,"bashBinds":411,"declaredNonBinding":282,
+   *      "r7":[153,0],"r8":[165,164],"now":[0,274],"onlyR7":82,"onlyR8":94}
+   * i.e. of 705 generated lines bash binds on 411; the round-7 tokenizer fails open on 153 and the
+   * round-8 one on 165, 82 of them exclusive to round 7 and 94 exclusive to round 8 — the trade,
    * still symmetric in the sense the sensitivity check asserts (each loses lines the other keeps).
-   * Today's tokenizer fails open on 0 and over-reports 238, every one of them inside the 246 lines
+   * Today's tokenizer fails open on 0 and over-reports 274, every one of them inside the 282 lines
    * whose CONTEXT cannot bind, which is assertion 2 and is itself now confirmed against bash rather
    * than asserted from the context table.
    */
@@ -3157,6 +3296,16 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       id: "dqSubOddQuote",
       applies: (s) => s.freeText && !s.isTarget,
       render: (o) => `-${o} "$(printf "%s" ")")"`,
+    },
+    // Round 12, and the reason this round's defect got past the corpus: `bticked` renders a BARE
+    // backtick argument and `dqSub`/`dqSubOddQuote` use `$( )`, so no spelling combined `"` with a
+    // backtick, let alone with an odd `"` inside it. These two do — the balanced one on the safe
+    // side, the odd-quote one on the failing side, exactly as round 11 paired them for `$( )`.
+    { id: "dqBtick", applies: (s) => !s.isTarget, render: (o, s) => `-${o} "\`printf '%s' '${s.value}'\`"` },
+    {
+      id: "dqBtickOddQuote",
+      applies: (s) => s.freeText && !s.isTarget,
+      render: (o) => `-${o} "\`printf "%s" ")"\`"`,
     },
   ];
   const CORPUS_CONTEXTS: { id: string; binds: boolean; piped: boolean; wrap: (c: string) => string }[] = [
@@ -3353,26 +3502,67 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       // close to the backstop on a slower runner). That is 8x the bar below and a quarter of the
       // backstop. The margin in the shipped direction is enormous: memoized, n=36 is microseconds,
       // so a 1,000ms bar cannot flake on a loaded machine.
+      // ROUND 12 added a SECOND generator. `quotedEnd` now recurses into itself for a nested
+      // backtick, which is a new exponential surface of exactly the same shape, and a guard that
+      // only ever exercises the `$(` nest would have said nothing about it. One generator per
+      // recursive edge — `$(` for `quotedEnd`->`expansionEnd`, a backtick for `quotedEnd`->itself.
+      // The memo keys stay sound because a backtick start index is only ever queried by `quotedEnd`
+      // and a `$` index only by `expansionEnd`, which is why one map serves both.
       const NEST_DEPTH = 36;
-      const nest = (n: number) => `read -p "${'$(echo "'.repeat(n)} -r deep`;
-      const t0 = Date.now();
-      expect(filledTargets(nest(NEST_DEPTH)), "an unterminated nest must fall back, not bind").toEqual([
-        "REPLY",
+      const nests: Record<string, (n: number) => string> = {
+        "$(": (n) => `read -p "${'$(echo "'.repeat(n)} -r deep`,
+        "backtick": (n) => `read -p "${'`echo "'.repeat(n)} -r deep`,
+      };
+      for (const [label, nest] of Object.entries(nests)) {
+        const t0 = Date.now();
+        expect(
+          filledTargets(nest(NEST_DEPTH)),
+          `an unterminated ${label} nest must fall back, not bind`,
+        ).toEqual(["REPLY"]);
+        const elapsed = Date.now() - t0;
+        expect(
+          elapsed,
+          `tokenizing a ${NEST_DEPTH}-deep unterminated ${label} nest took ${elapsed}ms; memoized it is ` +
+            "microseconds. The `SpanMemo` threading has been broken somewhere, the cost is " +
+            "exponential in the nesting depth again, and the next input a few characters longer is " +
+            "a hang rather than a failure — which CI reports as nothing at all.",
+        ).toBeLessThan(1000);
+        // Only once the cheap probe has passed: the size that would hang outright.
+        expect(filledTargets(nest(2000)), `a 16KB unterminated ${label} nest must still fall back`).toEqual([
+          "REPLY",
+        ]);
+      }
+      // Terminating quickly on rubbish is worth nothing if the real shape is read wrongly, so a
+      // BALANCED nest of each kind, WITHIN the cap, has to come back as one option argument. Each
+      // repeat opens two levels (`$(` or a backtick, then the `"` inside it), so 20 repeats is ~40
+      // levels — comfortably under `MAX_SPAN_DEPTH` and about ten times anything real shell writes.
+      const closedSub = `read -p "${'$(echo "'.repeat(20)}x${'")'.repeat(20)}" -r deep <<< "hi"`;
+      expect(filledTargets(closedSub), "a balanced 20-deep `$(` nest is one option argument").toEqual([
+        "deep",
       ]);
-      const elapsed = Date.now() - t0;
-      expect(
-        elapsed,
-        `tokenizing a ${NEST_DEPTH}-deep unterminated nest took ${elapsed}ms; memoized it is microseconds. ` +
-          "The `SpanMemo` threading has been broken somewhere, the cost is exponential in the " +
-          "nesting depth again, and the next input a few characters longer is a hang rather than a " +
-          "failure — which CI reports as nothing at all.",
-      ).toBeLessThan(1000);
-      // Only once the cheap probe has passed: the sizes that would hang outright, plus a balanced
-      // deep nest, because terminating quickly on rubbish is worth nothing if the real shape is
-      // read wrongly.
-      expect(filledTargets(nest(2000)), "a 16KB unterminated nest must still fall back").toEqual(["REPLY"]);
-      const closed = `read -p "${'$(echo "'.repeat(200)}x${'")'.repeat(200)}" -r deep <<< "hi"`;
-      expect(filledTargets(closed), "a balanced 200-deep nest is one option argument").toEqual(["deep"]);
+      const closedBtick = `read -p "${'`echo "'.repeat(20)}x${'"`'.repeat(20)}" -r deep <<< "hi"`;
+      expect(filledTargets(closedBtick), "a balanced 20-deep backtick nest is one option argument").toEqual([
+        "deep",
+      ]);
+      // And the cap itself, both kinds. What is ASSERTED is the property the cap exists for: the
+      // call RETURNS rather than throwing `RangeError: Maximum call stack size exceeded`, and it
+      // never comes back empty — an empty answer would mean the live `read` had been swallowed,
+      // which is the fail-open direction. The particular answer past the cap is NOT asserted,
+      // because the mechanism does not promise one: measured here, the `$(` nest still comes back
+      // `["deep"]` (the refused outer quote splits into tokens that happen to leave the operand
+      // where the walk looks) and the backtick nest comes back `["REPLY"]`. Asserting either would
+      // be pinning an accident — this file's own recurring defect, one scope down.
+      for (const [label, tooDeep] of [
+        ["`$(`", `read -p "${'$(echo "'.repeat(200)}x${'")'.repeat(200)}" -r deep <<< "hi"`],
+        ["backtick", `read -p "${'`echo "'.repeat(200)}x${'"`'.repeat(200)}" -r deep <<< "hi"`],
+      ] as const) {
+        expect(
+          filledTargets(tooDeep),
+          `a ${label} nest deeper than MAX_SPAN_DEPTH (${MAX_SPAN_DEPTH}) came back EMPTY, which ` +
+            "means the whole line was swallowed into one span. The cap must refuse a span, never " +
+            "hide the rest of the line behind it.",
+        ).not.toEqual([]);
+      }
     },
     30000,
   );
@@ -3474,7 +3664,6 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       // Each is a local closure or a fixture builder, none of them a scanner.
       flush: "a local closure inside a tokenizer; it appends to that tokenizer's output array",
       save: "a local closure inside `quotedEnd`/`expansionEnd` that writes one `SpanMemo` entry",
-      nest: "builds a pathological INPUT line for the termination guard; it reads nothing",
       score:
         "a closure inside the corpus test that calls `filledTargets` and counts; the shell question " +
         "is delegated whole, and it decides nothing about the grammar itself",
