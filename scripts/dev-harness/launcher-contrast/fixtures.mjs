@@ -70,6 +70,33 @@ export const FIXTURES = [
     html: "__PALETTE_CHIPS__",
   },
   {
+    // CPE-1977. Every entry of STATE_META, mounted the way renderState() paints it — inline, on a tab.
+    // Without this the four state colours were measured NOWHERE: the other fixtures mount `.state-dot`
+    // in its CSS default (#7a7a7a, non-chromatic, dropped), so the harness reported the stylesheet's
+    // placeholder and never the app's actual amber/blue/green. A JS-painted element mounted in its
+    // default state is a fixture that measures the CSS instead of the app, and it reads as coverage.
+    // Expanded by `engine.mjs`'s `stateDotColours()`, which reads the table out of launcher.html —
+    // never a copy of the hexes here, so a retune there cannot leave this measuring stale values.
+    //
+    // RED-PROOFED, not asserted (CPE-1933 rule 3): put `#d08a1a` back into STATE_META.blocked and this
+    // harness exits 1 with `2.39:1 (bar 3) light fill #d08a1a on #eaeaea` and `2.22:1 ... on #e2e2e2`
+    // — the ticket's hand-measured 2.38 now coming out of the browser. Before this fixture existed the
+    // same source printed PASS.
+    //
+    // WHAT THIS COSTS, measured rather than assumed: four more `.tab`s at `min-width: 120px` push the
+    // strip further past the 1200px window, and `--verify-pixels` goes from 4 to 8 grounds UNVERIFIED
+    // (off the captured viewport) per scheme — same 59 verified, 0 disagreeing. Those are `.tab-label`
+    // and `.tab-chip` grounds that the screenshot leg can no longer reach; the computed-style leg still
+    // measures every one of them. Taken deliberately: the trade is 4 grounds losing their second
+    // opinion against 4 colours that had no first one. Widening the window would recover them and is
+    // NOT done here — it relayouts the whole page and would move measurements this ticket has no
+    // business moving.
+    name: "agent state dots (one per STATE_META entry)",
+    parent: "#tabs",
+    derivedFrom: ["const STATE_META = {", "s.tabDot.style.background = meta.color", "s.paneDot.style.background = meta.color"],
+    html: "__STATE_DOTS__",
+  },
+  {
     name: "model menu options",
     parent: "#model-menu",
     derivedFrom: ['opt.className = "model-opt"'],
@@ -88,7 +115,9 @@ export const FIXTURES = [
     html: `
       <div class="term-pane focused" data-fixture="pane-focused">
         <div class="pane-head">
-          <span class="state-dot"></span>
+          <!-- CPE-1977: painted from STATE_META, as renderState() does. .pane-head is #161616 in
+               BOTH schemes, so this is the one ground a state colour cannot solve per-scheme. -->
+          <span class="state-dot" style="background:__STATE_0__"></span>
           <span class="pane-chip" style="background:__PALETTE_0__">1</span>
           <span class="pane-label">claude — cross-platform-explorer</span>
           <span class="pane-state">working</span>
@@ -99,7 +128,7 @@ export const FIXTURES = [
       </div>
       <div class="term-pane ended" data-fixture="pane-ended">
         <div class="pane-head">
-          <span class="state-dot"></span>
+          <span class="state-dot" style="background:__STATE_1__"></span>
           <span class="pane-chip" style="background:__PALETTE_1__">2</span>
           <span class="pane-label">aider — done</span>
           <span class="pane-state">done</span>

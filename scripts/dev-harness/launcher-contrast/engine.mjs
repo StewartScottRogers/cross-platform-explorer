@@ -101,18 +101,25 @@
 //     absence, so `run.mjs` prints both counts every run (2026-08-28: 390 of 786 dropped, ~350 of
 //     those under bar — the second number moves by one or two between runs, which is itself worth
 //     knowing) and `--all` lists every one. Read the counts from the report, not from this comment.
-//  4. INLINE-ASSIGNED COLOURS ARE MEASURED, NOT ENFORCED — the readings the report names under
-//     "MEASURED, NOT ENFORCED", from the session-identity palette shared with the main app
-//     (CPE-1977).
-//  5. COLOURS ASSIGNED INLINE FROM JS TABLES THE FIXTURES NEVER MOUNT ARE NOT MEASURED AT ALL.
-//     `STATE_META` (launcher.html) sets `.state-dot`'s background to #d08a1a / #3a72b5 / #3a9d4a in
-//     `renderState()`; the fixtures mount `.state-dot` at its CSS default #7a7a7a, which is
-//     non-chromatic and therefore dropped, so those three never appear anywhere in the report — not
-//     even under "MEASURED, NOT ENFORCED". Measured by hand: #d08a1a on a light tab is 2.38:1 (the
-//     number that retired that hex from `.tab.blocked`) and #3a9d4a is 2.86:1 (retired from
-//     `.badge.yes`). They are not a 1.4.11 failure — each dot carries a `title=` and `.pane-state`
-//     spells the state out in words, so the colour is not the only carrier — but they ARE unmeasured,
-//     and they are in CPE-1977's scope alongside the chip palette.
+//  4. INLINE-ASSIGNED COLOURS ARE ENFORCED (CPE-1977) — BUT ONLY THE JS TABLES A FIXTURE MOUNTS.
+//     The exemption that used to sit at the top of `enforced()` is gone, and both of the launcher's
+//     inline palettes are now expanded into fixtures from their own declarations
+//     (`sessionChipColours`, `stateDotColours`). What remains open is the step in front of that:
+//     nothing here can DERIVE that a JS colour table exists. Each one had to be found by a human and
+//     pointed at. `STATE_META` is the worked example of the cost — CPE-1966 mounted `.state-dot` at
+//     its CSS default `#7a7a7a`, which is non-chromatic and therefore dropped, so `#d08a1a` sat on a
+//     light tab at 2.38:1 and appeared NOWHERE in the report, not even under the old "measured, not
+//     enforced". A third table would be invisible the same way. The counted INLINE-ASSIGNED
+//     population in the report, and `legsThatDidNotRun`'s floor under it, are what make the absence
+//     of a mounted table loud rather than silent; they cannot make the absence of an UNKNOWN one loud.
+//  5. THE MAIN APP'S COPY OF THE CHIP PALETTE IS NOT SWEPT HERE. This harness loads launcher.html and
+//     nothing else. `src/lib/sessionChip.ts` holds the same eight values — pinned equal to the
+//     launcher's by `src/lib/sessionChip.test.ts`, derived rather than claimed — so the VALUES cannot
+//     drift. What no part of the tree measures is the app's own grounds: `.agent-chip` on a Sidebar
+//     row and `.menu-chip` in AgentMenu, over `--surface` / `--bg` / `--hover` in four themes. This
+//     comment deliberately quotes no ratio for them, because quoting one would be a number with no
+//     measurement behind it sitting next to a green sweep (CPE-1933). It needs a browser sweep of the
+//     app the way this one sweeps the launcher, which is its own ticket.
 //
 // Run:  node scripts/dev-harness/launcher-contrast/run.mjs
 //   or: npm run harness:launcher-contrast
@@ -378,16 +385,56 @@ export function sessionChipColours(document = readFileSync(LAUNCHER, "utf8")) {
   return colours;
 }
 
+/**
+ * The agent-state dot colours, read out of launcher.html's own `STATE_META` (CPE-1977).
+ *
+ * The same shape as `sessionChipColours` and for the same reason, one gap later. `renderState()`
+ * assigns `.state-dot`'s background from this table INLINE; the fixtures mounted `.state-dot` at its
+ * CSS default `#7a7a7a`, which is non-chromatic and therefore dropped, so the four real values were
+ * not under-bar findings, not "measured, not enforced", not anything — they appeared NOWHERE in the
+ * report while `#d08a1a` sat on a light tab at 2.38:1. A fixture that mounts a JS-painted element in
+ * its DEFAULT state measures the CSS, not the app.
+ *
+ * Reads the SCRIPT BODIES, never the whole document, for the reason `launcherScriptBodies` documents.
+ * Derived rather than copied so a retune in launcher.html cannot leave this harness measuring last
+ * month's hexes and calling it green (CPE-1932/CPE-1933).
+ */
+export function stateDotColours(document = readFileSync(LAUNCHER, "utf8")) {
+  const raw = strippedLauncherScripts(document);
+  const m = raw.match(/const STATE_META = \{([\s\S]*?)\n\};/);
+  if (!m) throw new Error("launcher.html: STATE_META not found — the state-dot fixture cannot be derived");
+  const states = [...m[1].matchAll(/(\w+)\s*:\s*\{[^}]*?color\s*:\s*"(#[0-9a-fA-F]{3,8})"/g)].map((x) => ({ state: x[1], colour: x[2] }));
+  if (states.length < 2) throw new Error(`launcher.html: STATE_META parsed to ${states.length} entries — the parse is broken`);
+  return states;
+}
+
 /** Substitutes the derived palette into the fixtures that need it. */
 export function expandFixtures() {
   const palette = sessionChipColours();
   const chips = palette
     .map((c, i) => `<div class="tab" data-fixture="palette-${i}"><span class="tab-chip" style="background:${c}">${i + 1}</span><span class="tab-label">session ${i + 1}</span></div>`)
     .join("");
+  // One dot per STATE_META entry on a tab (the scheme-following ground) — the pane-head ground, which
+  // is #161616 in BOTH schemes, is covered by the state dots mounted in the grid-view fixture.
+  //
+  // The extra `for-<state>` class carries NO style; it exists to split the dedup key. `analyse()`
+  // collapses readings to one site per `scheme|path|role|prop|state`, keeping the WORST — and every
+  // `.state-dot` on a `.tab` has the identical path, so without this the four chromatic dots collapsed
+  // into the same site as the CSS-default `#7a7a7a` one, which is NON-chromatic and therefore dropped
+  // un-enforced. Measured before the split: the `.tab:hover` site reported `#808080` at 3.04 and the
+  // four real colours appeared nowhere. A neutral reading that wins the dedup does not just hide the
+  // chromatic ones from the report, it takes them out of enforcement — so a fixture that mounts a
+  // JS-painted element ALONGSIDE its CSS default has to keep the two apart.
+  const dots = stateDotColours()
+    .map((s) => `<div class="tab" data-fixture="state-${s.state}"><span class="state-dot for-${s.state}" style="background:${s.colour}" title="Agent ${s.state}"></span><span class="tab-label">${s.state}</span></div>`)
+    .join("");
   return FIXTURES.map((f) => ({
     ...f,
     html: (f.html ?? "")
       .replace("__PALETTE_CHIPS__", chips)
+      .replace("__STATE_DOTS__", dots)
+      .replace(/__STATE_0__/g, stateDotColours()[0].colour)
+      .replace(/__STATE_1__/g, stateDotColours()[1].colour)
       .replace(/__PALETTE_0__/g, palette[0])
       .replace(/__PALETTE_1__/g, palette[1]),
   }));

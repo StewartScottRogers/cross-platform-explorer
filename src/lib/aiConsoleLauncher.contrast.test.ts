@@ -93,6 +93,10 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// CPE-1977: the same parser the browser harness builds its state-dot fixture from, so this file and
+// that one cannot disagree about what STATE_META says. It reads launcher.html's <script> bodies with
+// the shared JS stripper, never the whole document.
+import { stateDotColours } from "../../scripts/dev-harness/launcher-contrast/engine.mjs";
 
 const LAUNCHER = join(process.cwd(), "sidecar/ai-console/src/launcher.html");
 const html = readFileSync(LAUNCHER, "utf8");
@@ -625,4 +629,109 @@ describe("AI Console launcher — every token-coloured foreground clears its WCA
       expect(failures.join("\n")).toBe("");
     });
   }
+});
+
+/**
+ * CPE-1977 — the agent state dots, the launcher's SECOND inline palette.
+ *
+ * `renderState()` paints `.state-dot`'s background from `STATE_META`, inline. That put it outside
+ * every guard at once: this file derives its sites from `color: var(--token)` rules, so an inline
+ * `background` is invisible to it; and CPE-1966's browser sweep mounted `.state-dot` in its CSS
+ * DEFAULT state (`#7a7a7a`, non-chromatic, dropped), so it reported the placeholder and never the
+ * four real values. `#d08a1a` sat on a light tab at 2.38:1 with both layers green.
+ *
+ * Both halves are closed now, and they are split by WHAT CAN BE MEASURED WHERE rather than by
+ * convenience. Here: the pairings where BOTH colours are literals in the source — the dot against
+ * `.pane-head`'s own `background`, which is a hex in this stylesheet and is the same in both schemes.
+ * In the browser sweep: the dot against a TAB, whose ground is `Canvas` under two rgba washes and
+ * exists only once an engine has resolved it. Duplicating those grounds here would be a second model
+ * that agrees with itself.
+ */
+describe("AI Console launcher — STATE_META's status dots (CPE-1977)", () => {
+  const states = stateDotColours(html) as { state: string; colour: string }[];
+
+  it("parses every state out of launcher.html", () => {
+    expect(states.length).toBeGreaterThanOrEqual(4);
+    expect(states.map((s) => s.state).sort()).toEqual(["blocked", "done", "idle", "working"]);
+  });
+
+  it("really re-reads launcher.html — a changed colour there changes the derivation here", () => {
+    // RED-PROOF, run every time (CPE-1933 rule 3): an assertion over a parse that has gone stale, or
+    // that is quietly reading a cached copy, passes until the day someone edits the source.
+    const first = states[0].colour;
+    const mutated = html.replace(`"${first}"`, '"#0b0b0b"');
+    expect(mutated, `could not find ${first} in launcher.html to mutate — the red-proof is not running`).not.toBe(html);
+    expect((stateDotColours(mutated) as { colour: string }[])[0].colour).toBe("#0b0b0b");
+  });
+
+  it("clears 3:1 against .pane-head, which is a fixed dark surface in BOTH schemes", () => {
+    // The pane header is why these four cannot be split by `prefers-color-scheme` the way
+    // `--blocked-bar` is: it paints one literal background in both schemes, so a light-scheme value
+    // would land on a dark header. Derived from the rule rather than pasted, so moving the header's
+    // background reds here instead of silently invalidating the numbers.
+    const head = allRules.find((r) => r.selector === ".pane-head");
+    expect(head, "`.pane-head` rule not found — this check is not measuring anything").toBeTruthy();
+    const ground = decls(head!.body).get("background");
+    expect(ground, "`.pane-head` no longer declares a background").toMatch(/^#[0-9a-fA-F]{3,6}$/);
+    const failures: string[] = [];
+    for (const s of states) {
+      const r = round2(contrast(s.colour, ground!));
+      if (r < 3) failures.push(`${s.state} (${s.colour}) on .pane-head ${ground}: ${r}:1, bar 3`);
+    }
+    expect(failures.join("\n")).toBe("");
+  });
+
+  it("keeps the chromatic states >=25 degrees of hue apart", () => {
+    // Same bar, same reason, as the --msg-* triad above: a dot that passes contrast and reads as the
+    // wrong state has traded one defect for another. `idle` is deliberately achromatic and excluded —
+    // it is the absence of a state colour, not one of them.
+    const hueOf = (hex: string) => {
+      const [r, g, b] = hexToRgb(hex).map((c) => c / 255);
+      const mx = Math.max(r, g, b);
+      const d = mx - Math.min(r, g, b);
+      if (!d) return null;
+      const h = mx === r ? 60 * (((g - b) / d) % 6) : mx === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+      return (h + 360) % 360;
+    };
+    const chromatic = states.map((s) => ({ ...s, h: hueOf(s.colour) })).filter((s) => s.h !== null);
+    expect(chromatic.length, "fewer than three chromatic states — the hue check has nothing to compare").toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < chromatic.length; i++) {
+      for (let j = i + 1; j < chromatic.length; j++) {
+        const d = Math.abs(chromatic[i].h! - chromatic[j].h!);
+        expect(
+          round2(Math.min(d, 360 - d)),
+          `${chromatic[i].state} (${chromatic[i].colour}) and ${chromatic[j].state} (${chromatic[j].colour}) are too close to tell apart`,
+        ).toBeGreaterThanOrEqual(25);
+      }
+    }
+  });
+
+  it("does not paint a value this stylesheet only ever uses in its DARK scheme", () => {
+    // The specific way `#d08a1a` got here. It is `--blocked-bar`'s DARK value; its light counterpart
+    // is a different, darker hex, because a dark-scheme value on a light ground is under bar — the
+    // token block says so in a comment right there. `STATE_META` took the dark one and painted it in
+    // both schemes, and nothing noticed, because it is JS.
+    //
+    // The dark-only set is DERIVED by differencing the two resolved token maps this file already
+    // builds, not listed: a hex that is legitimate in both schemes is not in it, and a token that
+    // grows a light value stops being in it, so it cannot rot into a stale denylist.
+    //
+    // ── FIRST ATTEMPT, RECORDED BECAUSE IT WAS THE INSTRUCTIVE ONE ──────────────────────────────
+    // This started as "not a hex the stylesheet has RETIRED", deriving `retired` as the known-bad
+    // hexes no longer appearing anywhere in the CSS. Sabotaged by setting `blocked` back to
+    // `#d08a1a`, it stayed GREEN, 20/20 — because `#d08a1a` is still in the CSS, as `--blocked-bar`'s
+    // dark value. It could not fire for the one colour it was named after. Ran the sabotage before
+    // believing it, per CPE-1929; this version reds on that exact input.
+    const darkValues = new Set([...TOKENS.dark.values()].map((v) => v.trim().toLowerCase()).filter((v) => /^#[0-9a-fA-F]{3,8}$/.test(v)));
+    const lightValues = new Set([...TOKENS.light.values()].map((v) => v.trim().toLowerCase()).filter((v) => /^#[0-9a-fA-F]{3,8}$/.test(v)));
+    const darkOnly = [...darkValues].filter((v) => !lightValues.has(v));
+    expect(darkOnly.length, "no dark-only token values found — this check has nothing to compare against").toBeGreaterThan(0);
+    const reused = states.filter((s) => darkOnly.includes(s.colour.trim().toLowerCase()));
+    expect(
+      reused.map((s) => `${s.state} = ${s.colour}`).join(", "),
+      "STATE_META paints a value this stylesheet uses only under prefers-color-scheme: dark. The dot " +
+        "is painted inline, so it cannot be scheme-keyed — it lands on light tabs and on .pane-head's " +
+        "fixed dark surface with the same value.",
+    ).toBe("");
+  });
 });
