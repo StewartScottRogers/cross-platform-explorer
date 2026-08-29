@@ -4685,3 +4685,69 @@ measured and proposed; the author had refuted a **third** variant nobody suggest
 never reached the tree (the author checked the ticket, both commit messages and the PR body and found it
 in none of them) — but it would have, and it would have been indistinguishable from a measured fact. **A
 Foreman's summary of a review is itself a claim, and it is the one nobody re-derives.**
+
+## Two guards can hide each other so well that fixing either one alone makes things worse
+
+2026-08-28, PR #1101 (CPE-1957), pre-review — the author's measurements, not yet independently reproduced.
+
+CPE-1929 named the shadowed-guard shape: a later check that is *safe* and *unverifiable* at once, because
+an earlier check answers on the same fact. The tell is a **pair** of green sabotages. CPE-1957 finished
+that sweep, and found a case the pattern's own description does not cover.
+
+**Two bare `FILE_ATTRIBUTE_REPARSE_POINT` checks — one by path, one by handle — were hiding each other,
+and each one alone was load-bearing in the opposite direction.** Measured:
+
+| change | result |
+|---|---|
+| un-narrow the handle check alone | **2,460 / 1** — `HARM:` assertion, the secret is readable |
+| narrow the path check alone | **2,460 / 1** — mid-wipe refusal |
+| narrow both together | green |
+
+Fix one and you get a live data-leak. Fix the other and you get the refusal the ticket predicted. **Only
+the joint change is correct**, and neither half is discoverable from the other's site.
+
+**The bug this concealed is the worst kind: a skip that is indistinguishable from a success.** The bare bit
+made `probe_no_follow` report a dehydrated cloud placeholder (OneDrive Files-On-Demand, NTFS dedup, WOF) as
+a link; `shred_dir_pinned`'s only reader of that flag `continue`s; so the file was **dropped from the wipe
+list, never overwritten, then unlinked by `remove_dir_all`** — **plaintext extents left on the volume while
+the lock reported success.** The ticket predicted a *refusal*, which is loud. What actually shipped was
+silence.
+
+**So the test has to assert bytes, not `Ok`** — a skip returns `Ok` too. That is the whole reason the
+defect survived: every existing assertion in that path was satisfied by the skip.
+
+### The second lesson: `if true ||` is not always the right instrument
+
+The pattern prescribes two sabotages — disable the guard, and force its predicate to lie. On site 1, the
+lying-predicate leg **reds**, and it means nothing: the line is on the hot path, so making it lie changes
+behaviour for every ordinary file, which says nothing about whether the *guard* is reachable. The
+measurement that actually answers reachability was a third one nobody prescribed — **disable both by-path
+checks and see who catches it** (2,459 / 1, caught by site 2, not site 1).
+
+**Generalise carefully:** the two sabotages are a *detector*, not a proof procedure. When a guard's
+predicate is also consulted on the common path, forcing it to lie tests the common path, not the guard.
+Reach for a sabotage that isolates the *route* — remove everything upstream and see what reports the
+failure.
+
+### Third: a ticket that predicts an outcome is a prior, not a finding
+
+CPE-1957 arrived with three sites, each with a predicted verdict. **Two of the three were wrong.** Site 2
+was filed as a duplicate wanting an "unreachable backstop, untestable, here is why" note; both its legs
+red and two tests pin it, so **writing the requested note would have been the exact false-coverage claim
+the pattern exists to prevent.** Site 3's disabled leg destroys the user's file rather than merely being
+redundant.
+
+This is the same lesson as the Foreman's plausible cause being a prior a worker must overcome, one scope
+out: **a ticket's predicted verdict is written before the measurement, and the measurement is the point.**
+A worker who confirms all three predictions has probably not run them.
+
+### Fourth, and it is about how NOT to generalise
+
+The author recorded the site-1 outcome for **CPE-1959** (the still-open `fsutil`-writes / `batch_media`-refuses
+split) and then deliberately declined to let it settle that ticket: **over-refusing at a *wipe* is retained
+plaintext, not a skippable item, so the vault's asymmetry runs opposite to the batch's.** Same tag rule,
+same crate, opposite cost function — so `batch_media`'s choice still rests on its own argument rather than
+on "the crate refuses these." No count was asserted there, because CPE-1959 owns that enumeration.
+
+**That restraint is worth as much as the fix.** The cheap move is to write "and this settles the question
+at the third site too"; it would have been wrong, and it would have read as settled.
