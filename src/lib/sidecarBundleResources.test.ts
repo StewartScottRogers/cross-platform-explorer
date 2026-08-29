@@ -593,6 +593,12 @@ describe("shipped bundles — updater root of trust survives the FULL merge, eve
   // ticket deleted. It asserts the SHAPE — the base64 of "untrusted comment: minisign public key: ",
   // minisign's own fixed preamble, not a secret and not per-key — plus a non-empty endpoint list of
   // absolute https URLs.
+  //
+  // **Say what this leg is NOT, because its name invites the wrong reading (round 3).** Both
+  // assertions are satisfied by ANY minisign key, an attacker's included. It cannot detect a poisoned
+  // reader; it detects a reader that came back with something that is not a key at all. The check that
+  // the value is the RIGHT one is the six merged-config legs below, and the check that it was read off
+  // the live declaration is `uniqueAnchorIndex` in `rustSource.ts` (CPE-1987 SEC-1/SEC-2).
   it("the pinned updater values were really read out of pinned_pubkey.rs", () => {
     expect(
       EXPECTED_UPDATER_PUBKEY.startsWith("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6"),

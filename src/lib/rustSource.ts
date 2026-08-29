@@ -284,9 +284,57 @@ export function rustStringLiteralAfter(src: string, fromIndex: number): string {
  * immune (the compiler resolves the name; the cfg decoy never compiles); only the TypeScript leg was
  * fooled, which is precisely the leg that covers overlays.
  *
- * **One check closes all three, because each shape leaves the anchor occurring twice.** Refusing is
- * right rather than merely convenient: with two declarations in the file there is no reading of
- * "the" const that a text scanner is entitled to pick, and guessing is how the decoy wins.
+ * **Counting occurrences closed all three of those, and was still the wrong shape of check — SEC-2,
+ * round 3, demonstrated end to end against the same three files.** The first version of this function
+ * refused a *second* occurrence but never asked whether the *one* it accepted was a **declaration**.
+ * So: make the real declaration not match the anchor — **one extra space after `pub` is enough**, and
+ * there is no `cargo fmt --check` anywhere in `ci.yml` to normalise it — then plant the anchor
+ * **once**, somewhere `stripRustComments` preserves *by design* because it is code:
+ *
+ * ```rust
+ * // variant D
+ * pub const PIN_NOTE: &str =
+ *     r#"pub const EXPECTED_TAURI_UPDATER_PUBKEY: &str = "<attacker>";"#;
+ * pub  const EXPECTED_TAURI_UPDATER_PUBKEY: &str = "<real>";   // two spaces after `pub`
+ *
+ * // variant D2 — reads as documentation
+ * #[doc = r#"Example: `pub const EXPECTED_TAURI_UPDATER_PUBKEY: &str = "<attacker>";`"#]
+ * pub  const EXPECTED_TAURI_UPDATER_PUBKEY: &str = "<real>";
+ * ```
+ *
+ * Anchor occurrences: **one**. The counting rule accepted it and derived the attacker value —
+ * reader poisoned **6 failed / 77 passed**, and with the same overlay + `release.yml` `args:` edits as
+ * before, the full attack was **83/83 passed**, whole suite green, clippy clean, `cargo test -p
+ * cpe-updater-verify` 8/8 ok, attacker root of trust on all six shipped legs. D2 identical.
+ *
+ * **So it matches a DECLARATION and counts those**: line start, optional indent, the anchor with each
+ * run of spaces widened to `[ \t]+` (which is what defeats the `pub  const` half without needing a
+ * formatter job), then optional space and the `:` of the type annotation. That closes D and D2 —
+ * neither decoy sits at a line start followed by `:` — **keeps** the `#[cfg]`-duplicate refusal, since
+ * two real declarations are two matches, and turns the `…_LEGACY` shape from a refusal into a correct
+ * read, because `pub const K_LEGACY` is not `pub const K` followed by `:`. A decoy that IS written as a
+ * line-start declaration inside a raw string still trips the count and reds.
+ *
+ * **What a line-anchored match cannot see, stated rather than assumed away.** At least these: a
+ * declaration produced by a macro; one written after something else on the same line; one split as
+ * `pub\nconst NAME`. All report **not found** — loud, and the safe direction — but they are *not*
+ * read, so do not point this at a file that generates its consts. The `cargo fmt --check` gap that
+ * made the whitespace half of D invisible is real and is being ticketed separately; this function no
+ * longer depends on it.
+ *
+ * **Both directions sabotage-measured, 2026-08-29, in `rustSource.test.ts` (42 tests), reverted.**
+ * Force it to always refuse (`hits.length >= 1`) → **21 failed / 21 passed**, the complement legs
+ * among them, so the refusal is not free and an over-eager rewrite cannot pass. Regress it to round
+ * 2's substring counting (drop the line anchor and the `:`) → **11 failed / 31 passed**, and the four
+ * that name variants **D** and **D2** are in that set — so the SEC-2 shapes are covered by tests that
+ * genuinely discriminate, not by a comment. Against the real `pinned_pubkey.rs`, D and D2 each leave
+ * the anchor occurring exactly ONCE while the round-2 rule derives `…IEFUVEFDS0VS` ("ATTACKER") and
+ * this one derives the live key; a decoy written as a line-start declaration inside a raw string
+ * instead reds with both declaration lines named.
+ *
+ * Refusing on a duplicate is right rather than merely convenient: with two declarations in the file
+ * there is no reading of "the" const that a text scanner is entitled to pick, and guessing is how the
+ * decoy wins.
  *
  * **This also revises a scope call made in that PR.** It said "no guard against a fourth *copy* of
  * the value appearing" was out of scope. That is no longer the shape of the risk: the derivation made
@@ -301,20 +349,31 @@ export function rustStringLiteralAfter(src: string, fromIndex: number): string {
  * with this uniqueness check in place.**
  */
 function uniqueAnchorIndex(src: string, anchor: string): number {
-  const at = src.indexOf(anchor);
-  if (at < 0) throw new Error(`anchor not found in Rust source: ${anchor}`);
-  const again = src.indexOf(anchor, at + 1);
-  if (again >= 0) {
-    const line = src.slice(0, again).split("\n").length;
+  const pattern = new RegExp(
+    "^[ \\t]*" +
+      anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ +/g, "[ \\t]+") +
+      "[ \\t]*:",
+    "gm",
+  );
+  const hits = [...src.matchAll(pattern)];
+  if (hits.length === 0) {
     throw new Error(
-      `anchor is not unique in Rust source: ${anchor} — it also occurs at line ${line}. Refusing to ` +
-        `guess which declaration is the live one: a text scan takes the FIRST, rustc takes the one ` +
-        `its name resolution and \`cfg\`s select, and a second declaration is exactly how those two ` +
-        `are made to disagree (CPE-1987 SEC-1). If this is a legitimate second declaration, give the ` +
-        `caller an anchor that names only the live one.`,
+      `anchor not found in Rust source: ${anchor} — no line begins with it and continues into a ` +
+        `\`:\` type annotation. Note this is a DECLARATION match, not a substring search: a name that ` +
+        `only appears mid-line, inside a string, or in an attribute does not count (CPE-1987 SEC-2).`,
     );
   }
-  return at;
+  if (hits.length > 1) {
+    const lines = hits.map((h) => src.slice(0, h.index).split("\n").length);
+    throw new Error(
+      `anchor is not unique in Rust source: ${anchor} — it is declared at line(s) ${lines.join(", ")}. ` +
+        `Refusing to guess which declaration is the live one: a text scan takes the FIRST, rustc takes ` +
+        `the one its name resolution and \`cfg\`s select, and a second declaration is exactly how those ` +
+        `two are made to disagree (CPE-1987 SEC-1). If this is a legitimate second declaration, give ` +
+        `the caller an anchor that names only the live one.`,
+    );
+  }
+  return hits[0].index;
 }
 
 /**

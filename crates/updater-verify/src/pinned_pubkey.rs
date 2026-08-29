@@ -57,14 +57,23 @@
 //!   the reader throws at collection with `anchor not found in Rust source: pub const
 //!   EXPECTED_TAURI_UPDATER_PUBKEY` and the whole file reports zero tests (measured 2026-08-28).
 //!   Rename the anchor there in the same commit.
-//! - **DO NOT ADD A SECOND DECLARATION OF EITHER NAME — not even a `#[cfg]`-gated one, and not even a
-//!   longer name that merely starts with it** (`…_PUBKEY_LEGACY`). A text scan takes the FIRST
-//!   occurrence where rustc takes the one its name resolution and `cfg`s select, and that gap was a
-//!   demonstrated silent bypass (CPE-1987 SEC-1: overlay + `release.yml`'s matrix `args:` + one decoy
-//!   const here → 74/74 passed, clippy clean, `cargo test -p cpe-updater-verify` 8/8 ok, attacker root
-//!   of trust on all six shipped legs). The reader now **refuses a non-unique anchor** rather than
-//!   guessing, so such a declaration reds loudly at collection instead — but it reds, so do not add
-//!   one casually. The rule and the three shapes live at `uniqueAnchorIndex` in `rustSource.ts`.
+//! - **DO NOT ADD A SECOND DECLARATION OF EITHER NAME, not even a `#[cfg]`-gated one.** A text scan
+//!   takes the FIRST occurrence where rustc takes the one its name resolution and `cfg`s select, and
+//!   that gap was a demonstrated silent bypass (CPE-1987 SEC-1: overlay + `release.yml`'s matrix
+//!   `args:` + one decoy const here → 74/74 passed, clippy clean, `cargo test -p cpe-updater-verify`
+//!   8/8 ok, attacker root of trust on all six shipped legs). The reader **refuses two declarations**
+//!   rather than guessing, so it reds loudly at collection instead — but it reds, so do not add one.
+//! - **A second round found that counting occurrences was still the wrong check (SEC-2), and the
+//!   consequence for THIS file is a formatting one.** Spelling the declaration below `pub  const`
+//!   (two spaces) while the name appeared once elsewhere — in a raw string, or a `#[doc]` attribute,
+//!   both of which are code and survive comment stripping by design — derived the *decoy*: 83/83
+//!   passed, whole suite green, all six legs attacker-controlled. There is **no `cargo fmt --check`
+//!   anywhere in `ci.yml`** to normalise that, which is being ticketed separately. The reader now
+//!   matches a **declaration** (line start → name → `:`), tolerant of any run of spaces or tabs, so
+//!   the spelling no longer matters to it — but keep these two declarations ordinary and at the left
+//!   margin, because a macro-generated or line-split declaration reads as **not found**. The rule,
+//!   both attack variants and what the match still cannot see live at `uniqueAnchorIndex` in
+//!   `src/lib/rustSource.ts`.
 //! - **What the deleted copy was worth, and what it cost.** It could never drift *silently* — it was
 //!   compared against the real merged config, so a stale copy simply went red. What it did do was let
 //!   an attacker who wrote a key into an *overlay* **and** into that literal hide it from the only
@@ -130,9 +139,15 @@
 //!    update it there as well — check with `grep -rn '"pubkey"\|"endpoints"' src-tauri/*.conf.json`.
 //! 3. Update [`EXPECTED_TAURI_UPDATER_PUBKEY`] / [`EXPECTED_TAURI_UPDATER_ENDPOINTS`] below to match,
 //!    in the same commit.
-//! 4. Nothing to do for `src/lib/sidecarBundleResources.test.ts` — it READS step 3's consts (CPE-1987),
-//!    so it follows automatically. It is still the check that fails first if step 2 and step 3
-//!    disagree, or if any overlay sets a different value; it just no longer needs editing.
+//! 4. No VALUE to edit in `src/lib/sidecarBundleResources.test.ts` — it READS step 3's consts
+//!    (CPE-1987), so the new value follows automatically, and it is still the check that fails first
+//!    if step 2 and step 3 disagree or if any overlay sets a different value. **But it reads them out
+//!    of this file's TEXT, so step 3 must leave each const as exactly one ordinary declaration at the
+//!    left margin: one `pub const NAME:` line per name, no second declaration of either name
+//!    (a `#[cfg]`-gated one included), and no macro-generated or line-split form.** Anything else reds
+//!    at collection rather than silently — see the two bullets on this in the section above, and
+//!    `uniqueAnchorIndex` in `src/lib/rustSource.ts` for why. This is the one step where "the test
+//!    needs no editing" could otherwise be read as "the test is not your problem".
 //! 5. Rotate the matching GitHub Actions secrets (`TAURI_SIGNING_PRIVATE_KEY`,
 //!    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) — done outside the repo, by whoever holds the private key.
 //! 6. Open the PR normally. A reviewer sees a multi-file diff explaining *why* the root of trust is
