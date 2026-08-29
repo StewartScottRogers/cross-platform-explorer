@@ -4751,3 +4751,74 @@ on "the crate refuses these." No count was asserted there, because CPE-1959 owns
 
 **That restraint is worth as much as the fix.** The cheap move is to write "and this settles the question
 at the third site too"; it would have been wrong, and it would have read as settled.
+
+## Thirteen rounds, zero code defects for the first nine, and the shape of the findings kept changing
+
+2026-08-28, PR #1091 (CPE-1951), closed at round 13 with `APPROVE` and no finding.
+
+Worth writing down because the arc is more instructive than any single round.
+
+**Rounds 1–9: every finding was claim-scope.** The code was right; the sentences around it were not. Nine
+rounds, eight reviews, zero code defects. What finally moved it was not a defect report — it was an
+instruction about the *shape of sentences*: "do not write another closed list."
+
+**Rounds 9–11: real code defects, all one class.** *Fixed at one entrance.* Round 10 held `$(…)` but not
+`` `…` ``. Round 11 skipped quotes inside expansions but not expansions inside quotes. Round 12 skipped
+expansions inside a quoted span but not backticks — POSIX keeps exactly **three** characters special inside
+`"…"` and the fix handled two of them. Three rounds, three spellings of one idea, each found by **executing
+bash** rather than by reading the diff, and none visible to the generated corpus at the time.
+
+**Round 12: the findings changed shape again — the fix was right and its own description was wrong**, in
+all three places the round asked to be checked. The cap it introduced was documented as if it were free:
+
+- *"Caching a capped refusal would let a deep query poison a shallow one"* — the poisoning was **three
+  lines away** and measurable, because the `-1` the cap *induced* was memoized at every ancestor even
+  though the cap's own return was not.
+- The cap was described as *"nothing is swallowed"* — true, and **exactly the conflation round 11 had
+  corrected in round 10's span table**. Past the cap it fails **open**. Re-made one scope up, in the same
+  commit that documents the lesson.
+- The over-cap assertion **could not fire for the failure it named**: mutating the cap into precisely the
+  direction its message warns about left the file green.
+
+**Round 13: no finding, from a reviewer that pushed harder than the round's own legs** — 1.28 million
+index-level comparisons across three independent generators, five sabotages, and an **exhaustive** search
+over every string of length ≤ 7 in the relevant alphabet, specifically hunting a residue it predicted from
+reading the fix. Not there.
+
+### The transferable parts
+
+**1. A guard can be unable to fire for two different reasons, and both are found by running it.** Round
+13's fix carried a memo-consistency leg that failed twice before it worked: first it queried a character
+position **production never queries** and reported **455 phantom divergences**; then, corrected, it probed
+only indices 0–3 while the entries the mechanism protects are written at index **256 and beyond**. A guard
+that reds for the wrong reason and a guard that cannot red at all are both indistinguishable from a working
+guard, on a green run.
+
+**2. When you cannot assert the strong property, say which strong properties you tried.** Three candidate
+over-cap assertions were each measured **false of shipped behaviour** (`deep` surviving as a token; >10
+tokens; no token covering most of the line — the last one false because a legitimate argument token was
+2003 of 2028 characters). The guard now asserts only that it returns, **and says why nothing stronger is
+there.** That is the honest version of "we couldn't pin it harder", and it is worth more than a stronger
+assertion that pins an accident.
+
+**3. Two mechanisms that look like one need separate red-proofs.** The cache fix needed both a sentinel
+*and* a flag; the flag alone left the failing case green, because one branch falls through and returns a
+**real** index computed on a poisoned path. Measured, not assumed — and each is red-proofed alone, "so
+neither reads as coverage for the other."
+
+**4. A negative over a generated space is a statement about the generator — say so, every time.** Round
+13's reviewer found nothing and wrote: *"no input **these three generators** produce reaches it. I could
+not exhibit the shape, and I am not claiming it is unreachable — only that I looked for it deliberately and
+did not find it."* That is the correct form. The same PR's round 5 had claimed a sweep proved a property of
+the language and was falsified by a reviewer's own generator in minutes.
+
+**5. Self-reporting a rule violation is worth more than not being caught.** The round-13 author used a
+forbidden `sed -i` for a two-word edit and said so unprompted. Verified independently: the file is new in
+that PR, LF-only in the blob, no whole-file rewrite in the diff — **no damage**. The report cost nothing
+and bought the ability to check.
+
+**6. The Foreman's summary of a review is itself a claim.** Twice in this PR the brief relayed something the
+review had not said — once guessing a reviewer's dirty worktree was a leftover sabotage (it was a probe, 47
+insertions, 0 deletions), once framing a reviewer's suggested test shape as wrong when the shipped shape
+*was* theirs. Neither reached the tree, both because the recipient checked. **The relay is the one link in
+the chain nobody re-derives.**
