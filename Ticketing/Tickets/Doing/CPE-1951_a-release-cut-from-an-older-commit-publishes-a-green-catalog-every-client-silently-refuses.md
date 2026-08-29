@@ -3,7 +3,7 @@ id: CPE-1951
 title: a release cut from an **older** commit publishes a fully green catalog that every client silently refuses — the floor is a static ratchet, not a monotonic one
 type: bug
 priority: Medium
-status: Open
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -61,9 +61,22 @@ notice a silent client-side refusal.
    into exactly the static ratchet we already have.**
 2. **The fetch is not the trust dependency CPE-1924 rejected.** That objection was about *trusting*
    fetched content to decide what to publish. This uses it only as a **lower bound that fails the
-   build** — a hostile or garbage response can cause a false *failure*, never a false success. It
-   fails closed, so it needs no signature verification to be safe, and the job already runs
-   `gh release upload` against the same host, so it is not even a new egress class.
+   build**, and the job already runs `gh release upload` against the same host, so it is not even a
+   new egress class.
+
+   > **Corrected in #1091 round 2 — this bullet used to end "a hostile or garbage response can cause
+   > a false *failure*, never a false success. It fails closed, so it needs no signature
+   > verification to be safe." That is measurably false**, and it is the sentence that licensed
+   > shipping an unverified fetch on the release path. Two review gates independently produced
+   > parseable responses reaching **exit 0**. Two were bugs and are fixed: a bound above 2^63-1 made
+   > `[ -le ]` *error* rather than compare false (bash's `test` prints `integer expected` and
+   > returns 2, the refusal branch is skipped, and the success `printf` runs), and jq's `max` sorts
+   > numbers below strings, so **one** string-typed `version` masked every numeric one in the whole
+   > index. Two remain **by design**: the positively-enumerated empty-release branch, and an index
+   > that simply reports a lower version than the truth — a bound you fetched is a bound the server
+   > chose. The claim that holds is the narrow one: *every route where the fetch did not produce a
+   > usable answer is fatal.* Defeating the guard reverts to pre-CPE-1951 behaviour; it does not
+   > forge a catalog, because the signing key is not in this step's env.
 3. It closes the legacy window in the forward direction too: if an old-tag re-run ever stamped a
    large `date +%s`, the next real release would fail **loudly** instead of being silently refused
    everywhere.
@@ -108,3 +121,64 @@ Related: **CPE-1941** (the versioning change, PR #1061), **CPE-1940** (the fail-
 was first costed and rejected, for a different reason), **CPE-308** (the catalog pipeline),
 **CPE-1953** (no release since **v0.57.33** publishes a catalog index at all — corrected there from
 v0.57.32).
+
+## Work Log
+
+### 2026-08-28 — implemented as specified (index-fetch lower bound; the counter was not revisited)
+
+**What shipped**
+
+- **`.github/workflows/scripts/catalog-lower-bound.sh`** (new). Resolves what clients resolve —
+  `releases/latest/download/catalog-index.json` (`catalog_url()`, `src-tauri/src/lib.rs`) — and
+  refuses, fatally, any candidate that is not **strictly greater** than the max `entries[].version`
+  published there. `-le` and not `-lt` on purpose: at equality a client answers `AlreadyCurrent` and
+  writes nothing, so a `-lt` gate would let a release publish that reaches no user. That boundary is
+  *measured through the real engine*, not asserted.
+- **`release.yml`'s `catalog` job**: a new fatal step `Refuse a catalog version that is not newer
+  than the published one (CPE-1951)` (id `lb`, `timeout-minutes: 5`), placed **after** the CPE-1941
+  derive and **before** `catalog-sign`, so a refusal publishes nothing. `Catalog publish outcome`
+  now accounts for `steps.lb.outcome` alongside the other four.
+- **`CATALOG_VERSION_FLOOR` kept.** Both are wanted and neither implies the other: the floor bounds
+  against what the *installed base* holds (which no fetch can observe — a client may sit on an old
+  catalog for months); the new check bounds against what is *published right now*.
+
+**The 404 decision, and why it is not a bare skip**
+
+A 404 on the index URL is the state of the world today (CPE-1953 / #1062). The script does **not**
+skip on it. It **enumerates first**: `gh api repos/<repo>/releases/latest`, requires that call to
+succeed, requires a `tag_name`, and requires `assets` to be a readable array. Only an enumeration
+that *succeeded* and contained no `catalog-index.json` yields the `none` verdict (a `::warning::`,
+then proceed). Everything else is fatal, including a 404 on the index URL **after** the asset list
+said the asset is there — that is a contradiction, not an absence. Written at the site, at length,
+with the instruction not to add a bootstrap escape hatch: an escape hatch is a skip wearing a coat.
+
+**Evidence**
+
+- Bug demonstrated first, on the client and on disk:
+  `sidecar/host/tests/catalog_offtip_release_lower_bound.rs` (5 tests) — a hotfix committed off an
+  older base is `ApplyOutcome::Rollback`, the manifest bytes stay at v2, the recorded baseline does
+  not move, and re-fetching replays the identical refusal. Its sibling test shows the publish side
+  is entirely green for that release (clears the shipped `CATALOG_VERSION_FLOOR`, clears the
+  future-date check, signs a complete bundle).
+- Publish side, executed against a real three-commit git fixture and stubbed `gh`/`curl`:
+  `src/lib/catalogPublishLowerBound.test.ts` (33 tests) — the real `catalog-version.sh` derives the
+  off-tip number *green*, the real lower-bound script then refuses it, and the re-cut tag is
+  accepted. Ten fetch-failure causes, ten distinct exit codes, ten distinct first lines (asserted as
+  a set, so two wordings collapsing reds).
+- Red-proofs, recorded at each site: editing `catalog_url()`'s template in `lib.rs` reds the URL
+  derivation; replacing the workflow step's invocation reds 5 structural tests, and hiding the
+  invocation in a **trailing comment** keeps them red (`logicalLines`, not a whole-line filter);
+  flipping `-le` to `-lt` reds the equality case.
+
+**A trap found while writing it, worth carrying forward.** On Windows, prepending a stub dir to
+`PATH` via node's `env` does **not** win: MSYS2's bash puts `/mingw64/bin` in front at startup, and
+`curl.exe` lives there. The "stubbed" suite silently fetched the real github.com and reported ten
+genuine 404s as ten distinct guard verdicts. Prepending inside bash with the `Z:/…` spelling is
+worse — a Windows path contains a colon, the PATH separator. The fix is `cygpath -u` plus an
+in-shell prepend, and `beforeAll` now **refuses to run** unless *both* stubs resolve under the stub
+dir. Checking only `gh` is what missed it: `gh` won, `curl` did not.
+
+**Docs updated**: `docs/design/CPE-308-agent-catalog-updates.md` (the "known gap" bullet became the
+fix, with the counter rejection and the 404 reasoning), `docs/security/threat-model.md` (the
+availability gap recorded as closed), and `catalog-version.sh`'s own header (which had told the next
+reader the gap was open and not to close it by widening the floor).

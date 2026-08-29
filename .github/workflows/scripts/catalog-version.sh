@@ -83,10 +83,14 @@
 #
 # Mitigating, but not a fix: scripts/release.ps1 pushes `HEAD --tags`, so ordinary releases are cut
 # from the tip of main and stay monotone; this only bites a deliberate off-tip tag.
-# Filed as a follow-up (CPE-1941 SEC/reviewer finding, both gates found it independently). The
-# preferred shape is a publish-time lower-bound check against the currently published index rather
-# than a hand-maintained counter — see the PR body for the reasoning; do NOT close it by widening
-# this floor, which would only move the same static ratchet.
+#
+# CLOSED by CPE-1951, and NOT by widening this floor (which would only move the same static ratchet).
+# `.github/workflows/scripts/catalog-lower-bound.sh` runs in release.yml's `catalog` job immediately
+# after this derivation and before the signing step: it resolves the exact URL a client resolves
+# (`releases/latest/download/catalog-index.json`) and fatally refuses any candidate that is not
+# STRICTLY GREATER than the version published there. The two checks are complementary and both stay —
+# this floor bounds against what the INSTALLED BASE holds (which no fetch can observe, since a client
+# may sit on an old catalog for months), that bound against what is PUBLISHED RIGHT NOW.
 #
 # Bump it only for a deliberate, understood reason (e.g. after an old-tag re-run stamped a large
 # `date +%s` on the live catalog — see "Residual" below); never to make a failing release pass.
