@@ -187,8 +187,13 @@
   label.check {
     gap: 6px;
   }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). This box re-renders on every
+     keystroke in the pattern/find/replace inputs directly above it, so under a centred dialog the
+     inputs slid up and down under the pointer AS THE USER TYPED. A `px` bound rather than a `vh` one
+     here because the preview is a fixed-pitch list whose row height does not scale with the window;
+     220px is exactly the old cap, so the box is never larger than it used to be. */
   .preview {
-    max-height: 220px;
+    height: 220px;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius);

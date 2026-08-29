@@ -574,6 +574,12 @@ export const REGISTRY = [
     measure: arrayLength("APP_SCRIPT_BASENAME_ALLOWLIST"),
   },
   {
+    id: "dialog-body-reflow-allowlist",
+    file: "src/lib/dialogBodyReflow.test.ts",
+    what: "scroll boxes inside a centred dialog still allowed a content-driven height (CPE-1983)",
+    measure: arrayLength("DIALOG_BODY_REFLOW_ALLOWLIST"),
+  },
+  {
     id: "launcher-contrast-not-flat-exemptions",
     file: "scripts/dev-harness/launcher-contrast/run.mjs",
     what: "launcher sites exempted from the pixel leg's flat-ground condition (CPE-1966)",

@@ -360,7 +360,19 @@
   .path, .label-input, .path-input { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
   .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
   .note { color: var(--accent-text); font-size: 12.5px; margin-bottom: 8px; }
-  .list { max-height: 30vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
+  /* CPE-1983 — ONE height, not a content-driven max-height. `.backdrop` centres the dialog, so this
+     box growing when `onMount(loadList)`'s two round-trips land slid EVERYTHING ABOVE IT up by half
+     the growth: the help button, the path input, Refresh, the label input and Create checkpoint, all
+     five of them, out from under a pointer that was already resting on one. Worse than CPE-1968's
+     OrganizeDialog, where the mis-landed click was merely swallowed: this box contains `Revert…`
+     buttons, so the click could land on a destructive control. It re-fires on every Refresh and after
+     doCreate, not only on open.
+     Same decision as CPE-1968 (give the body ONE stable height) rather than un-centring the backdrop
+     — 28 components share that backdrop — or freezing a measured height in JS.
+     WHICH TERM BINDS: at the 700px harness window `30vh` is 210px, so the clamp yields 210 and
+     neither bound engages; the 160px floor only binds below a 533px window and the 260px cap only
+     above 867px. The middle term is the knob (CPE-1968 learned this the hard way). */
+  .list { height: clamp(160px, 30vh, 260px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
   .empty { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
   .cp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   .cp-row:last-child { border-bottom: none; }

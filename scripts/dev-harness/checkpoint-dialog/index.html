@@ -1,0 +1,85 @@
+<!doctype html>
+<!--
+  CPE-1983 real-browser page for the Checkpoint dialog's reflow. Mounts the REAL
+  src/lib/components/CheckpointDialog.svelte (not a stand-in) off the shared layout-guard dev server
+  (vite.harness.layout-guard.config.ts), which already aliases `../invoke` and `../bindings.gen` to
+  the shared pluggable mocks — so this case needed no change to that config.
+
+  Directly modelled on scripts/dev-harness/organize-dialog/ (CPE-1968), which is the same question
+  asked of a different dialog. It exists because what CPE-1983 fixed is a LAYOUT fact and jsdom has no
+  layout engine: the vitest guard in src/lib/components/CheckpointDialog.test.ts can only MODEL the
+  vertical stack from the component's CSS. This page asks a real layout engine, at the same 1000x700
+  viewport gui-smoke uses, with the real component doing the real reflow.
+
+  WHY THIS DIALOG GOT ITS OWN PAGE rather than being reviewed on OrganizeDialog's numbers: it is the
+  one in the sweep where the box that arrives under the pointer contains `Revert…`, so the mis-landed
+  click is destructive rather than swallowed. The badge therefore measures the REFRESH BUTTON's screen
+  position — the control a pointer is most likely to be resting on when the list lands — and the top
+  of `.list`, which is what moves up to meet it.
+
+  Query parameters:
+    list=none|few|many    what `checkpointList` resolves to (default `few`)
+    delay=<ms>            how long it takes to resolve (default 0; use a large value to hold the
+                          dialog in its loading state for a screenshot)
+    legacy=1              re-apply the PRE-CPE-1983 `.list` height (`max-height: 30vh`, no `height`)
+                          over the shipped one, so the "before" shots come out of the SAME tree as the
+                          "after" ones rather than out of a stashed revert.
+    theme=light|dark      default light
+
+  The badge in the top-left reports the measured screen positions, so each screenshot carries its own
+  measurement instead of asking the viewer to eyeball a diff. It is `pointer-events: none` and 8px
+  from the corner, per this repo's automation-indicator convention.
+
+  WHY THIS IS NOT A ../layout-guard/cases.mjs CASE, i.e. why it is not in CI: the same reason
+  organize-dialog gives. Every check kind engine.mjs offers measures ONE rendered moment; this defect
+  is a difference BETWEEN two moments. The CI guards are src/lib/components/CheckpointDialog.test.ts
+  (per-component) and src/lib/dialogBodyReflow.test.ts (repo-wide); this page is their real-browser
+  cross-check.
+
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1983 — Checkpoint dialog reflow</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg, #fff);
+      }
+      /* Something behind the backdrop, so the shots show the dialog over a page rather than over
+         nothing — the backdrop's own 25% scrim is part of what the Visual Critic is judging. */
+      #behind {
+        padding: 24px;
+        font: 13px/1.6 system-ui, sans-serif;
+        color: var(--text-dim, #666);
+      }
+      #probe {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        z-index: 9999;
+        pointer-events: none;
+        font: 11px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace;
+        white-space: pre;
+        padding: 6px 8px;
+        border-radius: 4px;
+        border: 1px solid var(--border-strong, #999);
+        background: var(--surface, #fff);
+        color: var(--text, #111);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="behind">
+      CPE-1983 harness page — the real CheckpointDialog.svelte over a stand-in folder view.
+    </div>
+    <div id="mount"></div>
+    <div id="probe">measuring…</div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

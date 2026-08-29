@@ -15,6 +15,7 @@ import { render, screen, fireEvent } from "@testing-library/svelte";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripRustComments, rustStringLiteralAfter } from "../rustSource";
+import { styleBlock, declaration, contentIndependentHeightReason } from "../svelteCss";
 
 // The two hazard sentences EXACTLY as the box must render them (CPE-1928): differentiator first,
 // path stripped (CPE-1891, Visual Critic round 3 — the hoisted sentence is shared across
@@ -555,5 +556,57 @@ describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-cop
     for (const fnName of ["classify_symlink_slot", "classify_create_slot"]) {
       expect(linkRefusalTemplate(FSUTIL, fnName), fnName).toMatch(/^"\{\}" is a link, and /);
     }
+  });
+});
+
+/**
+ * CPE-1983 — the operations list's height does not depend on the resolved plan.
+ *
+ * `onMount` resolves the macro's plan (`macro_plan` + `macro_preflight`), so `.ops` is empty when the
+ * confirm appears and full a moment later. `.backdrop` centres the dialog, so that growth slid the
+ * Run/Cancel row and the warning text apart under the pointer — CPE-1968's shape, in a dialog whose
+ * whole purpose is a deliberate confirmation.
+ *
+ * TWO PROPERTIES HOLD THE HEIGHT AND THEY ARE ASSERTED SEPARATELY, because removing both at once only
+ * proves the pair (CPE-1968 measured exactly this on `MacrosDialog`). `.dialog` is a flex column with
+ * its own `max-height`, so a flex item's default `flex-shrink: 1` lets the free-space algorithm
+ * override a declared `height` the moment the dialog reaches that cap. `flex: 0 0 auto` is what makes
+ * the height actually hold.
+ *
+ * RED-PROOF, run and recorded here rather than only in the PR body (CPE-1933 rule 3):
+ *   - reverting `.ops` to `max-height: 40vh` with no `height` reds **1 of 2** in this block (the
+ *     height leg) **plus** the repo-wide `src/lib/dialogBodyReflow.test.ts` leg naming
+ *     `MacroRunConfirm.svelte#ops` — 2 of 40 across the two files;
+ *   - with the `height` in place and `flex: 0 0 auto` alone deleted, **1 of 2** reds — the flex leg
+ *     only, and the repo-wide guard stays GREEN. So the flex assertion is not decorative, and it is
+ *     also the half no enumerating guard covers: without it the flex column shrinks the fixed height
+ *     back toward content and undoes the fix while the `height` declaration still reads correct.
+ * Restored; both green.
+ */
+describe("CPE-1983 — the plan list's height does not depend on the resolved plan", () => {
+  const SRC = readFileSync(join(process.cwd(), "src", "lib", "components", "MacroRunConfirm.svelte"), "utf8");
+  /** `src-tauri/src/lib.rs`'s `.inner_size(1000.0, 700.0)`; only the vh terms below read it. */
+  const VIEWPORT_H = 700;
+
+  it("gives .ops a content-independent height, so the plan landing cannot move Run/Cancel", () => {
+    const ops = styleBlock(SRC, "ops");
+    expect(
+      declaration(ops, "max-height"),
+      "`.ops` declares a max-height again with no matching height — the CPE-1983 shape: the box is " +
+        "empty while `macro_plan` is in flight and up to the cap once it resolves, so the centred " +
+        "dialog moves the confirm buttons under the pointer.",
+    ).toBeUndefined();
+
+    const reason = contentIndependentHeightReason(ops, VIEWPORT_H);
+    expect(reason, `\`.ops\` ${reason}. See CPE-1983 and src/lib/dialogBodyReflow.test.ts.`).toBeNull();
+  });
+
+  it("keeps that height fixed under flex, which would otherwise shrink it back to its content", () => {
+    expect(declaration(styleBlock(SRC, "dialog"), "display")).toMatch(/flex/);
+    expect(
+      declaration(styleBlock(SRC, "ops"), "flex"),
+      "`.ops` needs `flex: 0 0 auto` — inside `.dialog`'s flex column a shrinkable item falls back " +
+        "toward its content height, which reintroduces the growth the fixed height removes",
+    ).toMatch(/^0\s+0\b/);
   });
 });

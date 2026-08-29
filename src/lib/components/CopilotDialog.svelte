@@ -349,7 +349,12 @@
   .violations-title { font-weight: 600; font-size: 12.5px; color: var(--text); margin-bottom: 4px; }
   .violations ul { margin: 0 0 0 18px; padding: 0; font-size: 12.5px; color: var(--text); }
 
-  .op-list { max-height: 32vh; overflow: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). The proposed-operations list is
+     filled by an async plan and then re-filtered by the per-op checkboxes inside it, and the Apply /
+     Cancel row sits below it while the prompt box sits above; under a centred dialog every one of
+     those changes moved both. At the 700px harness window `32vh` is 224px and binds; the floor
+     engages below 500px, the cap above 812px. */
+  .op-list { height: clamp(160px, 32vh, 260px); overflow: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
   .op-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .op-row:last-child { border-bottom: none; }
   .op-kind { flex: 0 0 auto; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; background: var(--surface-alt); color: var(--text); border: 1px solid var(--border-strong); }

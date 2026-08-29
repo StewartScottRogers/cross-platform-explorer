@@ -395,7 +395,18 @@
   .x { width: 28px; height: 28px; display: grid; place-items: center; color: var(--text-dim); }
   .x:hover { color: var(--text); }
   .warn { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
-  .ops { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; overflow: auto; max-height: 40vh; }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). `onMount` resolves the macro's plan,
+     so this list is empty when the confirm appears and full a moment later, with the Run/Cancel
+     buttons below it — the click a user aims at Cancel is the one that must not land on Run.
+     TWO properties hold the height, and they are NOT redundant: `.dialog` is `display: flex;
+     flex-direction: column`, where a flex item's default `flex-shrink: 1` lets `height` be
+     overridden by the free-space algorithm the moment the dialog reaches its own `max-height: 84vh`.
+     `flex: 0 0 auto` is what makes the declared height actually hold. CPE-1968 measured the same pair
+     in MacrosDialog: with the height in place and `flex` alone deleted, 1 of 16 red — so each is
+     red-proofed separately, never as a pair.
+     At the 700px harness window `40vh` is 280px and binds; the floor engages below 400px, the cap
+     above 800px. */
+  .ops { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; overflow: auto; height: clamp(160px, 40vh, 320px); flex: 0 0 auto; }
   .ops li {
     font-family: ui-monospace, monospace; font-size: 12px; padding: 6px 9px; border-radius: 6px;
     background: var(--surface-alt); border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all;

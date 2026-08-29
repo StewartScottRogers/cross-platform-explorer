@@ -765,8 +765,12 @@
     padding: 6px 8px;
   }
 
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). The output-name preview re-renders as
+     the format/quality/naming controls above it change, so under a centred dialog those controls
+     moved out from under the pointer mid-adjustment. `px` rather than `vh`: a fixed-pitch list whose
+     rows do not scale with the window. 200px is exactly the old cap. */
   .preview {
-    max-height: 200px;
+    height: 200px;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius);

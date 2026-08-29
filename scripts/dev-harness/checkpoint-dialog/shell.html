@@ -1,0 +1,43 @@
+<!doctype html>
+<!--
+  CPE-1983 — the outer shell that pins the inner page's viewport to EXACTLY 1000x700.
+
+  Why it exists: `chrome --headless=new --window-size=1000,700` does NOT give the document a 1000x700
+  viewport — CPE-1968 measured 984x549, with 151px eaten by window chrome, which silently resolved a
+  `vh` height against the wrong number and understated that ticket's shift by a third. A `vh`-dependent
+  layout photographed at the wrong viewport is a picture of a different bug, and `.list`'s height here
+  is a `clamp()` over `30vh`, so this page has exactly that sensitivity.
+
+  An iframe's content document gets a viewport of exactly the iframe's own box, so `100vh` inside it is
+  700px by construction, whatever the outer window does.
+
+  The whole query string is forwarded to the inner page unchanged, so every parameter documented in
+  index.html works here too.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1983 — Checkpoint dialog reflow (1000x700 shell)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #8a8a8a;
+      }
+      iframe {
+        display: block;
+        width: 1000px;
+        height: 700px;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <iframe id="frame" title="Checkpoint dialog at 1000x700"></iframe>
+    <script type="module">
+      // Same directory, so a relative src keeps this working under any dev-server port or base path.
+      document.getElementById("frame").src = `./index.html${location.search}`;
+    </script>
+  </body>
+</html>

@@ -234,7 +234,11 @@
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
   .dialog { width: 720px; max-width: 96vw; background: var(--surface); border: 1px solid var(--dialog-border); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
   h2 { font-size: 16px; margin-bottom: 12px; }
-  .jobs { max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). Job rows carry their own per-row
+     controls (the auto-run checkbox, Run, Delete) and each row's status/plan text grows as a job
+     runs; under a centred dialog every one of those growths moved the rows above. At the 700px
+     harness window `40vh` is 280px and binds; the floor engages below 400px, the cap above 800px. */
+  .jobs { height: clamp(160px, 40vh, 320px); overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
   .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
   .job { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); }
   .jinfo { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }

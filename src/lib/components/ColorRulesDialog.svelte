@@ -208,7 +208,11 @@
   }
   h2 { font-size: 16px; margin-bottom: 8px; }
   p { color: var(--text-dim); font-size: 12.5px; margin-bottom: 12px; line-height: 1.5; }
-  .rules { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  /* CPE-1983 — one stable height, not a content-driven max-height: `onMount` loads the saved rules,
+     and this box growing under a centred dialog slides everything above it up by half the growth
+     (CPE-1968's decision, reused). At the 700px harness window `46vh` is 322px, so that middle term
+     is what binds; the floor engages below 391px and the cap above 783px. */
+  .rules { height: clamp(180px, 46vh, 360px); overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
   .empty { color: var(--text-dim); font-size: 12.5px; padding: 10px 2px; }
   .rule {
     display: flex;

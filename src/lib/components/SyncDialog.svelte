@@ -244,8 +244,12 @@
   .auto-note { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-bottom: 12px; }
   .warn-text { color: var(--warn); font-size: 12px; }
   .warn-text.small { font-size: 11px; margin-top: 6px; }
+  /* CPE-1983 — one stable height (CPE-1968's decision, reused). This is the one in the sweep that
+     grows CONTINUOUSLY rather than once: log lines arrive while the sync runs, so under a centred
+     dialog the whole dialog crept upward line by line, with Cancel/Close sitting below it and the
+     plan summary above. `px` rather than `vh`: a fixed line-height log. 140px is exactly the old cap. */
   .log {
-    margin-bottom: 14px; max-height: 140px; overflow: auto;
+    margin-bottom: 14px; height: 140px; overflow: auto;
     background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px;
     padding: 8px; font-size: 11px; font-family: var(--mono);
   }
