@@ -163,15 +163,18 @@ monitor** so the window is always visible; invalid values exit with an error. `c
 5. **Never commit `updater.key`** — it is already covered by `.gitignore`.
 
 **Rotating the key later (CPE-1873):** `plugins.updater.pubkey` (and `.endpoints`, so a rotation
-can't be undercut by silently repointing where the app fetches manifests from) are pinned in THREE
-places, all of which must move together in the same PR:
+can't be undercut by silently repointing where the app fetches manifests from) are pinned once and
+checked from several directions. Only the first bullet holds a value, and it is the only one a
+rotation edits (CPE-1987 — the second bullet used to carry a hand-copied duplicate):
 
 - `crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY` /
   `EXPECTED_TAURI_UPDATER_ENDPOINTS` — checked against the **base** `src-tauri/tauri.conf.json` by
   `cargo test -p cpe-updater-verify` (`ci.yml`, every push/PR to `main`) **and** by the
   `verify-release-artifacts` binary that `release.yml` runs on every tag push.
-- `src/lib/sidecarBundleResources.test.ts`'s pinned-updater-config assertions — checked against the
-  **fully merged** config (base + every `--config` overlay) for each shipped OS, because an overlay
+- `src/lib/sidecarBundleResources.test.ts`'s pinned-updater-config assertions — which **read the two
+  consts above out of `pinned_pubkey.rs` at run time** rather than restating them, and check them
+  against the **fully merged** config (base + every `--config` overlay) for each shipped OS and each
+  release channel — six build legs today, themselves derived from the workflows. An overlay
   file can silently override `plugins.updater.pubkey`/`.endpoints` the same way it can override
   `bundle.resources` (the original CPE-1270/1271 footgun this file guards). This is what actually
   runs before `release-sidecar.yml` — the build every install actually ships — is allowed to build.

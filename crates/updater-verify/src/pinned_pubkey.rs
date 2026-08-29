@@ -15,7 +15,9 @@
 //!
 //! [`EXPECTED_TAURI_UPDATER_PUBKEY`] and [`EXPECTED_TAURI_UPDATER_ENDPOINTS`] are **literal copies**
 //! of the values that belong at `plugins.updater.pubkey` / `.endpoints` in the **base**
-//! `src-tauri/tauri.conf.json`, committed in a location that is not that file. Pinning `endpoints`
+//! `src-tauri/tauri.conf.json`, committed in a location that is not that file — and, since CPE-1987,
+//! they are also **the one source these values are pinned from**: the TypeScript guard reads them out
+//! of this file at run time rather than carrying its own copy. Pinning `endpoints`
 //! too matters on its own: a signature check alone doesn't stop a *downgrade* — repointing where the
 //! app fetches `latest.json` from can serve an older, genuinely-signed, vulnerable build forever.
 //!
@@ -42,9 +44,25 @@
 //! added line in `tauri.sidecar.conf.json`, base file untouched, both checks above still green).
 //! `src/lib/sidecarBundleResources.test.ts` closes that: it computes the full merged config per
 //! shipped OS from the real `--config` overlay chain and asserts `plugins.updater.pubkey`/`.endpoints`
-//! still equal the pin. Keep its two literals in lockstep with the ones in this file — same value,
-//! same rotation procedure. Note the scope: that guard sees the `--config` chain, and *only* the
+//! still equal the pin. Note the scope: that guard sees the `--config` chain, and *only* the
 //! `--config` chain — the files Tauri merges on its own are the next paragraph's business.
+//!
+//! **That guard used to hold its own copy of these two values, under a comment asking the reader to
+//! keep them in lockstep with the consts below. CPE-1987 deleted the copy**: it now reads
+//! [`EXPECTED_TAURI_UPDATER_PUBKEY`] / [`EXPECTED_TAURI_UPDATER_ENDPOINTS`] out of THIS FILE at run
+//! time (`src/lib/rustSource.ts`, comments stripped first, so a commented-out old value cannot be
+//! read as the live one). Two consequences worth knowing before you edit either side:
+//!
+//! - **Renaming or restructuring these two consts breaks that test.** It does not go quietly green —
+//!   the reader throws at collection with `anchor not found in Rust source: pub const
+//!   EXPECTED_TAURI_UPDATER_PUBKEY` and the whole file reports zero tests (measured 2026-08-28).
+//!   Rename the anchor there in the same commit.
+//! - **What the deleted copy was worth, and what it cost.** It could never drift *silently* — it was
+//!   compared against the real merged config, so a stale copy simply went red. What it did do was let
+//!   an attacker who wrote a key into an *overlay* **and** into that literal pass every guard, because
+//!   nothing here reads an overlay. Deriving closes that. In exchange, a rotation that edits
+//!   `tauri.conf.json` and these consts together no longer trips a third stale copy — which is the
+//!   same self-consistency limit the "What none of this proves" section below already declares.
 //!
 //! **A THIRD path, found independently of `--config` entirely (CPE-1873 attempt 3, Security Auditor,
 //! DEMONSTRATED; widened by CPE-1903):** Tauri merges a per-platform config file AUTOMATICALLY on
@@ -95,7 +113,9 @@
 //!    update it there as well — check with `grep -rn '"pubkey"\|"endpoints"' src-tauri/*.conf.json`.
 //! 3. Update [`EXPECTED_TAURI_UPDATER_PUBKEY`] / [`EXPECTED_TAURI_UPDATER_ENDPOINTS`] below to match,
 //!    in the same commit.
-//! 4. Update the mirrored literals in `src/lib/sidecarBundleResources.test.ts`, in the same commit.
+//! 4. Nothing to do for `src/lib/sidecarBundleResources.test.ts` — it READS step 3's consts (CPE-1987),
+//!    so it follows automatically. It is still the check that fails first if step 2 and step 3
+//!    disagree, or if any overlay sets a different value; it just no longer needs editing.
 //! 5. Rotate the matching GitHub Actions secrets (`TAURI_SIGNING_PRIVATE_KEY`,
 //!    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) — done outside the repo, by whoever holds the private key.
 //! 6. Open the PR normally. A reviewer sees a multi-file diff explaining *why* the root of trust is

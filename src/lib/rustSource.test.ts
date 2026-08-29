@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { stripRustComments, rustStringLiteralAfter, rustStrSliceAfter } from "./rustSource";
+import {
+  stripRustComments,
+  rustStringLiteralAfter,
+  rustStrSliceAfter,
+  rustStrConstAfter,
+} from "./rustSource";
 
 /**
  * CPE-1950. `stripRustComments` / `rustStringLiteralAfter` came out of
@@ -177,5 +182,69 @@ describe("rustStrSliceAfter", () => {
       "android",
       "ios",
     ]);
+  });
+});
+
+/**
+ * CPE-1987. The scalar sibling of `rustStrSliceAfter`, added so the updater root-of-trust pubkey pin
+ * in `sidecarBundleResources.test.ts` could be READ out of `pinned_pubkey.rs` instead of asking a
+ * comment to keep two literals in lockstep.
+ */
+describe("rustStrConstAfter", () => {
+  const CONST = 'pub const K: &str = "abc";';
+
+  it("reads the value a `&str` const binds", () => {
+    expect(rustStrConstAfter(CONST, "pub const K")).toBe("abc");
+  });
+
+  it("throws — loudly — when the anchor is gone, rather than reading the next literal in the file", () => {
+    // CPE-1932: a renamed or deleted const must red. Returning some other declaration's literal is
+    // the silent-wrong-value class this module exists to close.
+    expect(() => rustStrConstAfter(CONST, "pub const RENAMED")).toThrow(/anchor not found/);
+  });
+
+  it("a comment quoting the OLD value cannot be mistaken for the real one (stripped first)", () => {
+    const hostile = [
+      '// Was: pub const K: &str = "stale";',
+      'pub const K: &str = "current";',
+    ].join("\n");
+    // Raw source: the comment's copy comes first and wins.
+    expect(rustStrConstAfter(hostile, "pub const K")).toBe("stale");
+    // Stripped first (what every caller does): the real declaration is what is read.
+    expect(rustStrConstAfter(stripRustComments(hostile), "pub const K")).toBe("current");
+  });
+
+  it("refuses a const that is not bound to a plain string literal", () => {
+    // The shape that matters: the const still exists but no longer HOLDS the value, so the next `"`
+    // in the file belongs to a later declaration. Reading it would certify the wrong value silently.
+    const indirect = ['pub const K: &str = OTHER;', 'pub const L: &str = "not mine";'].join("\n");
+    expect(() => rustStrConstAfter(indirect, "pub const K")).toThrow(/not bound to a plain string/);
+    expect(() => rustStrConstAfter('pub const K: &str = concat!("a", "b");', "pub const K")).toThrow(
+      /not bound to a plain string/,
+    );
+  });
+
+  it("still accepts the legitimate literal shapes (the complement of the refusal above)", () => {
+    // CPE-1900 rule 2: when you tighten a matcher, write the test that fails the LAZIEST passing
+    // implementation. An over-eager "must be exactly `= \"`" refusal would break both of these, which
+    // are ordinary Rust and carry no indirection at all.
+    expect(rustStrConstAfter('pub const K: &str =\n    "wrapped";', "pub const K")).toBe("wrapped");
+    expect(rustStrConstAfter('pub const K: &str = "a \\"q\\" b";', "pub const K")).toBe('a "q" b');
+  });
+
+  it("reads the real EXPECTED_TAURI_UPDATER_PUBKEY out of the shipped pin", () => {
+    const src = stripRustComments(
+      readFileSync(
+        join(process.cwd(), "crates", "updater-verify", "src", "pinned_pubkey.rs"),
+        "utf8",
+      ),
+    );
+    const pubkey = rustStrConstAfter(src, "pub const EXPECTED_TAURI_UPDATER_PUBKEY");
+    // Deliberately NOT a copy of the key: asserting the value here would re-create the third literal
+    // CPE-1987 deleted. This pins only that a minisign public key was actually read — the base64 of
+    // "untrusted comment: minisign public key: " — and `sidecarBundleResources.test.ts` is where the
+    // value itself is checked, against every shipped build leg's merged config.
+    expect(pubkey.startsWith("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6")).toBe(true);
+    expect(pubkey.length).toBeGreaterThan(80);
   });
 });

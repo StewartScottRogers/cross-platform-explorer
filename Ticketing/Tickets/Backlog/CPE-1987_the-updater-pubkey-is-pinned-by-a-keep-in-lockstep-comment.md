@@ -68,3 +68,38 @@ Related: **CPE-1900** (PR #1105 — the config-chain derivation that made this v
 example of deriving instead of listing), **CPE-1873** (the pin itself), **CPE-1933** (derive provenance,
 don't claim it — and anchor on code, never on prose), **CPE-1950** (a shared oracle catches divergence,
 not shared blindness; where duplication is removable, remove it), **CPE-1932** (enumerate, don't recall).
+
+## Work Log
+
+**2026-08-28 — built.** The two literals in `sidecarBundleResources.test.ts` are gone; the file reads
+`EXPECTED_TAURI_UPDATER_PUBKEY` / `EXPECTED_TAURI_UPDATER_ENDPOINTS` out of `pinned_pubkey.rs` at run
+time, comments stripped first. New helper `rustStrConstAfter` in `src/lib/rustSource.ts` (the scalar
+sibling of the existing `rustStrSliceAfter`) — not a new scanner; the reciprocal claims in
+`pinned_pubkey.rs`'s module doc, its rotation procedure step 4, and `README.md`'s "pinned in THREE
+places" were updated in the same commit.
+
+**The framing the ticket inherited was slightly off, and the correction is the interesting part.**
+A stale TS literal could not have drifted *silently* — it was compared against the real merged config,
+so a stale copy simply reds. What the copy actually bought was the reverse: because it was independent
+of the Rust const, an attacker writing a key into an **overlay** *and* into that literal passed every
+guard (the Rust pin only ever reads the BASE config, untouched in that scenario). Two files, six
+shipped legs compromised, nothing red. Deriving closes that. The cost, stated at the site: the deleted
+third copy also used to red on a `tauri.conf.json` + `pinned_pubkey.rs` rotation, and no longer does —
+which is the same self-consistency limit `pinned_pubkey.rs`'s "What none of this proves" already
+declares out of bounds.
+
+**Site enumeration** (`git ls-files | xargs grep -l`, not recall). Three live files carry the pubkey —
+`pinned_pubkey.rs` (source of truth, unchanged), `src-tauri/tauri.conf.json` (unchanged), and the test
+(literal deleted, now derived). Two more carry the endpoint URL in prose only: `RELEASING.md` and a
+Done ticket — both fine, neither is a pin. The Auditor's "four" counted a history value, which is not
+a live site.
+
+**Red-proofs (all reverted; `git status --porcelain` clean after each).** Rust pubkey const changed →
+6 failed / 42 passed. Rust endpoints const changed → 6 failed / 42 passed. Rust const renamed → the
+reader throws at collection, whole file reports zero tests. Rust const blanked → 8 failed / 66 passed
+across the two files, the vacuous-derivation leg naming itself first. Decoy `pub const
+EXPECTED_TAURI_UPDATER_PUBKEY` planted in a `//` comment → 48/48 green with stripping, while an
+unstripped reader derives the decoy (measured with a throwaway script).
+
+**CPE-1873's injection re-run over all 7 chain files**, unchanged from CPE-1900's recorded table:
+12 / 6 / 4 / 2 / 2 / 2 / 2 failures, each reddening exactly the OSes that file governs.

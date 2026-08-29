@@ -296,3 +296,55 @@ export function rustStrSliceAfter(src: string, anchor: string): string[] {
   if (items.length === 0) throw new Error(`slice literal after ${anchor} held no string literals`);
   return items;
 }
+
+/**
+ * The value bound by a `pub const NAME: &str = "…";` that follows `anchor` in `src` — the scalar
+ * sibling of [`rustStrSliceAfter`], added by CPE-1987 for the updater root-of-trust pin
+ * (`EXPECTED_TAURI_UPDATER_PUBKEY`), which is a `&str` rather than a `&[&str]`.
+ *
+ * `src` must already be comment-stripped ([`stripRustComments`]); passing raw source is the hole
+ * stripping exists to close, and `rustSource.test.ts` pins that with a hostile fixture whose comment
+ * quotes an old value.
+ *
+ * **It refuses anything that is not a plain string-literal binding.** Everything between the `=` and
+ * the opening `"` must be whitespace, so `= OTHER_CONST;`, `= concat!("a", "b")` and a deleted const
+ * (where the next `"` in the file belongs to some *later* declaration) all throw instead of returning
+ * a value that came from somewhere the caller did not mean. A silently wrong pin is the whole defect
+ * class; a loud throw is the only acceptable failure here.
+ *
+ * **CPE-1929, run rather than reasoned about (2026-08-28).** A second, obvious-looking guard — "the
+ * literal must also appear before the const's `;`" — was written first, measured, and then DELETED as
+ * *shadowed*, rather than kept as belt-and-braces. The two sabotages, and what each one actually says:
+ *
+ * - **Disable it** (`if (false && semi >= 0 && quote > semi)`): 26/26 `rustSource.test.ts` green, and
+ *   the whole file behaves identically with the guard present (26/26) and absent (26/26). Nothing in
+ *   the suite reaches it.
+ * - **Force its predicate to lie** — the permissive direction of that lie *is* the bullet above. The
+ *   restrictive direction (`semi >= -1`, i.e. always refuse) reds 4 tests, but read that honestly: the
+ *   four are the *valid* shapes now being refused, so it proves the LINE executes, not that its
+ *   predicate can ever be true.
+ *
+ * The reachability argument is structural, which is why the pair was believed: a `"` sitting past the
+ * const's `;` puts at least that `;` into the `between` slice, so the whitespace check refuses first,
+ * on the same underlying fact — there is no input that reaches the second guard with its predicate
+ * true. Leaving it in would have read as coverage while being unreachable, which CLAUDE.md calls the
+ * one wrong answer.
+ */
+export function rustStrConstAfter(src: string, anchor: string): string {
+  const at = src.indexOf(anchor);
+  if (at < 0) throw new Error(`anchor not found in Rust source: ${anchor}`);
+  const eq = src.indexOf("=", at);
+  if (eq < 0) throw new Error(`no \`=\` follows ${anchor}`);
+  const quote = src.indexOf('"', eq);
+  if (quote < 0) throw new Error(`no string literal follows ${anchor}`);
+  const between = src.slice(eq + 1, quote).trim();
+  if (between !== "") {
+    throw new Error(
+      `${anchor} is not bound to a plain string literal: found ${JSON.stringify(
+        between.slice(0, 60),
+      )} between its \`=\` and the next \`"\`. Refusing rather than reading a literal that belongs ` +
+        `to something else.`,
+    );
+  }
+  return rustStringLiteralAfter(src, quote);
+}
