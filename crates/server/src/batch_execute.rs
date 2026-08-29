@@ -528,8 +528,13 @@ pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> Result<BatchReport
 ///    scanned census. This is the enforcement point.
 /// 3. The foreign-overwrite question, answered from `created` (an atomic fact from step 2) rather than a
 ///    `Path::is_file()` stat that could already be stale.
-/// 4. Truncate + write **through the handle from step 2** — the same object that was verified, which
-///    cannot have been swapped for another in between because a handle names an object, not a name.
+/// 4. Write. **This stopped being a truncate-through-the-handle at CPE-1961** and the correction is kept
+///    here rather than left to rot, because the old wording is exactly the premise CPE-1959 re-examined:
+///    `VerifiedOutput::write_all` hands the step-2 handle to
+///    `fsutil::stage_bytes_over_checked_handle`, which writes into a sibling it creates with `create_new`
+///    and commits it over the name with a rename. The step-2 handle still decides *whether* the write
+///    happens — it is the object that was verified and it cannot have been swapped in between — but the
+///    bytes never enter it, so nothing pre-existing at the output is written through.
 ///
 /// Steps 2-4 are a handful of syscalls; the previously exploitable window was the entire transform.
 ///
@@ -579,13 +584,18 @@ fn execute_one(
     }
 
     // **CPE-1725 inventoried this site as an `fs::write` sibling of the two whole-file save paths and
-    // found the premise wrong in the safe direction: there is no `fs::write` here at all.** The bytes go
-    // through the handle `open_output_verified` already opened with `O_NOFOLLOW` /
-    // `FILE_FLAG_OPEN_REPARSE_POINT` and then re-verified (`symlink_metadata`, plus the handle's reparse
-    // bit), so **any** link at the output — live or dangling — is refused before a byte is written. That
-    // is stricter than either save path, which *resolve* a link and edit its target; a batch never writes
-    // through one, because its output name is claimed rather than opened by the user. No change was needed
-    // here, and this note is so the next sweep does not have to re-derive that.
+    // found the premise wrong in the safe direction: there is no `fs::write` here at all.** Any link at
+    // the output — live or dangling — is refused by `open_output_verified` before a byte is written,
+    // on the handle it opened with `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`. That is stricter than
+    // either save path, which *resolve* a link and edit its target; a batch never writes through one,
+    // because its output name is claimed rather than opened by the user. No change was needed here, and
+    // this note is so the next sweep does not have to re-derive that.
+    //
+    // Two clauses this note used to carry are gone rather than edited, because both were false and each
+    // would send a reader to the wrong conclusion. *"The bytes go through the handle"*: not since
+    // CPE-1961 — see `execute_one`'s step 4. *"Plus the handle's reparse bit"*: not since CPE-1959 — the
+    // handle asks `reparse_name_surrogate`, so a dehydrated cloud placeholder at the output is an
+    // ordinary file that gets written, exactly as at `fsutil`'s two write paths.
     let result = verified.write_all(&output_bytes, &item.output);
     #[cfg(test)]
     trace_mark(|t| t.window_end = Some(std::time::Instant::now()));
