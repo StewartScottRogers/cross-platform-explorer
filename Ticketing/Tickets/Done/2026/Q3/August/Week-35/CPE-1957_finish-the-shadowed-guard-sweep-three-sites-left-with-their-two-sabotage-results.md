@@ -118,6 +118,13 @@ seconds; none was a cached "Finished in 0.5s".
 **Re-measured baseline: 2,460 passed / 0 failed / 14 ignored** (86.27 s). The ticket quoted 2,425/0/11
 from CPE-1929's merge; several PRs have landed since (#1089, #1098 among them).
 
+**Revision provenance, because a number is a fact about a revision (CPE-1933).** Every sabotage below
+was measured at base `eca04c22`. The branch was later rebased onto `2c7f69ff` (#1099 and #1100 having
+merged in between) and the suite re-measured: **2,461 / 0 / 14** — the same 2,460 baseline plus this
+ticket's one new test. The baseline is unmoved, so the numbers below stand as measured; each site names
+the revision so that if a later change *does* move the count, the next reader re-runs the sabotages
+rather than quietly adjusting the figures.
+
 ### The two-sabotage results
 
 | Site | disable (`if false && …`) | predicate lies (`if true \|\| …`) | verdict |

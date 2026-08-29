@@ -1919,7 +1919,9 @@ fn same_object_or_refuse(
         // **Measured, not assumed: this is NOT a shadowed guard, and CPE-1957 expected it to be.**
         // That ticket filed it as a probable duplicate of `shred_dir_pinned`'s `probe.is_link`, worth
         // only an "unreachable backstop" note. The two sabotages say otherwise, on Windows 11
-        // (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored):
+        // (`cargo test --lib`, `crates/server`, baseline 2,460 passed / 0 failed / 14 ignored, base
+        // `eca04c22` and re-confirmed against `2c7f69ff` — see `overwrite_pinned_file` for why the
+        // revision is named):
         // disabling it (`if false && now.is_link`) is **2,458 passed / 2 failed** —
         // `a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against` and
         // `shred_tree_refuses_a_root_that_is_itself_a_link` — and forcing the predicate to lie
@@ -2003,7 +2005,11 @@ fn overwrite_pinned_file(
     // narrowing only this one changes nothing at all, since control never arrives.
     //
     // **Shadowed-guard measurement, run by hand on Windows 11 (`cargo test --lib`, `crates/server`),
-    // baseline 2,460 passed / 0 failed / 14 ignored.** Disabling this refusal (`if false && (..)`):
+    // baseline 2,460 passed / 0 failed / 14 ignored.** Every number in this file's CPE-1957 comments was
+    // measured at base `eca04c22` and re-confirmed against `2c7f69ff` after rebasing: the baseline came
+    // back identical, so #1099/#1100 moved nothing here. A number is a fact about a revision, so the
+    // revision is named rather than left to the reader (CPE-1933) — if a later change moves the count,
+    // these are stale and must be re-run, not adjusted.  Disabling this refusal (`if false && (..)`):
     // **2,460 / 0** — identical, so nothing in the suite makes its predicate true. Forcing the predicate
     // to lie (`if true || ..`): **2,434 passed / 26 failed** — which proves only that the *line* is on
     // the hot path of every ordinary file, not that the *refusal* is reachable, and is why the second
@@ -4913,7 +4919,8 @@ mod tests {
     /// Windows-only by construction: Unix has no reparse points and its `is_link` is already
     /// `file_type().is_symlink()`.
     ///
-    /// **Red-proofed, both halves, on Windows 11 (`cargo test --lib`, `crates/server`).** Un-narrowing
+    /// **Red-proofed, both halves, on Windows 11 (`cargo test --lib`, `crates/server`, base `eca04c22`,
+    /// re-confirmed against `2c7f69ff`).** Un-narrowing
     /// `EntryProbe::is_link` back to the bare bit gives **2,460 passed / 1 failed**, failing here on
     /// the non-surrogate half with the secret still readable — that is the live bug, reproduced. And
     /// with `probe.is_link` narrowed but `overwrite_pinned_file`'s handle check left on the bare bit,
