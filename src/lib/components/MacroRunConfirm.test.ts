@@ -562,10 +562,13 @@ describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-cop
 /**
  * CPE-1983 — the operations list's height does not depend on the resolved plan.
  *
- * `onMount` resolves the macro's plan (`macro_plan` + `macro_preflight`), so `.ops` is empty when the
- * confirm appears and full a moment later. `.backdrop` centres the dialog, so that growth slid the
- * Run/Cancel row and the warning text apart under the pointer — CPE-1968's shape, in a dialog whose
- * whole purpose is a deliberate confirmation.
+ * `onMount` resolves the macro's plan (`macro_plan` + `macro_preflight`). While that is in flight
+ * `.ops` DOES NOT EXIST — the `{:else if plan === null}` branch renders a one-line `Planning…` div in
+ * its place — so what grows is a one-line div being REPLACED by a list. (Round 1 of this block said
+ * "`.ops` is empty when the confirm appears and full a moment later", which is a different mechanism
+ * and simply false; corrected in round 2, in this file and at the CSS site.) `.backdrop` centres the
+ * dialog, so that replacement slid the Run/Cancel row and the warning text apart under the pointer —
+ * CPE-1968's shape, in a dialog whose whole purpose is a deliberate confirmation.
  *
  * TWO PROPERTIES HOLD THE HEIGHT AND THEY ARE ASSERTED SEPARATELY, because removing both at once only
  * proves the pair (CPE-1968 measured exactly this on `MacrosDialog`). `.dialog` is a flex column with
@@ -585,8 +588,25 @@ describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-cop
  */
 describe("CPE-1983 — the plan list's height does not depend on the resolved plan", () => {
   const SRC = readFileSync(join(process.cwd(), "src", "lib", "components", "MacroRunConfirm.svelte"), "utf8");
-  /** `src-tauri/src/lib.rs`'s `.inner_size(1000.0, 700.0)`; only the vh terms below read it. */
-  const VIEWPORT_H = 700;
+  /**
+   * The harness window's height, DERIVED from the app's own `.inner_size(w, h)` rather than pasted.
+   *
+   * Round 1 of this block hand-copied `700` under a comment naming `src-tauri/src/lib.rs` — a claim
+   * about another file, untested by construction, and CPE-1933's exact shape. Worse, its sibling in
+   * this same PR (`CheckpointDialog.test.ts`) already derives it correctly, so the two files
+   * disagreed about how to know the same number. Rust comments are stripped first so a commented-out
+   * or quoted copy cannot answer, and more than one `.inner_size` call is a throw rather than a guess.
+   *
+   * It is genuinely load-bearing here, which round 1's rider ("only the vh terms below read it") also
+   * got wrong: `contentIndependentHeightReason` resolves `clamp(160px, 40vh, 320px)` against it to
+   * decide whether `min-height`/`max-height` contradict the declared height.
+   */
+  const VIEWPORT_H = (() => {
+    const rust = stripRustComments(readFileSync(join(process.cwd(), "src-tauri", "src", "lib.rs"), "utf8"));
+    const hits = [...rust.matchAll(/\.inner_size\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/g)];
+    expect(hits.length, "expected exactly one `.inner_size(w, h)` call in src-tauri/src/lib.rs").toBe(1);
+    return parseFloat(hits[0][2]);
+  })();
 
   it("gives .ops a content-independent height, so the plan landing cannot move Run/Cancel", () => {
     const ops = styleBlock(SRC, "ops");

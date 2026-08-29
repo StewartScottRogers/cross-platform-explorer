@@ -103,7 +103,12 @@
      them. At the 700px harness window `44vh` is 308px and binds; the floor engages below 364px, the
      cap above 773px. */
   .list { height: clamp(160px, 44vh, 340px); overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
+  /* CPE-1983 — centred, and only because `.list` is now a fixed height (the same second half of the
+     fix `OrganizeDialog`'s `.empty` carries): a one-line placeholder pinned to the corner of a 308px
+     box reads as a failed render rather than an empty one. Safe because `.empty` renders only under
+     `{#if list.length === 0}` and is therefore never mounted alongside a `.ws`, so this cannot centre
+     a list; `height: 100%` resolves against `.list`'s definite height. */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; display: grid; place-items: center; height: 100%; }
   .ws { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); }
   .name { flex: 1 1 auto; text-align: left; background: none; border: none; color: var(--text); font: inherit; font-weight: 600; cursor: pointer; padding: 2px 4px; border-radius: var(--radius); }
   .name:hover { background: var(--surface); }

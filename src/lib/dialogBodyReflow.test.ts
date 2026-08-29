@@ -18,6 +18,13 @@
  * (CPE-1932), and the non-vacuity legs below fail loudly rather than reporting a comfortable count of
  * nothing.
  *
+ * THE SPLIT AS IT STANDS, stated so nobody has to infer it (and corrected in review round 2, where
+ * round 1's "only three were fixed" was wrong in both halves): of the 22 boxes, **5 already had a
+ * content-independent height** — `CompareDialog#tree`, `IntegrityDialog#report`,
+ * `TemplatesDialog#list`, and CPE-1968's own two, `OrganizeDialog#preview` and `MacrosDialog#list` —
+ * **10 are fixed by CPE-1983**, and **7 are allowlisted** below with reasons. CPE-1968 fixed two, not
+ * three; the other three were already `vh`-stable and nobody had counted them.
+ *
  * WHAT IS ENUMERATED, precisely, because the scope is the claim:
  *   - every `.svelte` file `git ls-files` reports (not a hand-written list, not a glob of the
  *     directories anyone remembered);
@@ -43,6 +50,15 @@
  *     at-rule leg below reds if an at-rule takes a definite height back off a population box, but it
  *     does not enumerate boxes that exist only there.
  *   - a selector that is not a single class — `.a .b`, `ul.ops`, `[data-role]`.
+ *   - **a dialog whose ROOT is its only scroll box.** The `role="dialog"` exclusion below says the
+ *     root's `max-height` "caps growth rather than causing it", and that is only true ABOVE the cap:
+ *     BELOW it the root sizes to its content and re-centres exactly like a body does. Live instances,
+ *     named rather than left as a category — `ArchiveSafetyDialog.svelte` (`onMount(run)` swaps a
+ *     loading line for a full report, with the `×` button above it) and `JoinPartsDialog.svelte`; both
+ *     are centred and neither has any inner scroll box for this guard to look at. They are NOT fixed
+ *     here because a definite height on a dialog ROOT is the wrong fix — it would make every state of
+ *     that dialog as tall as its tallest. Removing the exclusion would surface them as false
+ *     positives, not as fixes.
  *   - **the second property some of these fixes need.** Where the dialog root is a flex column
  *     (`MacroRunConfirm`, `MacrosDialog`), a flex item's default `flex-shrink: 1` lets the free-space
  *     algorithm override a declared `height` once the dialog hits its own cap, so the fix needs
@@ -59,15 +75,26 @@
  * `styleBlock` throws, a loud red. Both of those are facts about a SINGLE-SELECTOR LOOKUP. For an
  * ENUMERATOR neither holds, and the difference is not cosmetic:
  *
- *   - with `stripComments: false` this sweep's population drops from **22 boxes to 8**;
- *   - the 14 it loses are exactly the ones that have been FIXED, CPE-1968's `OrganizeDialog#preview`
- *     and `MacrosDialog#list` among them, because every fix in this class ships with a comment
- *     explaining it and a comment immediately above a rule is swallowed into that rule's SELECTOR —
- *     `.list` stops parsing as a single class and drops out of the enumeration altogether;
- *   - a smaller population is **all green**. So the unstripped failure mode here is a silent pass,
- *     not a loud throw: the enumeration quietly stops covering the very instances it was built for.
+ *   - with `stripComments: false` this sweep's population drops. **Today: 22 boxes to 9, losing 13.**
+ *     The mechanism is that every fix in this class ships with a comment explaining it, and a comment
+ *     immediately above a rule is swallowed into that rule's SELECTOR — `.list` stops parsing as a
+ *     single class and drops out of the enumeration altogether.
+ *   - **Round 1 of this paragraph said the losses "are exactly the ones that have been FIXED". They
+ *     are not, and the truth is worse rather than softer**: today 12 of the 13 are fixed and **one is
+ *     not** — `MacroRunConfirm#collision-list`, a live content-driven box, allowlisted but still real
+ *     debt. An unfixed offender silently leaving the population is the more dangerous loss of the
+ *     two, so it is stated rather than rounded off. (Review round 2 measured a different pair on the
+ *     round-1 tree, `CopilotDialog#op-results` and `#collision-list`; WHICH boxes vanish moves with
+ *     the comments in the tree, which is exactly why the assertion below derives the property and
+ *     does not pin a list.)
+ *   - **Round 1 also said "a smaller population is all green … a silent pass, not a loud throw",
+ *     which claims this file's own floor does not work. It does.** With the stripper disabled the
+ *     `>=15` floor reds at 9, along with the other legs that name specific boxes. The accurate
+ *     statement is one level down: the SUBSTANTIVE leg — "no scroll box can grow under the pointer" —
+ *     passes VACUOUSLY over the shrunken population, and it is this PR's own non-vacuity floors that
+ *     turn that vacuum into a red. Which is the argument for having them, not against.
  *
- * That is asserted below, by name, not left as prose.
+ * All of that is asserted below rather than left as prose.
  */
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -84,12 +111,24 @@ const VIEWPORT_H = 700;
  * `scripts/ratchet-baselines.mjs` as `dialog-body-reflow-allowlist`, so it can only ever shrink
  * without a declared row in `docs/design/RATCHETS.md`.
  *
- * The common thread, and why these are NOT simply the ones nobody got to: each is a SECONDARY panel
- * that is absent until the user asks for it. Pinning it to a definite height does not remove a
- * reflow — the panel's APPEARANCE is the reflow, and a fixed height cannot fix that — it only
- * reserves dead space in the state the dialog spends most of its life in. That family (make an
- * on-demand panel's arrival not move the dialog) is a different fix and belongs in its own ticket; it
- * is named in CPE-1983's report so it can be filed rather than smuggled in here.
+ * THE COMMON THREAD FOR SIX OF THE SEVEN, and why they are not simply the ones nobody got to: each
+ * is a SECONDARY panel that is absent until the user asks for it, and whose contents are already
+ * whole when it mounts. Pinning it to a definite height does not remove a reflow — the panel's
+ * ARRIVAL is the reflow, and no height can fix that — it only reserves dead space in the state the
+ * dialog spends most of its life in. **Gating alone is not the discriminator**: `SyncDialog`'s
+ * `.log` is `{#if}`-gated too and IS fixed here, because it arrives AND THEN GROWS, line by line,
+ * for the whole run. The split is what happens after arrival, not whether there is one. That family
+ * is CPE-1990.
+ *
+ * THE SEVENTH IS A DIFFERENT ANIMAL and says so out loud rather than sheltering under that sentence
+ * — see `ColumnPickerDialog` below.
+ *
+ * WARNING ABOUT THE KEY, which round 1 of this file got caught by. `<file>#<class>` is a CSS key,
+ * and a CSS class is not an element identity: **one row can name several structurally different
+ * elements**, with different gating and different roles, and a justification true of one of them
+ * reads as covering all of them. The scan now records `elements` per box and the leg
+ * "an allowlist row that covers more than one element says so" asserts that any multi-element row is
+ * declared here — so this paragraph is derived rather than remembered.
  *
  * Format: `<component file>#<class>`, so a stale row reds by name (see the no-stale-rows leg).
  */
@@ -100,8 +139,47 @@ const DIALOG_BODY_REFLOW_ALLOWLIST = [
   "src/lib/components/CopilotDialog.svelte#op-results",
   "src/lib/components/RunCommandConfirm.svelte#res-out",
   "src/lib/components/UpdateDialog.svelte#notes",
+  // THE ONE THAT IS NOT A SECONDARY PANEL, stated honestly rather than filed under the paragraph
+  // above (review round 2 caught round 1 doing exactly that). `.list` here names TWO elements: the
+  // conditional `active-list`, and `available-list` at ColumnPickerDialog.svelte:94, which is
+  // unconditional, is the dialog's main body, and changes height every time a column moves between
+  // the two sections — with the row the user just clicked directly above it. That IS the CPE-1983
+  // shape.
+  //
+  // It is deferred rather than fixed because a one-line pin is the wrong fix and the arithmetic says
+  // so from the declarations alone: both boxes share this one rule, so pinning it puts 2 x 220px =
+  // 440px of list inside a dialog whose own cap is `max-height: 85vh` — 595px at the 700px harness
+  // window — leaving 155px for a header row, two section headings, two 14px section margins, an
+  // action row and 40px of padding. The dialog would start scrolling itself, which trades one reflow
+  // for a worse one. Sizing two boxes against a shared budget is a design decision, not a CSS
+  // one-liner, and it needs the same before/after harness pass the CheckpointDialog fix got.
   "src/lib/components/ColumnPickerDialog.svelte#list",
 ];
+
+/**
+ * Allowlist rows whose class is applied to more than one element, with what the extra elements are.
+ *
+ * Derived-not-recalled companion to the key warning above: the guard measures which rows are
+ * multi-element and fails if one is not declared here, so a second `ColumnPickerDialog` cannot hide
+ * behind a single-element-shaped justification.
+ *
+ * NOT a ratchet, and named to avoid looking like one: it permits nothing and cannot grow on its own.
+ * Every key must already be a `DIALOG_BODY_REFLOW_ALLOWLIST` row (asserted below), and that list is
+ * the gated count. This is a description of rows that exist, not a licence for more of them.
+ */
+const MULTI_ELEMENT_ROWS: Record<string, string> = {
+  "src/lib/components/ColumnPickerDialog.svelte#list":
+    "TWO elements with DIFFERENT gating and different roles: `active-list` (conditional) and " +
+    "`available-list` (unconditional, the dialog's main body). The one row's reason is true of only " +
+    "one of them — see the row's own comment, which says so.",
+  "src/lib/components/MacroRunConfirm.svelte#collision-list":
+    "TWO elements, both `<ul>`s and both the same role — the blocked-collisions list and the " +
+    "confirmable-collisions list, each inside its own `{#if …length}` collision panel. The row's " +
+    "reason covers both without amendment.",
+  "src/lib/components/RunCommandConfirm.svelte#res-out":
+    "THREE elements, all the same role — the error line and the stdout/stderr `<pre>`s, all inside " +
+    "the `{#if result}` results panel. The row's reason covers all three without amendment.",
+};
 
 const REPO_ROOT = process.cwd();
 
@@ -154,12 +232,44 @@ function openTags(markup: string): string[] {
   return tags;
 }
 
+/**
+ * The class names an opening tag applies, as exact tokens.
+ *
+ * FOUND IN REVIEW ROUND 2, and it is worth stating because the wrong version looks right. Round 1
+ * asked `class="[^"]*\blist\b[^"]*"`. In a regex a HYPHEN IS A WORD BOUNDARY, so `\blist\b` matches
+ * inside `class="drift-list"` — and `\blog\b` inside `class="log-line"`, and `\bres-out\b` inside
+ * `res-outcome`. Measured on this tree, that over-matched five of the twenty-two boxes and made the
+ * multi-element count added in this same round report phantoms.
+ *
+ * It was also a latent FALSE EXCLUSION, which is the direction that matters: the `role="dialog"` skip
+ * asks whether any tag carrying the class is the dialog root, so a body class that happened to be a
+ * hyphen-substring of the root's would have removed a real box from the population silently. Nothing
+ * in the tree does that today; the point is that the old matcher could not have told us.
+ *
+ * Tokenising is the fix rather than a tighter regex: split the attribute on whitespace and compare
+ * whole tokens. Svelte interpolations (`class="op-kind kind-{opKind(op)}"`) survive as their own
+ * tokens and simply never match a plain class name, which is correct.
+ */
+function classTokens(tag: string): string[] {
+  const attr = /\sclass="([^"]*)"/.exec(tag);
+  return attr ? attr[1].split(/\s+/).filter(Boolean) : [];
+}
+
 interface ScrollBox {
   /** `<file>#<class>` — the allowlist key and the failure message's subject. */
   id: string;
   file: string;
   cls: string;
   block: string;
+  /**
+   * How many elements in the markup carry this class.
+   *
+   * Recorded because the `#class` key is a CSS key, and CSS classes are not element identities: a
+   * single row can stand for several structurally different boxes. Round 1 of this file allowlisted
+   * `ColumnPickerDialog#list` on a justification true of only one of the TWO elements it names, and
+   * nothing in the guard could show that. Now a multi-element box is a fact the scan reports.
+   */
+  elements: number;
 }
 
 /** Is this rule body a scroll box — an overflow box with some height bound? */
@@ -198,14 +308,18 @@ function scan(strip = true): Scan {
     centred.push(file);
 
     const tags = openTags(markupOf(src));
-    const forClass = (cls: string) => tags.filter((t) => new RegExp(`class="[^"]*\\b${cls}\\b[^"]*"`).test(t));
+    const forClass = (cls: string) => tags.filter((t) => classTokens(t).includes(cls));
 
     for (const rule of rules) {
       const cls = /^\.([A-Za-z][A-Za-z0-9_-]*)$/.exec(rule.selector)?.[1];
       if (!cls) continue;
       const used = forClass(cls);
       if (used.length === 0) continue; // a rule for a class the markup never applies
-      if (used.some((t) => /role="dialog"/.test(t))) continue; // the centred box itself, not a body in it
+      // The centred box itself, not a body inside it. Its `max-height` caps growth ABOVE the cap —
+      // but below the cap a root grows with its content and re-centres exactly like a body, so this
+      // exclusion does hide a real family. It is a deliberate blind spot, not a claim of safety, and
+      // it is named with live instances in this file's header.
+      if (used.some((t) => /role="dialog"/.test(t))) continue;
       if (rule.atRule) {
         if (boxes.some((b) => b.id === `${file}#${cls}`) && !declaration(rule.block, "height")) {
           atRuleOverrides.push({ id: `${file}#${cls}`, atRule: rule.atRule, block: rule.block });
@@ -213,7 +327,7 @@ function scan(strip = true): Scan {
         continue;
       }
       if (!isScrollBox(rule.block)) continue;
-      boxes.push({ id: `${file}#${cls}`, file, cls, block: rule.block });
+      boxes.push({ id: `${file}#${cls}`, file, cls, block: rule.block, elements: used.length });
     }
   }
   return { files, centred, boxes, atRuleOverrides };
@@ -242,7 +356,7 @@ describe("CPE-1983 — the enumeration itself (CPE-1932: a guard over 'all the X
   it("finds the scroll boxes inside them", () => {
     expect(
       SCAN.boxes.length,
-      `only ${SCAN.boxes.length} scroll boxes found inside centred dialogs. CPE-1983 measured 20; a ` +
+      `only ${SCAN.boxes.length} scroll boxes found inside centred dialogs. CPE-1983 measured 22; a ` +
         "collapse means the rule enumerator or the markup scan broke, and every assertion below would " +
         "then be vacuously green.",
     ).toBeGreaterThanOrEqual(15);
@@ -250,11 +364,10 @@ describe("CPE-1983 — the enumeration itself (CPE-1932: a guard over 'all the X
 
   it("the comment stripper is load-bearing HERE, unlike in styleBlock — measured, not inherited", () => {
     // CPE-1933 rule 3, and the ticket's explicit instruction not to inherit PR #1099's "buys nothing"
-    // finding. Measured on this commit's own tree: 22 boxes stripped, 8 unstripped. The direction is
-    // the point — the stripper does not stop over-reporting, it stops SILENT UNDER-reporting, which
-    // is the failure that passes.
+    // finding. The direction is the point: the stripper does not stop over-reporting, it stops
+    // SILENT UNDER-reporting, which is the failure that passes.
     const unstripped = new Set(scan(false).boxes.map((b) => b.id));
-    const lost = SCAN.boxes.map((b) => b.id).filter((id) => !unstripped.has(id));
+    const lost = SCAN.boxes.filter((b) => !unstripped.has(b.id));
     expect(
       lost.length,
       "disabling the comment stripper did not change this scan's population. If that is genuinely " +
@@ -262,18 +375,53 @@ describe("CPE-1983 — the enumeration itself (CPE-1932: a guard over 'all the X
         "re-measured — a note about a safeguard is a claim like any other.",
     ).toBeGreaterThan(0);
 
-    // ...and this is WHY it matters, rather than just that a number moved. Every fix in this class
-    // ships with a comment explaining it, and a comment immediately above a rule is swallowed into
-    // that rule's SELECTOR when it is not stripped — so the rule stops looking like `.list` and drops
-    // out of the enumeration entirely. The boxes an unstripped scan loses are precisely the ones
-    // already fixed, including both of CPE-1968's. A smaller population is all green.
-    expect(lost, "the unstripped scan must lose CPE-1968's two fixes — that is the silent pass").toEqual(
-      expect.arrayContaining([
-        "src/lib/components/OrganizeDialog.svelte#preview",
-        "src/lib/components/MacrosDialog.svelte#list",
-        "src/lib/components/CheckpointDialog.svelte#list",
-      ]),
-    );
+    // WHY it matters, derived rather than pinned. Round 1 listed three box ids here, which is a
+    // claim about today's comments: WHICH rules a comment happens to sit above moves every time
+    // anyone edits one, and review round 2 measured a different pair on the round-1 tree. So assert
+    // the two PROPERTIES that make this dangerous instead.
+    //
+    // Property 1: the losses include boxes that are ALREADY FIXED — the enumeration stops watching
+    // the instances it was built for, and cannot then notice a revert.
+    expect(
+      lost.filter((b) => contentIndependentHeightReason(b.block, VIEWPORT_H) === null).length,
+      "an unstripped scan lost no already-fixed box, so it could not stop watching for a revert",
+    ).toBeGreaterThan(0);
+
+    // Property 2, and the worse half: the losses include boxes that are STILL CONTENT-DRIVEN. A live
+    // offender leaving the population is a guard quietly narrowing its own scope, which is worse than
+    // losing a box that is already correct. Round 1's prose said the losses were "exactly the ones
+    // that have been FIXED"; this is the leg that would have caught that.
+    expect(
+      lost.filter((b) => contentIndependentHeightReason(b.block, VIEWPORT_H) !== null).map((b) => b.id).length,
+      "an unstripped scan lost no still-content-driven box. That is a WEAKER failure than the header " +
+        "describes, so if it is genuinely true now the header paragraph is stale.",
+    ).toBeGreaterThan(0);
+  });
+
+  it("with the stripper off, this file's own floor is what reds — not a silent pass", () => {
+    // Round 1's prose said "a smaller population is all green … a silent pass, not a loud throw",
+    // which claims this file's floor does not work. It does, and saying otherwise undersells the very
+    // safeguard the PR added. What passes VACUOUSLY is the substantive height leg; the floor is what
+    // turns that vacuum into a red. Both halves are asserted here so neither can be over-stated again.
+    const unstripped = scan(false);
+
+    // The floor: the same >=15 the enumeration leg above asserts, evaluated on the shrunken scan.
+    expect(
+      unstripped.boxes.length,
+      "the unstripped population is still above this file's floor, so the floor would NOT red and " +
+        "the header's account of what protects this scan is wrong",
+    ).toBeLessThan(15);
+
+    // The vacuum: every surviving box still satisfies the substantive invariant, so that leg alone
+    // would report success over a population missing most of its subjects.
+    const stillOffending = unstripped.boxes
+      .filter((b) => !DIALOG_BODY_REFLOW_ALLOWLIST.includes(b.id))
+      .filter((b) => contentIndependentHeightReason(b.block, VIEWPORT_H) !== null);
+    expect(
+      stillOffending.map((b) => b.id),
+      "the substantive leg would have caught the shrunken scan on its own, so the floor is not what " +
+        "is doing the work here and the header should say so",
+    ).toEqual([]);
   });
 });
 
@@ -320,6 +468,32 @@ describe("CPE-1983 — every body inside a centred dialog has a content-independ
       .map((b) => b.id);
     expect(pointless, "these boxes are already fixed — remove their allowlist rows").toEqual([]);
   });
+
+  it("an allowlist row that covers more than one element says so", () => {
+    // Round 1 allowlisted `ColumnPickerDialog#list` on a justification true of one of the TWO
+    // elements that class names — and no leg could show it, because the key is a CSS key and the
+    // guard only ever looked at CSS. This is the leg that makes it visible: a row standing for
+    // several structurally different elements must be declared in MULTI_ELEMENT_ROWS, so its
+    // justification has to be written knowing that.
+    const undeclared = SCAN.boxes
+      .filter((b) => allowed.has(b.id) && b.elements > 1 && !(b.id in MULTI_ELEMENT_ROWS))
+      .map((b) => `${b.id} (${b.elements} elements)`);
+    expect(
+      undeclared,
+      "this allowlist row's class is applied to more than one element, so its reason may be true of " +
+        "only one of them. Declare it in MULTI_ELEMENT_ROWS with what the extra elements are — or fix " +
+        "the box, if the reason turns out not to cover them all.",
+    ).toEqual([]);
+  });
+
+  it("every MULTI_ELEMENT_ROWS key is a real, still-multi-element allowlist row", () => {
+    // The other direction, so the table cannot outlive what it describes.
+    const byId = new Map(SCAN.boxes.map((b) => [b.id, b]));
+    const wrong = Object.keys(MULTI_ELEMENT_ROWS).filter(
+      (id) => !allowed.has(id) || (byId.get(id)?.elements ?? 0) <= 1,
+    );
+    expect(wrong, "these MULTI_ELEMENT_ROWS keys are stale — the row is gone, or now names one element").toEqual([]);
+  });
 });
 
 describe("CPE-1983 — the components CPE-1968 already fixed are still covered by this sweep", () => {
@@ -354,8 +528,10 @@ describe("CPE-1983 — the components CPE-1968 already fixed are still covered b
 
 describe("CPE-1983 — the CSS rule enumerator itself", () => {
   // The first draft of this sweep used a regex that CONSUMED each rule's closing brace, so every
-  // second rule was skipped and it reported 9 boxes over 8 files where the truth is 28 over 21 —
-  // missing three of the instances the ticket names. Pinned so that regression cannot come back.
+  // second rule was skipped — and it lost `CopilotDialog`'s `.op-list`/`.op-results` and
+  // `MacroRunConfirm`'s `.ops`, three of the instances the ticket names. That consequence is the
+  // durable fact and it is pinned directly below; the raw hit counts that draft printed are recorded
+  // as history in `svelteCss.ts`'s `styleRules` header, not repeated here as if reproducible.
   it("returns CONSECUTIVE rules, not every other one", () => {
     const rules = styleRules("<style>.a { color: red; } .b { color: blue; } .c { color: green; }</style>");
     expect(rules.map((r) => r.selector)).toEqual([".a", ".b", ".c"]);

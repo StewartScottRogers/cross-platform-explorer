@@ -269,7 +269,12 @@
      the 700px harness window `34vh` is 238px and binds; the floor engages below 412px, the cap above
      824px. */
   .rules { height: clamp(140px, 34vh, 280px); overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
+  /* CPE-1983 — centred, and only because `.rules` is now a fixed height (the same second half of the
+     fix `OrganizeDialog`'s `.empty` carries): a one-line placeholder pinned to the corner of a 238px
+     bordered box reads as a failed render rather than an empty one. Safe because `.empty` renders
+     only under `{#if list.length === 0}` and is therefore never mounted alongside a `.rule`, so this
+     cannot centre a list; `height: 100%` resolves against `.rules`'s definite height. */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; display: grid; place-items: center; height: 100%; }
   .rule { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); font-size: 12.5px; }
   .rule.disabled { opacity: 0.5; }
   .rname { font-weight: 600; flex: 0 0 auto; }

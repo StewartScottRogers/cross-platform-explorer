@@ -373,7 +373,25 @@
      neither bound engages; the 160px floor only binds below a 533px window and the 260px cap only
      above 867px. The middle term is the knob (CPE-1968 learned this the hard way). */
   .list { height: clamp(160px, 30vh, 260px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
-  .empty { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
+  /* CPE-1983 round 2 — CENTRED, and only because `.list` is now a fixed height. This is the second
+     half of CPE-1968's fix, which that ticket's own review round landed on `OrganizeDialog`'s
+     `.empty` for exactly this consequence and which round 1 here did not carry over: at the old
+     content height a one-line placeholder flush top-left read fine, but in a 210px bordered box it
+     leaves ~180px of dead space beneath it and reads as a box that FAILED to render rather than an
+     empty one. Measured on `.claude/dev-harness-shots/checkpoint-dialog/after-empty.png`.
+     Safe for the same structural reason OrganizeDialog gives: `.empty` is the SOLE child of `.list`
+     in all three of its states ("enter a folder", "Loading…", "no checkpoints yet") and is never
+     mounted alongside `.cp-row`, so this cannot centre a list. `height: 100%` resolves against
+     `.list`'s definite height — which only exists because of this ticket.
+     RE-SHOT after the change: `after-empty.png` and `after-loading.png` both centre, with Refresh
+     still at 236.6px and `.list` at 312.6px — the geometry the hit-test depends on is untouched.
+     The same declaration went onto five sibling placeholders that live in FLEX COLUMNS rather than a
+     block box, where `height: 100%` on an item is not obviously the same thing. Measured rather than
+     assumed, by `scripts/dev-harness/checkpoint-dialog/empty-placeholder-probe.html`: block, flex
+     column and `<ul>` flex column all fill their parent and centre at an offset of 0.0px. That probe
+     also records the artifact worth knowing — drop the app's global `box-sizing: border-box` and the
+     block case sits 8.0px low. */
+  .empty { padding: 12px; color: var(--text-dim); font-size: 12.5px; display: grid; place-items: center; height: 100%; }
   .cp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   .cp-row:last-child { border-bottom: none; }
   .cp-row.selected { background: var(--surface-alt); }

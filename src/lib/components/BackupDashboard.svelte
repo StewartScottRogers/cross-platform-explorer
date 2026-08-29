@@ -239,7 +239,12 @@
      runs; under a centred dialog every one of those growths moved the rows above. At the 700px
      harness window `40vh` is 280px and binds; the floor engages below 400px, the cap above 800px. */
   .jobs { height: clamp(160px, 40vh, 320px); overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
+  /* CPE-1983 — centred, and only because `.jobs` is now a fixed height (the same second half of the
+     fix `OrganizeDialog`'s `.empty` carries): a one-line placeholder pinned to the corner of a 280px
+     box reads as a failed render rather than an empty one. Safe because `.empty` renders only under
+     `{#if list.length === 0}` and is therefore never mounted alongside a `.job`, so this cannot
+     centre a list; `height: 100%` resolves against `.jobs`'s definite height. */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; display: grid; place-items: center; height: 100%; }
   .job { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); }
   .jinfo { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
   .jname { font-weight: 600; }

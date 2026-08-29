@@ -74,11 +74,22 @@ export interface StyleRule {
  * WHY A BRACE SCANNER AND NOT A REGEX, measured rather than assumed. The obvious
  * `/(?:^|\}|\{)\s*([^{}]+?)\s*\{([^{}]*)\}/g` CONSUMES the closing `}` of each rule, so the next
  * rule can no longer match its own `(?:^|\}|\{)` opener and every SECOND rule is skipped. That is not
- * a hypothetical: it is what the first draft of this sweep did, and it returned 9 hits over 8 files
- * where the correct answer is 28 over 21 — it missed `CopilotDialog`'s `.op-list`/`.op-results` and
- * `MacroRunConfirm`'s `.ops`, three of the instances CPE-1983's own ticket NAMES. An enumerator that
- * silently halves its input is the CPE-1932 failure with extra steps, so the scan is a real scanner:
- * brace depth, with string interiors skipped so a `{` or `}` inside `content: "…"` cannot unbalance it.
+ * a hypothetical: it is what the first draft of CPE-1983's sweep did.
+ *
+ * THE SUBSTANTIVE CONSEQUENCE, which is what this paragraph is for: the naive regex loses
+ * `CopilotDialog`'s `.op-list` and `.op-results` and `MacroRunConfirm`'s `.ops` — three of the very
+ * instances CPE-1983's ticket NAMES. That is reproducible any day, and `dialogBodyReflow.test.ts`
+ * pins the mechanism directly with a consecutive-rules case.
+ *
+ * HISTORICAL, NOT REPRODUCIBLE: the first draft reported "9 hits over 8 files" against a correct
+ * answer of "28 over 21". Those were counts under that draft's own filters, and both sides move with
+ * the filters and with the tree — review round 2 re-ran the comparison and got 12/11 against 22/19.
+ * Recorded as provenance in the same spirit as CLAUDE.md's 31/7/4 tally: treat the pair as history,
+ * never as a measurement you can reproduce. The live number is whatever the guard prints today.
+ *
+ * An enumerator that silently halves its input is the CPE-1932 failure with extra steps, so the scan
+ * is a real scanner: brace depth, with string interiors skipped so a `{` or `}` inside `content: "…"`
+ * cannot unbalance it.
  */
 export function styleRules(componentSource: string, opts: { stripComments?: boolean } = {}): StyleRule[] {
   const strip = opts.stripComments !== false;

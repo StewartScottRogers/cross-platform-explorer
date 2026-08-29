@@ -779,7 +779,12 @@
     font-size: 12px;
     font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; font-family: inherit; }
+  /* CPE-1983 — centred, and only because `.preview` is now a fixed height (the same second half of
+     the fix `OrganizeDialog`'s `.empty` carries): "Add an operation above to see a preview." pinned
+     to the corner of a 200px monospace box reads as a failed render rather than an empty one. Safe
+     because `.empty` is the `{#if ops.length === 0}` branch and `.rowp` is the `{:else}` one, so the
+     two structurally cannot co-exist; `height: 100%` resolves against `.preview`'s definite height. */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; font-family: inherit; display: grid; place-items: center; height: 100%; }
   .rowp {
     display: grid;
     grid-template-columns: 1fr auto 1fr 1.2fr;
