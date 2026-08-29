@@ -260,3 +260,105 @@ than the broader "any new raw render fails CI", which is a different test in the
 - `npm run check` — 0 errors, 0 warnings.
 - `node scripts/ratchet-baselines.mjs compare origin/main` — no baseline raised (all 13 unchanged), so
   `docs/design/RATCHETS.md` needs no new row.
+
+## Round 2 — review of PR #1104: CHANGES REQUESTED, two blocking findings
+
+Neither touches the mechanism. **F1 was the round-1 defect wearing new words, in the sentence rewritten
+because it was wrong** — worth recording as the lesson, not just the fix.
+
+### F1 (blocking) — the doc's list of render positions was written from memory
+
+Parsed from the live REGISTRY literal: `{ text: 1312, title: 170, 'aria-label': 67, '@html': 6 }`,
+total 1555. Round 1's replacement parenthetical listed *"an image's alt text"* — **`alt` has zero
+entries, it appears nowhere in REGISTRY** — and omitted **`@html`**, which has 6 and is the one sink
+where a filesystem-supplied name is a *markup* surface rather than merely a spoofable label. The
+sentence immediately before it says REGISTRY "holds the exact list this prose summarizes", which is
+exactly what makes the parenthetical read as an enumeration, so the developer this ticket is about goes
+hunting for `alt:` keys that do not exist and is never told the `@html:` keys do.
+
+The lesson is CPE-1932's, one scope in: **round 1 fixed a stale claim by writing a fresh unverified one.**
+The old sentence ("the exact file/line list") was stale since CPE-1885; the replacement was wrong on the
+day it was written. Prose about a data structure has to be derived from the data structure.
+
+Fixed two ways:
+
+1. The paragraph now names the positions as the guard's own vocabulary, in backticks: `` `text` `` for a
+   body text node, `` `title` `` for a tooltip, `` `aria-label` `` for a screen-reader label, `` `@html` ``
+   for a raw-markup block, "or whatever other attribute the name lands in" — open-ended, because
+   `bidiRenderScan.ts` sets `kind` to *any* attribute name it meets.
+2. A new derived test, `CPE-1905: the doc's render-position names are exactly the kinds REGISTRY
+   records`, checks it **both directions against the live literal**:
+   - **REVERSE** — every kind present in REGISTRY must be named, in backticks, in the paragraph. This is
+     the airtight leg and it is the one that reds against round 1's shipped paragraph.
+   - **FORWARD** — every backticked token shaped like a render position (`^@?[a-z][a-z0-9-]*$`, so
+     CamelCase component names and `REGISTRY` are excluded) must be a kind REGISTRY records. This is what
+     catches an invented `alt`.
+
+   **Red-proofed both ways, then reverted.** Adding round 1's `alt` back: *"the doc's 'Not yet covered'
+   paragraph names render position(s) REGISTRY does not record: alt (REGISTRY records: @html, aria-label,
+   text, title)"*. Deleting the `@html` clause: *"REGISTRY records render position(s) the doc's … paragraph
+   never names: @html"*.
+
+   **Stated blind spot, at the site, because it is the one that let `alt` in:** the forward leg only sees
+   positions written in **backticks**, and round 1's "an image's alt text" was bare prose — the forward
+   leg would have walked past it. The reverse leg is the one that would have caught round 1. The paragraph
+   is therefore written with every position in backticks so the forward leg has something to bite on, and
+   the comment says not to tidy them back into prose. The forward leg is also deliberately over-broad
+   (any lowercase backticked token in that paragraph is read as a position claim), which fails toward
+   reporting too much.
+
+The guard message's own version of this list (`WHY_THIS_GUARD_EXISTS`) was checked and is **not** wrong —
+it explains the key *format* and does include `@html`. Only the doc needed changing.
+
+### F2 (blocking) — the deliverable had no automated coverage of its own
+
+`describeDrift` was module-private and reachable only through a *failing* assertion, so round 1's four
+clause shapes could only be observed by the manual sabotage the Reviewer and I each ran by hand. A
+refactor that swapped the `f > r` / `f < r` branches, or folded FEWER back into GONE's wording, would
+have shipped **green**, re-introducing this exact defect with 5,477 tests passing. That is the repo's own
+red-proof rule one level in: round 1 red-proofed the ratchet it *names* and left the thing it *built*
+resting on a sabotage nobody can re-run in CI.
+
+`describeDrift` is now exported, with a synthetic-multiset table block (`CPE-1905: the failure message's
+four drift clauses`, 8 tests) pinning: one clause per case with the right leading verb for `["a"]/[]`,
+`["a","a"]/["a"]`, `["a"]/["a","a"]`, `[]/["a"]`; agreement produces no clause; **every clause ends in
+`.`** (finding 3's property, previously unguarded by anything); both counts always present; singular
+`1 time` vs plural `2 times`; FEWER and GONE distinct, with `no longer rendered raw` appearing **only**
+in GONE; and the position-kind swap yielding two separate sentences, NEW first. Synthetic key multisets,
+not component sources — the verdict is still the multiset equality.
+
+**Sabotaged three ways, numbers written at the site, each reverted:**
+
+| sabotage | result |
+|---|---|
+| swap the `f > r` / `f < r` branches | 4 failed, 21 passed |
+| drop the trailing `.` from the NEW clause | 2 failed, both quoting the clause text |
+| re-word FEWER back to round 1's `STALE recorded entry(ies), no longer rendered raw` | 3 failed, 22 passed |
+
+In both full-file runs every failure was inside the new block and nothing else moved — no other test in
+the file reads a clause at all.
+
+### F3 (non-blocking) — a legitimate raise produces two reds, and the message named one
+
+Re-ran the +1 sabotage against the wider suite: `src/lib/ratchetsDoc.test.ts` fails independently with
+*"docs/design/RATCHETS.md's enumeration table disagrees with scripts/ratchet-baselines.mjs"* (1 failed,
+12 passed), because that file's enumeration table carries an asserted `today` cell per baseline. A
+developer who followed round 1's message exactly — add the licence row — would push and hit a second
+failure that reads as unrelated. Both edits are in the same file, so the guidance now says to add the row
+**and** update that baseline's `today` cell. The same omission was in `ratchet-baselines.mjs`'s own
+`went UP` error text, so it is closed there too — every ratchet in the repo benefits, not just this one.
+
+### Recorded, no change (reviewer)
+
+`WHY_THIS_GUARD_EXISTS` is ~1,900 characters and precedes the drift, in tension with the F5 note about
+the useful delta going first. Checked and judged not to hurt: `WHAT DRIFTED:` is a reliable jump target,
+the preamble is fixed-size rather than proportional to the failure, and vitest's diff block prints only
+the per-file mismatch strings. Noted so the next round does not rediscover it as a defect.
+
+### Round 2 verification
+
+- `npx vitest run` — 363 files, **5,486** tests pass, 62 skipped (round 1: 5,477 — +9 from the two new
+  test blocks).
+- `npm run check` — 0 errors, 0 warnings.
+- `node scripts/ratchet-baselines.mjs compare origin/main` — exit 0, no baseline raised.
+- `src/lib/sprintStallControls.test.ts` green, so the edit to `scripts/ratchet-baselines.mjs` kept it LF.

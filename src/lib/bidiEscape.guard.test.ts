@@ -183,7 +183,14 @@ function multisetDiff(a: string[], b: string[]): string[] {
  *  Sabotage run 2026-08-28 on this branch: `"InspectCryptoDialog.svelte": []` changed to
  *  `["text:entry.name"]` (one entry, nothing else touched), then
  *  `node scripts/ratchet-baselines.mjs compare origin/main` — `bidi-render-registry (…) went UP:
- *  1555 -> 1556`, exit **1**. Reverted. So the cost named below is real, not folklore. */
+ *  1555 -> 1556`, exit **1**. Reverted. So the cost named below is real, not folklore.
+ *
+ *  Round 2 (reviewer F3) re-ran the same sabotage against the rest of the suite and found the raise
+ *  produces TWO reds, not one: `src/lib/ratchetsDoc.test.ts` also fails, independently, with
+ *  "docs/design/RATCHETS.md's enumeration table disagrees with scripts/ratchet-baselines.mjs" (1 failed,
+ *  12 passed). A developer who did exactly what round 1's message said — add the licence row — would push
+ *  and hit a second failure that reads as unrelated. Both edits are in the same file, so the message and
+ *  `ratchet-baselines.mjs`'s own error text now name both. */
 const WHY_THIS_GUARD_EXISTS =
   `WHY THIS MATTERS FIRST: a filename can carry invisible bidirectional-text control characters that ` +
   `make it DISPLAY as something it is not (an override character plus "gnp.txt" reads as "txt.png") — ` +
@@ -195,7 +202,10 @@ const WHY_THIS_GUARD_EXISTS =
   `correct for something provably not a name — a count, a static literal, an $t("…") key — and it is ` +
   `deliberately NOT the cheap way out: REGISTRY's entry total is the one-way ratchet ` +
   `"bidi-render-registry", so adding an entry reds the ratchet-guard CI job unless THIS SAME DIFF adds ` +
-  `a row to docs/design/RATCHETS.md naming the baseline, both values, the ticket and the reason. And if ` +
+  `a row to docs/design/RATCHETS.md naming the baseline, both values, the ticket and the reason — AND ` +
+  `updates the "today" cell for bidi-render-registry in that same file's enumeration table, which is a ` +
+  `SECOND, independent red (src/lib/ratchetsDoc.test.ts asserts every row against the live measurer), ` +
+  `not an optional tidy-up. And if ` +
   `it is a real disclosed gap (a filesystem name or path that genuinely still renders raw), name the ` +
   `component in src/docs/03-explorer.md's "Not yet covered" bullet too — as \`ComponentName\` in ` +
   `backticks, no .svelte suffix — and add it to DISCLOSED_GAPS in src/lib/bidiEscape.guard.test.ts; the ` +
@@ -236,7 +246,7 @@ function keyCounts(keys: string[]): Map<string, number> {
  *  #3: NEW and STALE used to be joined by a bare space, so the position-kind swap this guard's keying
  *  exists to catch (`title:baseName(path) STALE recorded entry(ies)…`) skimmed as one run-on rather than
  *  as the two-clause "the risk MOVED from one sink to another" story it actually is. */
-function describeDrift(foundKeys: string[], recordedKeys: string[]): string[] {
+export function describeDrift(foundKeys: string[], recordedKeys: string[]): string[] {
   const found = keyCounts(foundKeys);
   const recorded = keyCounts(recordedKeys);
   const brandNew: string[] = [];
@@ -531,6 +541,83 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
     expect(mismatches, `${WHY_THIS_GUARD_EXISTS} ${mismatches.join(" | ")}`).toEqual([]);
   });
 
+  // CPE-1905 round 2 (reviewer F2). The message IS this ticket's deliverable, and round 1 left it with no
+  // automated coverage of its own: `describeDrift` is only reached through a FAILING assertion, so the
+  // four clause shapes could only be observed by hand-sabotaging a component and reading the output. A
+  // refactor that swapped the `f > r` / `f < r` branches, or folded FEWER back into GONE's "no longer
+  // rendered raw" wording, would have shipped green with the whole suite passing — re-introducing the
+  // exact defect this ticket removes. That is the repo's own "red-proof it" rule one level in: round 1
+  // red-proofed the ratchet it NAMES and left the thing it BUILT resting on a manual sabotage nobody can
+  // re-run in CI. These are synthetic key multisets, not component sources, so they pin the message
+  // contract without touching the verdict — which is still the exact multiset equality above.
+  // SABOTAGED, 2026-08-28, each of the three regressions this block exists to stop, then reverted:
+  //   - swap the `f > r` / `f < r` branches in describeDrift -> 4 failed, 21 passed;
+  //   - drop the trailing "." from the NEW clause -> 2 failed (both naming the clause text);
+  //   - re-word FEWER back to round 1's "STALE recorded entry(ies), no longer rendered raw" -> 3 failed,
+  //     22 passed.
+  // In the two full-file runs (branch swap, FEWER re-wording) EVERY failure was inside this block and
+  // nothing else moved — which is the point: no other test in this file reads a clause at all, they
+  // assert on the multiset verdict and on `findUnsafeRenderLines`'s output.
+  describe("CPE-1905: the failure message's four drift clauses", () => {
+    const NEW = ["text:a"];
+    const cases: { name: string; found: string[]; recorded: string[]; lead: RegExp }[] = [
+      { name: "a brand-new raw render", found: NEW, recorded: [], lead: /^NEW raw render/ },
+      { name: "one more occurrence of an already-recorded render", found: ["text:a", "text:a"], recorded: NEW, lead: /^MORE occurrences/ },
+      { name: "one FEWER occurrence — still rendered, NOT removed", found: NEW, recorded: ["text:a", "text:a"], lead: /^FEWER occurrences/ },
+      { name: "gone entirely", found: [], recorded: NEW, lead: /^GONE/ },
+    ];
+
+    it("agreement produces no clause at all", () => {
+      expect(describeDrift(["text:a", "text:a", "title:b"], ["title:b", "text:a", "text:a"])).toEqual([]);
+    });
+
+    for (const c of cases) {
+      it(`${c.name} produces exactly one clause, and it is the right one`, () => {
+        const clauses = describeDrift(c.found, c.recorded);
+        expect(clauses, `describeDrift(${JSON.stringify(c.found)}, ${JSON.stringify(c.recorded)})`).toHaveLength(1);
+        expect(clauses[0]).toMatch(c.lead);
+        // Finding 3's property: every clause is a whole sentence, so a NEW clause and a STALE clause can
+        // never run together. Asserted here because the run-on was invisible to any test in round 1.
+        expect(clauses[0].endsWith("."), `clause must end in a period: ${clauses[0]}`).toBe(true);
+        // Finding 2's property: BOTH counts, always, so the reader never diffs two arrays.
+        expect(clauses[0]).toContain("text:a");
+        expect(clauses[0]).toMatch(/\d+ time/);
+      });
+    }
+
+    // The pair round 1 could not tell apart. Kept as its own test because "distinct" is the whole point:
+    // a refactor that reuses GONE's wording for FEWER is exactly the regression this guards.
+    it("FEWER and GONE are unmistakable — opposite fixes, and the counts say which is which", () => {
+      const [fewer] = describeDrift(["text:a"], ["text:a", "text:a"]);
+      const [gone] = describeDrift([], ["text:a"]);
+      expect(fewer).toContain("NOT a removal");
+      expect(fewer).toContain("STILL rendered 1 time, recorded 2 times");
+      expect(fewer).toContain("delete only the surplus recorded entries, not all of them");
+      expect(gone).toContain("recorded 1 time, now rendered 0 times");
+      expect(gone).toContain("delete every recorded entry for it");
+      // The false statement round 1's message made about a count DROP must appear only in the GONE clause.
+      expect(gone).toContain("no longer rendered raw");
+      expect(fewer, "the count-drop clause must never claim the expression is no longer rendered").not.toContain("no longer rendered raw");
+    });
+
+    it("counts are singular at one and plural above it", () => {
+      expect(describeDrift(["text:a"], [])[0]).toContain("rendered 1 time)");
+      expect(describeDrift(["text:a", "text:a"], [])[0]).toContain("rendered 2 times)");
+    });
+
+    // The position-kind swap — the case CPE-1885's re-keying exists to catch, and the one finding 3 was
+    // about. Two clauses, one file: the risk MOVED. Both must be complete sentences.
+    it("a position-kind swap yields two separate sentences, NEW first", () => {
+      const clauses = describeDrift(["title:a", "text:a"], ["text:a", "text:a"]);
+      expect(clauses).toHaveLength(2);
+      expect(clauses[0]).toMatch(/^NEW raw render/);
+      expect(clauses[0]).toContain("title:a");
+      expect(clauses[1]).toMatch(/^FEWER occurrences/);
+      expect(clauses[1]).toContain("text:a");
+      for (const c of clauses) expect(c.endsWith("."), `clause must end in a period: ${c}`).toBe(true);
+    });
+  });
+
   it("App.svelte's markup-level raw-render set matches its recorded lines exactly", () => {
     const src = readFileSync(APP, "utf8");
     const found = findUnsafeRenderLines(src, "App.svelte");
@@ -656,6 +743,60 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
     const registeredNames = Object.keys(REGISTRY).map((f) => f.replace(/\.svelte$/, ""));
     const wronglyPresent = registeredNames.filter((name) => !DISCLOSED_GAPS.includes(name) && paragraph.includes(`\`${name}\``));
     expect(wronglyPresent, `these are NOT disclosed gaps but appear in the doc's "Not yet covered" paragraph: ${wronglyPresent.join(", ")}`).toEqual([]);
+  });
+
+  // CPE-1905 round 2 (reviewer F1). The same paragraph also names the RENDER POSITIONS a REGISTRY entry
+  // can record, and that half was written from memory rather than derived — CPE-1905 round 1 listed "an
+  // image's alt text" (REGISTRY has ZERO `alt:` entries) and omitted `@html` (6 entries, and the one sink
+  // where a filesystem name is a markup surface rather than merely a spoofable label). The sentence
+  // before it says REGISTRY "holds the exact list this prose summarizes", so a developer following it
+  // hunts for keys that do not exist and is never told about the ones that do. Both directions, derived
+  // from the live literal:
+  //   - REVERSE (the airtight leg): every kind actually present in REGISTRY must be named, in backticks,
+  //     in the paragraph. This is what catches an omission like `@html`, and it cannot be satisfied by
+  //     prose that merely gestures at the set.
+  //   - FORWARD: every backticked token in the paragraph shaped like a render position (an attribute
+  //     name, or `@html`) must be a kind REGISTRY currently records. This is what catches an invented
+  //     position like `alt`.
+  // STATED BLIND SPOT, because it is the one that let `alt` in: the FORWARD leg only sees positions
+  // written in BACKTICKS. Round 1's "an image's alt text" was bare prose and this leg would have walked
+  // straight past it — the REVERSE leg is the one that would have red-proofed the round-1 paragraph. The
+  // paragraph is therefore written with every position in backticks so the forward leg has something to
+  // bite on, and this comment is the reason not to "tidy" them back into prose. The forward leg is also
+  // deliberately over-broad — any lowercase backticked token in that paragraph is read as a position
+  // claim — which fails toward reporting too much, not too little; un-backtick it or name a real kind.
+  // RED-PROOFED BOTH WAYS, 2026-08-28, by editing the paragraph and re-running this test: adding back
+  // round 1's `alt` reds the forward leg ("names render position(s) REGISTRY does not record: alt
+  // (REGISTRY records: @html, aria-label, text, title)"), and deleting the `@html` clause reds the
+  // reverse leg ("REGISTRY records render position(s) the doc's … paragraph never names: @html") — so the
+  // reverse leg is a literal red-proof against round 1's shipped paragraph. Both reverted.
+  it("CPE-1905: the doc's render-position names are exactly the kinds REGISTRY records — both directions, derived from the literal", () => {
+    const doc = readFileSync(DOC, "utf8");
+    const paragraph = /\*\*Not yet covered\*\*[\s\S]*?(?=\n- \*\*|\n## |$)/.exec(doc)?.[0];
+    expect(paragraph, `src/docs/03-explorer.md must have a "Not yet covered" bullet`).toBeTruthy();
+
+    // A REGISTRY key is `"<kind>:<expr>"` and only the kind is colon-free, so the FIRST colon splits it.
+    const registryKinds = [...new Set(Object.values(REGISTRY).flat().map((k) => k.slice(0, k.indexOf(":"))))].sort();
+    expect(registryKinds.length, "REGISTRY must record at least one kind for this test to mean anything").toBeGreaterThan(0);
+
+    const backticked = [...paragraph!.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    const POSITION_SHAPED = /^@?[a-z][a-z0-9-]*$/; // an attribute name, or `@html`; component names are CamelCase
+
+    const namedPositions = backticked.filter((t) => POSITION_SHAPED.test(t));
+    const invented = namedPositions.filter((t) => !registryKinds.includes(t));
+    expect(
+      invented,
+      `the doc's "Not yet covered" paragraph names render position(s) REGISTRY does not record: ${invented.join(", ")} ` +
+        `(REGISTRY records: ${registryKinds.join(", ")}). Name a real kind, or drop the backticks if the word is not a render position.`,
+    ).toEqual([]);
+
+    const unnamed = registryKinds.filter((k) => !namedPositions.includes(k));
+    expect(
+      unnamed,
+      `REGISTRY records render position(s) the doc's "Not yet covered" paragraph never names: ${unnamed.join(", ")}. ` +
+        `Name each one in backticks — the paragraph claims REGISTRY holds "the exact list this prose summarizes", ` +
+        `so an omitted position is a developer sent looking for the wrong keys.`,
+    ).toEqual([]);
   });
 
   // CPE-1761: the doc drifted twice — calling this file's exported constant `ALLOWLIST` (renamed to

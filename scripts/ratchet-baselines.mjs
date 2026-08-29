@@ -959,7 +959,10 @@ export function evaluate(registry, base, head, ledger, baseLedger = []) {
         `the number is not the defect, the thing it counts is. Fix the new offender so the count comes back down. ` +
         `If this raise is genuinely correct it must be LOUD rather than quiet: add a row to ${LEDGER_PATH} in ` +
         `THIS diff — \`| ${b.id} | ${before} -> ${after} | CPE-NNNN | why this raise is right |\` — and this ` +
-        `guard will pass while leaving the raise unmistakable in review.`,
+        `guard will pass while leaving the raise unmistakable in review. That is not the only red a raise ` +
+        `produces: the SAME file's enumeration table carries a "today" cell for ${b.id}, and ` +
+        `src/lib/ratchetsDoc.test.ts asserts it against this measurer, so set that cell to ${after} in the ` +
+        `same edit or you will hit a second, unrelated-looking failure about a stale table.`,
     );
   }
 

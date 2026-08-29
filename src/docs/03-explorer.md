@@ -95,9 +95,10 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   `ExplorerPane`'s live agent-edit chip, `TerminalPanel`'s tab label, and `Sidebar`'s agent-session chip.
   Tracked as a follow-up rather than claimed here. The guard test's `REGISTRY` holds the exact list this
   prose summarizes — one entry per raw render, recorded as the expression together with the *render
-  position* it reaches (body text, a `title` tooltip, a screen-reader label, an image's alt text) rather
-  than as a line number, so the list stays meaningful across ordinary edits instead of drifting under
-  them. The names in this paragraph and the guard test's own disclosed-gap list are checked against each
+  position* it reaches — `text` for a body text node, `title` for a tooltip, `aria-label` for a
+  screen-reader label, `@html` for a raw-markup block, or whatever other attribute the name lands in —
+  rather than as a line number, so the list stays meaningful across ordinary edits instead of drifting
+  under them. The names in this paragraph and the guard test's own disclosed-gap list are checked against each
   other in **both** directions, so neither can quietly drift from the other: a gap the test declares but
   this paragraph doesn't name fails CI, and so does a component named here that the test no longer
   declares as a gap.
