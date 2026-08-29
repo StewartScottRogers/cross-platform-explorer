@@ -3,7 +3,7 @@ id: CPE-1905
 title: the bidi guard's failure message invites the wrong fix, and misdescribes a duplicate-count drop as a removal
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-26
@@ -362,3 +362,142 @@ the per-file mismatch strings. Noted so the next round does not rediscover it as
 - `npm run check` — 0 errors, 0 warnings.
 - `node scripts/ratchet-baselines.mjs compare origin/main` — exit 0, no baseline raised.
 - `src/lib/sprintStallControls.test.ts` green, so the edit to `scripts/ratchet-baselines.mjs` kept it LF.
+
+## Closing record — merged as PR #1104 (`4072bebd`), 2026-08-28
+
+**The mechanism was never the problem and was never touched.** Verified byte-identical **three times** by
+an independent Reviewer — `siteKey` / `siteKeyMultiset` / `multisetDiff` at md5 `fee81d95…` and `REGISTRY`
+at md5 `e34be63c…`, matching the merge base on both review rounds. Every defect here was in **what the
+guard says when it fires.**
+
+### 1. The message offered the wrong fix as an equal option, and never stated the threat
+
+It read *"wrap a genuinely new offender in `displaySafeName`/`displaySafePath`, **or** update `REGISTRY`
+here…"* — two remedies, equally weighted, with the threat stated nowhere. **A developer meeting this for
+the first time, under time pressure, takes the five-second one and registers an actual vulnerability into
+the allowlist.** The guard is then green, correct by its own rules, and protecting nothing at that site.
+
+Now a `WHY_THIS_GUARD_EXISTS` block leads with the threat — a filename carrying bidirectional control
+characters can **display as something it is not** — then wrapping as the **default**, then REGISTRY as the
+**exception needing a stated reason**.
+
+### The deliberate cost: a ratchet that already existed and that the message never mentioned
+
+The obvious remedy — require a comment beside each new entry — was **rejected with the better argument**:
+*"an in-file marker is what a make-it-green diff adds to itself."* A convention you can satisfy in the same
+edit is not a cost. (Also measured: REGISTRY is **98 files, 1,555 entries, all single-line arrays** — there
+is nowhere to hang a per-entry note without reformatting all 98.)
+
+Instead the message now points at `bidi-render-registry`, which counts REGISTRY's entries and is measured
+against the merge base by the `ratchet-guard` job — so **an added entry reds unless the same diff writes a
+`docs/design/RATCHETS.md` row naming ticket and reason.**
+
+**Verified in both directions, which is what makes it a cost rather than theatre.** One added entry →
+`bidi-render-registry … went UP: 1555 -> 1556`, exit **1**. The Reviewer then **added the licence row
+itself** and got exit **0**, `RAISED, and declared in docs/design/RATCHETS.md`. The licence is neither
+theatre nor a dead end.
+
+### 2. A duplicate-count drop was reported as a removal, which is false
+
+Some components render the same expression twice. Deleting **one** produced *"STALE recorded expression(s),
+**no longer rendered raw**"* — but it was still rendered, once. Working out that the count went **2→1**
+rather than **1→0** required hand-diffing two arrays inside ~28 other expressions, **and the two situations
+call for opposite fixes** (delete one registry line vs delete both).
+
+`describeDrift` now buckets by (found, recorded) and names **both numbers**: NEW / MORE / **FEWER — "NOT a
+removal"** / GONE. The `kind:` prefix does **not** already fix this, and the ticket records why: when both
+occurrences share a kind, the prefixed form reads exactly as misleadingly as the bare expression.
+
+**The usability claim was judged, not just asserted**, and upheld on a better basis than "different words":
+every clause prints `(found, recorded)` in the same shape, so `1 time / 2 times` vs `2 times / 0 times`
+separates FEWER from GONE **numerically even if a reader skims the verb** — and each clause names its own
+fix, which really are opposite.
+
+### 3 and 4 — the run-on, and what `kind:` means
+
+A NEW clause and a STALE clause were joined by a bare space, so the **position-kind swap** — the exact case
+the re-keying exists to catch — produced a run-on at the moment it mattered most. Every clause now ends in
+`.`. And nothing had said the `kind:` prefix is a **render position** rather than a type or a filename;
+it is now named in the why-block.
+
+### The review found two blocking defects, and the first was the same defect wearing new words
+
+**F1.** The replacement docs sentence was **factually wrong about REGISTRY — in the sentence rewritten
+because it was factually wrong about REGISTRY.** Parsed from the live literal:
+
+```
+{ text: 1312, title: 170, 'aria-label': 67, '@html': 6 }
+```
+
+`alt` has **zero** entries and was listed as one of four positions; **`@html` was omitted** — 6 real
+entries, and **the single highest-consequence position in the set**, the one sink where a
+filesystem-supplied name is not merely spoofable but a **markup surface**. And the preceding sentence says
+*"REGISTRY holds the exact list this prose summarizes"*, which is what makes the parenthetical read as an
+enumeration.
+
+Fixed **and derived**, as required. A new doc-parity test checks the paragraph against the live literal
+**both ways** — REVERSE (every REGISTRY kind must be named; deleting `@html` reds — *a literal red-proof
+against round 1's shipped paragraph*) and FORWARD (every backticked position must be a real kind; adding
+`alt` back reds).
+
+**The Reviewer then ran the attack that would have made it read as coverage without being it:** it put
+`@html` back **outside** the paragraph, as a new bullet immediately after — **the reverse leg still reds.**
+Genuinely paragraph-scoped, so a mention elsewhere cannot silence it.
+
+**And the stated blind spot is real and correctly weighted:** the forward leg matches only **backticked**
+tokens, so round 1's bare-prose *"an image's alt text"* would have walked straight past it. The reverse leg
+carries the weight, and the comment says not to tidy the backticks away.
+
+**F2 — the deliverable had no coverage of its own.** `describeDrift` was module-private and reachable only
+through a *failing* assertion, so its behaviour rested on a manual sabotage nobody can re-run in CI. **A
+future refactor swapping the `f > r` / `f < r` branches would ship green with 5,477 tests passing**,
+re-introducing the exact defect this ticket removes. *The PR red-proofed the ratchet it names and left the
+thing it built unguarded.*
+
+Now exported with an 8-test table over synthetic multisets, sabotaged three ways with the numbers at the
+site — **branch swap 4 failed / 21**, **missing period 2 failed**, **FEWER re-worded to round 1's text 3
+failed / 22** — all failures inside the new block, all reproduced by the Reviewer, who added a **fourth**
+sabotage of its own on the singular/plural helper (**2 failed / 23**) because none of the three exercised it.
+
+### F3 — closed at the shared layer, so every ratchet benefits
+
+The guidance named **one** obligation for a legitimate raise; there are **two reds** — the licence row
+*and* the `today` cell in the same doc. Since the omission was also in `ratchet-baselines.mjs`'s own
+`went UP` text, **it was fixed there too.**
+
+**Verified end-to-end rather than by reading the wording:** the Reviewer triggered the failure, did
+**exactly and only what the message says**, and reached `RATCHET_EXIT=0` with `ratchetsDoc` +
+`ratchetBaselines` **80/80 green**. In round 1, following the message did not get you there.
+
+Also checked: the generic advice is correct for **every** gated baseline — the one baseline where it would
+have been wrong (`unenforced: true`, a non-integer `today` cell) `continue`s before the error path and never
+receives it.
+
+### Recorded, no change requested
+
+The why-block is ~1,900 characters and now precedes the drift, in tension with a standing note that *"the
+useful delta goes FIRST"*. The Reviewer checked whether it hurts and concluded it does not — `WHAT DRIFTED:`
+is a reliable jump target, the preamble is fixed-size rather than proportional to the failure, and vitest's
+diff block prints only the per-file mismatch strings. **Noted so a future round does not rediscover it as a
+defect.**
+
+One non-blocking nit left open: the docs' *"or whatever other attribute the name lands in"* is accurate
+about how the **key** is formed but slightly generous about **coverage** — the scanner examines only
+`title`, `aria-label` and `alt`, and a raw name in `placeholder=` or `data-*` is a documented, deliberate
+non-detection.
+
+### Gates at merge
+
+Full suite **363 files / 5,486 passed / 62 skipped** (+9 from the new tests) · `npm run check` **0 errors,
+0 warnings** · `ratchet-baselines compare origin/main` 13 enumerated, **no baseline raised** ·
+`bidiEscape.guard.test.ts` alone **25/25** · CI `completed success — total_count=26 pending=0 skipped=1
+coverage=ok`.
+
+Line endings verified directly rather than argued: the `.mjs` edit is **4 added / 1 deleted**, all three
+changed blobs pure LF, no BOM. *(The author cited a test as evidence for this; the Reviewer noted that test
+says nothing about the file — right conclusion, wrong evidence, and both were said.)*
+
+**Family:** CPE-1885 (the re-keying whose mechanism this leaves untouched), CPE-1712 (`bidi-filename-spoof`,
+the underlying threat), CPE-1757, CPE-1771, CPE-1934 (ratchets), CPE-1948 (the RATCHETS table asserted
+against the live measurer — the second red this now names), CPE-1933 (derive provenance; do not name a
+backstop without checking it can fire).
