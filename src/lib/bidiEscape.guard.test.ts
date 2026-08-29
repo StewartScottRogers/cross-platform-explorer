@@ -157,6 +157,114 @@ function multisetDiff(a: string[], b: string[]): string[] {
   return diff;
 }
 
+/** CPE-1905 findings #1 and #4 — the guidance a developer meeting this guard for the first time reads.
+ *
+ *  The old text was one sentence offering two remedies with equal weight — *"wrap a genuinely new
+ *  offender in displaySafeName/displaySafePath, or update REGISTRY here…"* — and it never said what the
+ *  threat was. One of those two remedies turns the test green in five seconds. Under time pressure, with
+ *  no stated reason to prefer the other, that is the one that gets taken: an actual spoofable render gets
+ *  recorded into the allowlist, the guard goes green, and it is now correct by its own rules and
+ *  protecting nothing at that site. So the order here is deliberate — WHY first, then wrapping as the
+ *  DEFAULT, then recording as an EXCEPTION that has to be argued for.
+ *
+ *  On making the exception cost something deliberate (the ticket asked for the shape and the reason):
+ *  the cost is the ratchet that already exists, surfaced here rather than a new per-entry convention.
+ *  `bidi-render-registry` (scripts/ratchet-baselines.mjs) counts REGISTRY's total entries, and the
+ *  `ratchet-guard` CI job measures it against the merge base, so a raise reds unless the SAME diff adds
+ *  a row to docs/design/RATCHETS.md naming the baseline, both values, the ticket and the reason — which
+ *  is precisely the "ticket reference / dated note beside the entry" the ticket asked for, in a place a
+ *  same-diff edit cannot bypass. A per-entry comment convention was considered and rejected: REGISTRY's
+ *  values are single-line arrays holding well over a thousand entries across every registered file (see
+ *  `node scripts/ratchet-baselines.mjs print` for today's number rather than a copy of it here), there is
+ *  nowhere to put a per-entry comment without reformatting every one of them, and an in-file marker is
+ *  exactly the kind of thing the raising diff can add to itself.
+ *
+ *  BACKSTOP CHECKED, not assumed (repo rule: do not name a backstop without checking it can fire).
+ *  Sabotage run 2026-08-28 on this branch: `"InspectCryptoDialog.svelte": []` changed to
+ *  `["text:entry.name"]` (one entry, nothing else touched), then
+ *  `node scripts/ratchet-baselines.mjs compare origin/main` — `bidi-render-registry (…) went UP:
+ *  1555 -> 1556`, exit **1**. Reverted. So the cost named below is real, not folklore. */
+const WHY_THIS_GUARD_EXISTS =
+  `WHY THIS MATTERS FIRST: a filename can carry invisible bidirectional-text control characters that ` +
+  `make it DISPLAY as something it is not (an override character plus "gnp.txt" reads as "txt.png") — ` +
+  `a raw render is a real filename-spoofing surface, which is the only reason this guard exists ` +
+  `(CPE-1712). ` +
+  `DEFAULT FIX: wrap the expression in displaySafeName(…)/displaySafePath(…) from src/lib/filename.ts. ` +
+  `Do that unless you can state why this value can never carry a filesystem-supplied name or path. ` +
+  `EXCEPTION, and it needs that stated reason: record the (kind:expr) pair in REGISTRY here. Only ` +
+  `correct for something provably not a name — a count, a static literal, an $t("…") key — and it is ` +
+  `deliberately NOT the cheap way out: REGISTRY's entry total is the one-way ratchet ` +
+  `"bidi-render-registry", so adding an entry reds the ratchet-guard CI job unless THIS SAME DIFF adds ` +
+  `a row to docs/design/RATCHETS.md naming the baseline, both values, the ticket and the reason. And if ` +
+  `it is a real disclosed gap (a filesystem name or path that genuinely still renders raw), name the ` +
+  `component in src/docs/03-explorer.md's "Not yet covered" bullet too — as \`ComponentName\` in ` +
+  `backticks, no .svelte suffix — and add it to DISCLOSED_GAPS in src/lib/bidiEscape.guard.test.ts; the ` +
+  `doc-parity test there checks the two lists against each other in both directions. ` +
+  `READING THE KEYS: the prefix before the colon is the RENDER POSITION the expression reaches, not a ` +
+  `type and not a filename — "text:" is a body text node, "title:"/"aria-label:"/"alt:" are that ` +
+  `attribute's value, "@html:" is an {@html …} block. The same expression at two positions is two ` +
+  `separate entries, and moving it from one position to another is a moved risk, not a fixed one. ` +
+  `WHAT DRIFTED:`;
+
+function times(n: number): string {
+  return `${n} time${n === 1 ? "" : "s"}`;
+}
+
+/** Occurrence count per `"<kind>:<expr>"` key. Reporting only — the guard's verdict is still the exact
+ *  multiset equality in the test below; nothing here can make a failing comparison pass. */
+function keyCounts(keys: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const k of keys) counts.set(k, (counts.get(k) ?? 0) + 1);
+  return counts;
+}
+
+/** CPE-1905 finding #2 — say WHICH of four situations each disagreeing key is in, and name BOTH counts.
+ *
+ *  The old message reported the two `multisetDiff` results as "NEW raw offender(s)" and "STALE recorded
+ *  entry(ies), no longer rendered raw". For a key recorded twice and rendered once — SplitFileDialog
+ *  renders `baseName(path)` raw at two body-text positions; TrashView renders `$t("trash.moreActions")`
+ *  at two positions — deleting ONE of the two put the key in the stale list and the message then said it
+ *  was "no longer rendered raw", which is false: it is still rendered, once. Working out that the count
+ *  went 2 -> 1 rather than 1 -> 0 meant hand-diffing the found array against the recorded array through a
+ *  wall of ~28 other expressions, and the two situations need OPPOSITE fixes (delete one recorded entry
+ *  versus delete both). The `kind:` prefix does not rescue this: it only separates duplicates whose kinds
+ *  DIFFER, so a same-kind pair (`text:baseName(path)` twice) reads exactly as misleadingly as the bare
+ *  expression did.
+ *
+ *  So: bucket by (found count, recorded count) instead of by which diff array the key fell into, and
+ *  print both numbers in every clause. Each clause is a full sentence ending in `.` — CPE-1905 finding
+ *  #3: NEW and STALE used to be joined by a bare space, so the position-kind swap this guard's keying
+ *  exists to catch (`title:baseName(path) STALE recorded entry(ies)…`) skimmed as one run-on rather than
+ *  as the two-clause "the risk MOVED from one sink to another" story it actually is. */
+function describeDrift(foundKeys: string[], recordedKeys: string[]): string[] {
+  const found = keyCounts(foundKeys);
+  const recorded = keyCounts(recordedKeys);
+  const brandNew: string[] = [];
+  const gone: string[] = [];
+  const rose: string[] = [];
+  const fell: string[] = [];
+  const allKeys = [...new Set([...found.keys(), ...recorded.keys()])].sort((a, b) => a.localeCompare(b));
+  for (const key of allKeys) {
+    const f = found.get(key) ?? 0;
+    const r = recorded.get(key) ?? 0;
+    if (f === r) continue;
+    if (r === 0) brandNew.push(`${key} (rendered ${times(f)})`);
+    else if (f === 0) gone.push(`${key} (recorded ${times(r)}, now rendered 0 times)`);
+    else if (f > r) rose.push(`${key} (rendered ${times(f)}, recorded ${times(r)})`);
+    else fell.push(`${key} (STILL rendered ${times(f)}, recorded ${times(r)})`);
+  }
+  const clauses: string[] = [];
+  if (brandNew.length)
+    clauses.push(`NEW raw render, never recorded here — wrap it, or re-read the guidance above before recording it (kind:expr): ${brandNew.join(", ")}.`);
+  if (rose.length)
+    clauses.push(`MORE occurrences of an ALREADY-recorded render — one or more brand-new raw occurrences at the same render position; add exactly the shortfall, or fix them (kind:expr): ${rose.join(", ")}.`);
+  if (fell.length)
+    clauses.push(`FEWER occurrences — NOT a removal: this expression is STILL rendered raw at this position, just fewer times, so delete only the surplus recorded entries, not all of them (kind:expr): ${fell.join(", ")}.`);
+  if (gone.length)
+    clauses.push(`GONE — no longer rendered raw at this position at all; delete every recorded entry for it (kind:expr): ${gone.join(", ")}.`);
+  return clauses;
+}
+
 /** file -> the EXACT multiset of `"<kind>:<expr>"` keys `findUnsafeRenderSites` currently reports for it
  *  (line numbers were never part of the key; see the CPE-1885 header above for why `kind` is, now, too).
  *  Recomputed live every run and checked for multiset equality (not "offenders minus this array must be
@@ -406,8 +514,6 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
       const foundKeys = siteKeyMultiset(sites);
       const recordedSorted = [...recorded].sort((a, b) => a.localeCompare(b));
       if (JSON.stringify(foundKeys) !== JSON.stringify(recordedSorted)) {
-        const newlyRaw = multisetDiff(foundKeys, recordedSorted);
-        const stale = multisetDiff(recordedSorted, foundKeys);
         // F5 (reviewer, CPE-1761 attempt 2): the useful delta goes FIRST — a developer reading a failed
         // registry file must see what actually changed before wading through the full recorded/found
         // dumps (which, for a file like AgentTimeline.svelte, run to several KB and bury the diff).
@@ -415,20 +521,14 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
         // this used to be noise around a one-word fact. The line-numbered sites are still included at
         // the end so a real investigation can jump straight to the offending line.
         const foundDump = sites.map((s) => `${s.line}:${s.kind}:${s.expr}`).join(",");
-        mismatches.push(
-          `${file}:` +
-            (newlyRaw.length ? ` NEW raw offender(s) (kind:expr): ${newlyRaw.join(",")}` : "") +
-            (stale.length ? ` STALE recorded entry(ies), no longer rendered raw (kind:expr): ${stale.join(",")}` : "") +
-            ` — full found (line:kind:expr) [${foundDump}] vs recorded (kind:expr) [${recordedSorted.join(",")}]`,
-        );
+        // CPE-1905: `describeDrift` replaces the two raw `multisetDiff` dumps that used to be printed
+        // here. Same inputs, same verdict — only the prose changed. See its doc comment for why a
+        // duplicate-count DROP could not be told apart from a removal, and why the clauses are now
+        // sentences rather than space-joined fragments.
+        mismatches.push([`${file}:`, ...describeDrift(foundKeys, recordedSorted), `Full detail — found (line:kind:expr) [${foundDump}] vs recorded (kind:expr) [${recordedSorted.join(",")}].`].join(" "));
       }
     }
-    expect(
-      mismatches,
-      `wrap a genuinely new offender in displaySafeName/displaySafePath, or update REGISTRY here (and, ` +
-        `if it's a real disclosed gap, src/docs/03-explorer.md's "Not yet covered" list) to match reality: ` +
-        `${mismatches.join(" | ")}`,
-    ).toEqual([]);
+    expect(mismatches, `${WHY_THIS_GUARD_EXISTS} ${mismatches.join(" | ")}`).toEqual([]);
   });
 
   it("App.svelte's markup-level raw-render set matches its recorded lines exactly", () => {
