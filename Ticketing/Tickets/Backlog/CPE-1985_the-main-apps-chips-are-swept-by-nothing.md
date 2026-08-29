@@ -81,3 +81,29 @@ component harness and `svelteCss.ts`, which make this cheap), **CPE-490** (same 
 surfaces — the reason the app and the launcher share a palette at all), **CPE-1919** (`--accent` fills and
 rings vs `--accent-text` reads — a token backing several roles gets pinned at the loosest bar, and that
 assertion then reads like coverage), **CPE-1967** (measured job timeouts).
+
+## Two concrete sites, added 2026-08-28 from PR #1102's Reviewer
+
+- **`src/lib/components/ExplorerPane.svelte:715,717`** hard-code `#3a9d4a` and `#3a72b5` — **two hexes
+  CPE-1977 has now retired from the shared palette** — for a *different* feature's chips. They sit in
+  exactly the unmeasured gap this ticket is about: no sweep reaches them, and the values are not pinned to
+  anything, so they cannot even drift *consistently* with the palette they were copied from.
+- The same review recorded that a tab shows a **status dot and a session chip 8px apart**, and after
+  CPE-1977 the done-dot and chip #2 are dE76 **8.9** / **0.4°** — they partially merge at that distance.
+  That is an *improvement* (the old palette used literally identical hexes for both roles, in two places),
+  but it is the pairing to measure once an app-side sweep exists, because **no per-site contrast bar looks
+  at two adjacent chromatic marks against each other.**
+
+## And a refactor this ticket should consider rather than inherit
+
+PR #1102's Reviewer noted that `STATE_META`'s four dots are still painted **inline**, one line away from a
+`renderState()` call that **already toggles a class** — while `launcher.html:806` carries a standing
+CPE-1921 comment saying the state should pick a *class*, and the class a token, *"never an inline hex …
+which can't be checked against the ground it lands on."*
+
+CPE-1977 answered the first half correctly (those four **cannot** be scheme-keyed, because `.pane-head` is
+`#161616` in both schemes) but worked around the second half with a bespoke parser, a dedup-splitting
+fixture hack, and a newly declared "a third JS table would be invisible" gap. **Four
+`.state-dot.blocked/.working/.done/.idle` rules with single non-scheme-keyed values would satisfy the
+pane-head constraint *and* land in the stylesheet the harness already sweeps** — deleting the workaround
+instead of maintaining it (CPE-1950).
