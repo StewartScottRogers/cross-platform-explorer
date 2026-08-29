@@ -1646,6 +1646,15 @@ function guardLogicalLines(): string[] {
  *     need to be — same subshell argument as the pipe and the parens above (measured: `v=$(read -r
  *     x)` leaves `x` UNSET), and round 9's expansion span restores the `[]` that round 8's tokenizer
  *     had turned back into `["x"]`.
+ * ROUND 13 FOUND NOTHING WRONG WITH WHAT THE SCANNER DOES, and three things wrong with how round 12
+ * DESCRIBED ITS OWN NEW BOUND — in all three of the places that round asked to be checked. A cap
+ * that was a good decision was documented as if it were free: "caching it would let a deep query
+ * poison a shallow one" (the cap's own return was exempt, the `-1` it induced at every ancestor was
+ * not — three lines reproduce it); "nothing is swallowed" (true, and not the question — past the cap
+ * the walk fails OPEN, by the same extra-tokens mechanism round 11 had just corrected round 10 on);
+ * and a backstop whose message named a failure it could not detect. The lesson generalises past this
+ * file: **the round that fixes a defect is the round least likely to audit its own remedy**, and a
+ * remedy's docblock is written at exactly the moment its author is most convinced.
  * ROUND 12 CLOSED THE FOURTH INSTANCE OF THE SAME CLASS, and the sequence is the point: round 10
  * F2 was `shellTokens` holding `$(…)` but not `` `…` ``; round 11 was `expansionEnd` skipping quoted
  * spans while `quotedEnd` did not skip expansions; round 12 is `quotedEnd` skipping expansions but
@@ -1675,6 +1684,25 @@ function guardLogicalLines(): string[] {
  * hides a live `read` from a default-DENY scan — the same fail-open the `fail-OPEN branch` test
  * measures away for `dropSingleQuoted`'s unterminated `'`. It is now an ordinary character, and the
  * `an unterminated `"` does not swallow the rest of the line` row is the red-proof.
+ * ROUND 13's red-proofs, no-jq baseline **28 passed / 60 skipped** (round 12's 27 plus the cap
+ * test). Round 13's review found no defect in what the scanner DOES — all three findings were about
+ * the description of round 12's new bound, which is the failure mode a round spends its attention
+ * elsewhere:
+ *   * the capped-answer propagation off (`if (false && e === SPAN_CAPPED) …` plus `e < 0` folded
+ *     into the `-1` arm) -> **1 failed**, the cap test's memo leg, reproducing the reviewer's own
+ *     row: `levels=66 i=1 fresh=131 shared=-1`.
+ *   * `sawCap` off (`if (false && sawCap) return v;` in both walkers) -> **1 failed**, the same leg,
+ *     e.g. `levels=62 i=256 fresh=558 shared=264` — the capped `$`-branch fall-through stops at an
+ *     inner quote and writes that as the entry. It took TWO corrections to make this sabotage red,
+ *     and both are the point of the leg's shape (CPE-1929: a guard nothing can reach reads as
+ *     coverage). First it was green because the probe asked `quotedEnd` about a `$` index, a
+ *     position production never queries, so it reported a phantom collision instead — hence
+ *     `askOwner`. Then it was green because the probe only asked about indices 0-3, and the entries
+ *     `sawCap` protects are written deep inside the line — hence the full index sweep.
+ *   * the cap mutated into the direction its old message named (`return SPAN_CAPPED` ->
+ *     `return line.length - 1`, both walkers) -> **1 failed**, the cap test's direction leg. Under
+ *     round 12's `not.toEqual([])` the same mutation was **byte-identically green**, which is F3.
+ *
  * ROUND 12's red-proofs, no-jq baseline **27 passed / 60 skipped**:
  *   * the backtick clause off (`if (false && ((c === "`" && q !== "`") || …))`) -> **3 failed /
  *     24 passed**: the corpus with 12 fail-open lines (the new `dqBtickOddQuote` spelling, 4
@@ -1829,14 +1857,54 @@ type SpanMemo = Map<number, number>;
  * much stack the caller happened to leave is not a guard, and "it passed in isolation" is exactly
  * how this would have shipped.
  *
- * 64 is far past anything real shell writes (the guard script's deepest is 2) and the refusal is the
- * direction already measured for an unterminated nest: -1, so the quote is an ordinary character and
- * nothing is swallowed. A capped refusal is deliberately NOT memoized — the cap is a property of the
- * path taken to an index, not of the index, and caching it would let a deep query poison a shallow
- * one. Both bounds are needed and they are not substitutes: without the memo the cost is exponential
- * BELOW this depth (measured at n=36), and without the cap the stack blows above it.
+ * THE REFUSAL IS A FAIL-OPEN. Say it plainly, because round 12 did not: it wrote that the refusal
+ * is "-1, so the quote is an ordinary character and nothing is swallowed" — true about swallowing,
+ * and the same conflation round 11 had just corrected one scope down. Round 10 called the `"$(… " …)"`
+ * nesting "a short span, i.e. extra tokens, not a swallow"; round 11 measured it and found extra
+ * tokens ARE the fail-open mechanism, because one of them can be a metacharacter and `filledTargets`
+ * ends the command at a metacharacter. A refused span's body is re-tokenized as ordinary text, so
+ * past this depth exactly that happens — exhibited, not argued, in
+ * `…the depth cap is a FAIL-OPEN…`, which shows the target going missing.
+ *
+ * IT IS THIS FILE'S MEMBERSHIP RULE'S SINGLE HONEST EXCEPTION. The rule (see `shellTokens`) is that
+ * a shape whose failure emits a metacharacter is closed in CODE, never listed. This one cannot be
+ * closed, because closing it means not refusing, which means unbounded recursion — the thing the cap
+ * prevents, measured as `RangeError`. Every other listed shape must still meet the rule; this is the
+ * one place the file says "known fail-open, accepted", and it says why.
+ *
+ * WHAT MAKES IT ACCEPTABLE IS THE MARGIN, WHICH IS MEASURED RATHER THAN CLAIMED. 64 is far past
+ * anything real shell writes, and the second leg of that test derives the LOOSEST possible upper
+ * bound on nesting — every span-opening character counted, with no credit for any of them closing —
+ * over both the live guard script and the whole generated corpus, and reds if it ever approaches the
+ * cap. Do not raise the cap in response: a `RangeError` is worse than a miss at depth 66.
+ *
+ * A capped answer is never memoized, and round 13 had to fix that rather than merely assert it —
+ * see `SPAN_CAPPED`, where the "cannot poison" claim written here in round 12 is reproduced failing
+ * in three lines. Both bounds are needed and they are not substitutes: without the memo the cost is
+ * exponential BELOW this depth (measured at n=36), and without the cap the stack blows above it.
  */
 const MAX_SPAN_DEPTH = 64;
+/**
+ * The third possible answer from a span walker, alongside "ends here" and "never ends": **the cap
+ * stopped me, so I do not know**. Every negative answer means "no span", so callers test `< 0`; the
+ * two are distinguished only where it matters, which is the memo.
+ *
+ * ROUND 13, F1. Round 12 said "a capped refusal is deliberately NOT memoized … caching it would let
+ * a deep query poison a shallow one" — and only the cap's OWN return was exempt. The `-1` it INDUCES
+ * was memoized at every ancestor on the path, by `if (e === -1) return save(-1)` in both walkers.
+ * Measured on a balanced alternating `"`/backtick nest, L levels deep:
+ *     L=65  fresh(i0)=130  fresh(i1)=129 | shared(i0)=130 then shared(i1)=129
+ *     L=66  fresh(i0)=-1   fresh(i1)=131 | shared(i0)=-1  then shared(i1)=-1   <- poisoned
+ *     L=67  fresh(i0)=-1   fresh(i1)=-1  | shared(i0)=-1  then shared(i1)=-1
+ * At L=66 index 1 answers 131 on a fresh memo and -1 on one that has already been asked about index
+ * 0. That is precisely the poisoning the sentence said could not happen, three lines from a green
+ * suite — a claim about the design, in the comment justifying the design, that nothing tested.
+ *
+ * So the cap now returns its own value, and a `sawCap` flag makes every enclosing call skip `save`.
+ * A capped answer is still a usable answer for the caller that asked for it; it is only unusable as
+ * a CACHE entry, because a shallower query at the same index would not have been capped.
+ */
+const SPAN_CAPPED = -2;
 /**
  * The end index (inclusive) of the quoted span that starts at `line[i]`, which must be one of
  * `"`, `'` or a backtick — or -1 when it never closes on this line. `'` takes NOTHING literally
@@ -1859,14 +1927,18 @@ const MAX_SPAN_DEPTH = 64;
  * (measured: `"$(printf 'v: %s' "$x")"`, `"prefix $(printf '%s' "$x") suffix"`,
  * `"$(printf '%s' "cb")"`, `read -d "$(printf '%s' "$x")"` — all bound, all agreed). No live
  * exposure either: the guard script's two `read` lines carry no substitution and the taint set is 12
- * at rounds 7 through 12. It is closed in CODE rather than written down because that is what this
+ * at rounds 7 through 13. It is closed in CODE rather than written down because that is what this
  * file's own policy says to do with a fail-open, and round 10 left the two sentences disagreeing.
  */
 function quotedEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDepth = 0): number {
   const hit = memo.get(i);
   if (hit !== undefined) return hit;
-  if (nestDepth > MAX_SPAN_DEPTH) return -1; // NOT memoized — see `MAX_SPAN_DEPTH`
+  if (nestDepth > MAX_SPAN_DEPTH) return SPAN_CAPPED;
+  // Set as soon as anything BELOW this call hit the cap, at which point this call's answer is a
+  // property of the path rather than of the index, and `save` must not run. See `SPAN_CAPPED`.
+  let sawCap = false;
   const save = (v: number): number => {
+    if (sawCap) return v;
     memo.set(i, v);
     return v;
   };
@@ -1888,7 +1960,8 @@ function quotedEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDept
       // not conclusive. Measured, the fall-through is fail-CLOSED on an actually-unterminated
       // `"$(echo " -r x`: bash rejects the line and the walk over-reports `x`.
       const e = expansionEnd(line, j, memo, nestDepth + 1);
-      if (e !== -1) {
+      if (e === SPAN_CAPPED) sawCap = true;
+      else if (e !== -1) {
         j = e;
         continue;
       }
@@ -1917,6 +1990,7 @@ function quotedEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDept
     // 9 and 11 closed elsewhere. Refusing costs a short span (extra tokens) and reports the `read`.
     if ((c === "`" && q !== "`") || (q === "`" && (c === '"' || c === "'"))) {
       const e = quotedEnd(line, j, memo, nestDepth + 1);
+      if (e === SPAN_CAPPED) return SPAN_CAPPED;
       if (e === -1) return save(-1);
       j = e;
       continue;
@@ -1952,8 +2026,10 @@ function quotedEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDept
 function expansionEnd(line: string, i: number, memo: SpanMemo = new Map(), nestDepth = 0): number {
   const hit = memo.get(i);
   if (hit !== undefined) return hit;
-  if (nestDepth > MAX_SPAN_DEPTH) return -1; // NOT memoized — see `MAX_SPAN_DEPTH`
+  if (nestDepth > MAX_SPAN_DEPTH) return SPAN_CAPPED;
+  let sawCap = false; // see `SPAN_CAPPED`
   const save = (v: number): number => {
+    if (sawCap) return v;
     memo.set(i, v);
     return v;
   };
@@ -1969,6 +2045,7 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map(), nestD
     }
     if (c === '"' || c === "'" || c === "`") {
       const q = quotedEnd(line, j, memo, nestDepth + 1);
+      if (q === SPAN_CAPPED) return SPAN_CAPPED;
       if (q === -1) return save(-1); // unterminated inside the expansion: refuse, never swallow
       j = q;
       continue;
@@ -2026,10 +2103,12 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map(), nestD
  *               |                      | included — so this is  |
  *               |                      | the one branch that    |
  *               |                      | does NOT recurse       |
- *   `` `…` ``   | `quotedEnd`          | `\`, and a nested `"`  | falls through to the
- *               |                      | or `'` span (round 12, | metacharacter branch, i.e. its
- *               |                      | the mirror of the row  | own token (SHELL_META has it)
- *               |                      | above)                 |
+ *   `` `…` ``   | `quotedEnd`          | all three of `\`, `$`  | falls through to the
+ *               |                      | (the `$` branch is not | metacharacter branch, i.e. its
+ *               |                      | conditioned on `q`, so | own token (SHELL_META has it)
+ *               |                      | it runs here too) and  |
+ *               |                      | a nested `"`/`'` span  |
+ *               |                      | (round 12's mirror)    |
  *   `${…}`      | `expansionEnd`       | skips `'`/`"`/backtick | -1, so the `$` is an ordinary
  *   `$(…)`      | `expansionEnd`       | spans via `quotedEnd`  | character — never a swallow
  *   `$((…))`    | `expansionEnd`       | (round 10's F1 fix)    |
@@ -2061,7 +2140,7 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map(), nestD
  *     at all (`logicalLines` joins `\`-continuations only). That is `shellScriptLines`' job.
  * Round 7's regex and round 8's loop both swallowed to end of line on an unterminated `"`, which
  * hides text from a default-deny scan; nothing in the script trips any of this today (the live
- * taint set is 12 at rounds 7 through 12), so these were latent holes rather than shipped
+ * taint set is 12 at rounds 7 through 13), so these were latent holes rather than shipped
  * fail-opens — and they are closed in the code rather than written down, because the file's stated
  * premise is default-deny and its headline is fail-open zero.
  *
@@ -2074,7 +2153,12 @@ function expansionEnd(line: string, i: number, memo: SpanMemo = new Map(), nestD
  * which, measured, not reasoned. The remaining `$'…'` entry qualifies under that rule and was
  * checked against it rather than assumed into it.
  */
-function shellTokens(line: string): string[] {
+/** `startDepth` exists for ONE caller — `…the depth cap is a FAIL-OPEN…` — which needs to see what
+ *  this tokenizer does once `MAX_SPAN_DEPTH` refuses a span. Constructing a genuinely 64-deep line
+ *  that bash also accepts is not possible for the backtick nest (bash needs `\`` per level), so the
+ *  cap's CONSEQUENCE is exercised by entering above it instead of by building down to it. Production
+ *  callers pass nothing. */
+function shellTokens(line: string, startDepth = 0): string[] {
   const out: string[] = [];
   let cur = "";
   // One memo for the whole line — see `SpanMemo`. Without it the mutual recursion below is
@@ -2092,8 +2176,10 @@ function shellTokens(line: string): string[] {
       continue;
     }
     if (ch === '"' || ch === "'" || ch === "`") {
-      const end = quotedEnd(line, i, memo);
-      if (end !== -1) {
+      const end = quotedEnd(line, i, memo, startDepth);
+      // `< 0` rather than `=== -1`: "never ends" and "the cap stopped me" are both "no span" here,
+      // and only the memo cares which (see `SPAN_CAPPED`).
+      if (end >= 0) {
         cur += line.slice(i, end + 1);
         i = end;
         continue;
@@ -2102,8 +2188,8 @@ function shellTokens(line: string): string[] {
       // branch below; a backtick falls through to the metacharacter branch, which is its own token.
     }
     if (ch === "$") {
-      const end = expansionEnd(line, i, memo);
-      if (end !== -1) {
+      const end = expansionEnd(line, i, memo, startDepth);
+      if (end >= 0) {
         cur += line.slice(i, end + 1);
         i = end;
         continue;
@@ -3480,6 +3566,137 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     ).toEqual([]);
   });
 
+  /**
+   * THE DEPTH CAP IS A FAIL-OPEN, AND IT IS THIS FILE'S MEMBERSHIP RULE'S SINGLE HONEST EXCEPTION.
+   *
+   * The rule, from `shellTokens`' docblock: *a shape whose failure emits a metacharacter token or
+   * swallows text is closed in CODE, never listed.* Rounds 10, 11 and 12 each closed one. This one
+   * cannot be closed, and the reason is structural rather than an excuse: past `MAX_SPAN_DEPTH` the
+   * walkers refuse a span, a refused span's body is re-tokenized as ordinary text, and if that body
+   * holds a metacharacter then `filledTargets` ends the command at it and misses the target. Closing
+   * it means not refusing, i.e. unbounded recursion — which is the thing the cap exists to prevent,
+   * and which the round-12 guard measured as `RangeError: Maximum call stack size exceeded`.
+   *
+   * ROUND 12 WROTE THE OPPOSITE, and it is worth naming precisely because the same file documents
+   * the lesson: the cap's docblock called its refusal *"the direction already measured for an
+   * unterminated nest: -1, so the quote is an ordinary character and nothing is swallowed"*. True
+   * about swallowing — and "not a swallow" is exactly what round 10 wrote about the `"$(… " …)"`
+   * nesting, which round 11 then measured as fail-OPEN because extra tokens are the mechanism when
+   * one of them is a metacharacter. Round 12 re-made that conflation one scope up, about its own
+   * cap, in the commit that documents the lesson.
+   *
+   * TWO LEGS, because the honest position needs both halves:
+   *   1. the exception is REAL — the fail-open is exhibited, not asserted;
+   *   2. it is UNREACHABLE on everything this file scans — with the margin measured, not claimed.
+   * Leg 2 is what makes the exception acceptable, and it is the leg that reds if the cap is lowered
+   * or if real input ever gets deep. Neither leg is a comment.
+   */
+  it("...and the depth cap is a FAIL-OPEN, kept only because the margin below it is measured", () => {
+    // LEG 1. Entering above the cap is how the consequence is exercised: a genuinely 64-deep line
+    // that bash also accepts cannot be built for the backtick nest (bash wants `\`` per level), so
+    // `shellTokens`' `startDepth` seam stands in for the depth rather than for the mechanism.
+    const line = 'read -d "$(printf "%s" ";")" -r x <<< "hi"';
+    expect(
+      filledTargets(line),
+      "the control: below the cap this is one option argument and the target is found",
+    ).toEqual(["x"]);
+    expect(
+      filledTargets(line, (l) => shellTokens(l, MAX_SPAN_DEPTH + 1)),
+      "above the cap the span is refused, its `;` is re-tokenized as a metacharacter, the command " +
+        "ends there and `x` is never reported. If this ever comes back `['x']` the cap has stopped " +
+        "refusing and the stack bound is gone — that is a worse defect, not a fixed one.",
+    ).toEqual(["REPLY"]);
+    // And the DIRECTION of that refusal, which is the leg round 13's F3 found missing: refusing
+    // leaves the rest of the line lexed, so `-r` and `x` are still words of their own. A cap that
+    // instead EXTENDED the span to end of line (the mutation the reviewer ran: `return SPAN_CAPPED`
+    // -> `return line.length - 1`) hides them inside it, and `filledTargets` cannot tell the
+    // difference — both answer `["REPLY"]`, which is exactly why the old `not.toEqual([])` leg was
+    // green under that mutation. The tokenizer can tell, so ask it.
+    expect(
+      shellTokens(line, MAX_SPAN_DEPTH + 1),
+      "above the cap the tail of the line stopped being tokenized, so the refusal has become a " +
+        "SWALLOW: the rest of the line is hidden inside one span rather than judged by the " +
+        "default-deny scan. Refusing costs a miss; swallowing hides everything after it.",
+    ).toEqual(expect.arrayContaining(["-r", "x"]));
+
+    // LEG 2. The margin, over both populations this file actually scans, using the LOOSEST possible
+    // upper bound on nesting: every character that could open a span, counted, with no credit for
+    // any of them closing. A line can never nest deeper than that, so a number well under
+    // `MAX_SPAN_DEPTH` is a real headroom claim and not an estimate.
+    const openers = (l: string) => (l.match(/["'`]|\$[({]/g) ?? []).length;
+    const guardLines = guardLogicalLines();
+    expect(guardLines.length, "the guard script parsed to almost nothing").toBeGreaterThan(80);
+    const corpusLines = shapeCorpus().map((c) => c.line);
+    expect(corpusLines.length, "the corpus generated almost nothing").toBeGreaterThan(300);
+    let script = 0;
+    let corpus = 0;
+    for (const l of guardLines) script = Math.max(script, openers(l));
+    for (const l of corpusLines) corpus = Math.max(corpus, openers(l));
+    const worst = Math.max(script, corpus);
+    expect(
+      worst,
+      `the deepest a line this file scans could POSSIBLY nest is ${worst} (script ${script}, corpus ` +
+        `${corpus}) against a cap of ${MAX_SPAN_DEPTH}. The cap's refusal is a fail-open — leg 1 ` +
+        "above exhibits it — and the ONLY reason that is acceptable is that nothing reaches it. " +
+        "Raising the cap is not the fix: a `RangeError` is worse than a miss at depth 66. Find out " +
+        "why a line got that deep instead.",
+    ).toBeLessThan(MAX_SPAN_DEPTH / 2);
+
+    // LEG 3, round 13's F1. A shared memo must answer exactly what a fresh one answers, INCLUDING
+    // across the cap boundary — that is the property round 12 asserted in prose and did not have.
+    // An alternating `"`/backtick nest is the shape that reaches the branch which hard-refuses;
+    // querying index 0 first is what used to write the induced `-1` into index 1's entry.
+    const alternating = (levels: number) => {
+      let open = "";
+      let close = "";
+      for (let k = 0; k < levels; k += 1) {
+        const ch = k % 2 === 0 ? '"' : "`";
+        open += ch;
+        close = ch + close;
+      }
+      return `${open}x${close}`;
+    };
+    // BOTH mechanisms that keep a capped answer out of the memo need driving, and they are reached
+    // by different shapes — measured, after disabling `sawCap` alone left the alternating nest
+    // green: the sentinel propagation covers the branch that hard-refuses, while `sawCap` covers
+    // `quotedEnd`'s `$` branch, which falls through to "ordinary character" and then returns a REAL
+    // index computed on a capped path. A `$(`-based nest is what reaches the second.
+    // Each index is queried with the walker that OWNS it — `quotedEnd` where the character opens a
+    // quote, `expansionEnd` where it is `$`. That is not tidiness: one map serves both functions
+    // precisely because production never asks either about the other's positions, so a probe that
+    // asked `quotedEnd` about a `$` would report a collision the tokenizer cannot reach. (It did,
+    // on the first draft of this leg — 7 rows of it.)
+    const askOwner = (l: string, idx: number, memo?: SpanMemo) =>
+      l[idx] === "$"
+        ? expansionEnd(l, idx, memo ?? new Map())
+        : quotedEnd(l, idx, memo ?? new Map());
+    const divergent: string[] = [];
+    for (let levels = MAX_SPAN_DEPTH - 2; levels <= MAX_SPAN_DEPTH + 4; levels += 1) {
+      for (const l of [alternating(levels), `"${'$(echo "'.repeat(levels)}x${'")'.repeat(levels)}"`]) {
+        // EVERY index, not the first few. The first draft checked indices 0-3 and disabling
+        // `sawCap` left it green; the entries that mechanism protects are written deep inside the
+        // line, so a probe that only asks about its start cannot see them.
+        const shared: SpanMemo = new Map();
+        askOwner(l, 0, shared); // warm it exactly as `shellTokens` would, from the left
+        for (let idx = 0; idx < l.length; idx += 1) {
+          if (!/["'`$]/.test(l[idx])) continue;
+          const fresh = askOwner(l, idx);
+          const viaShared = askOwner(l, idx, shared);
+          if (fresh !== viaShared) {
+            divergent.push(`levels=${levels} i=${idx} fresh=${fresh} shared=${viaShared}`);
+          }
+        }
+      }
+    }
+    expect(
+      divergent,
+      "a query answered differently on a warm memo than on a cold one. The cap's answer is a " +
+        "property of the PATH to an index, not of the index, so it must never be cached — and the " +
+        "`-1` it induces at every ancestor must not be cached either, which is the half round 12 " +
+        "missed while asserting the whole thing was impossible.",
+    ).toEqual([]);
+  });
+
   it(
     "...and terminates on a pathological nested span, which the memo is the only reason it does",
     () => {
@@ -3544,24 +3761,36 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       expect(filledTargets(closedBtick), "a balanced 20-deep backtick nest is one option argument").toEqual([
         "deep",
       ]);
-      // And the cap itself, both kinds. What is ASSERTED is the property the cap exists for: the
-      // call RETURNS rather than throwing `RangeError: Maximum call stack size exceeded`, and it
-      // never comes back empty — an empty answer would mean the live `read` had been swallowed,
-      // which is the fail-open direction. The particular answer past the cap is NOT asserted,
-      // because the mechanism does not promise one: measured here, the `$(` nest still comes back
-      // `["deep"]` (the refused outer quote splits into tokens that happen to leave the operand
-      // where the walk looks) and the backtick nest comes back `["REPLY"]`. Asserting either would
-      // be pinning an accident — this file's own recurring defect, one scope down.
+      // And the cap itself, both kinds. ROUND 13, F3: the leg that used to stand here asserted
+      // `not.toEqual([])` and said an empty answer "means the whole line was swallowed" — a
+      // backstop that could not fire for the failure it named. Mutating the cap into exactly that
+      // direction (`return SPAN_CAPPED` -> `return line.length - 1`, i.e. swallow to end of line)
+      // in BOTH walkers left this file byte-identically green at 27 passed / 60 skipped, because a
+      // swallowed span still yields `read -p <one huge arg>` and therefore `["REPLY"]`, not `[]`.
+      // Only the throw-catching half was ever live. This file's own rule: do not name a backstop
+      // without checking it can fire.
+      //
+      // What is asserted HERE is only what this guard is for: past the cap the call RETURNS instead
+      // of throwing `RangeError`. Nothing stronger, and the reason is measured rather than modest —
+      // three stronger properties were tried and each is false of the SHIPPED behaviour, because at
+      // 200 levels the tokenization is degraded by design:
+      //     `deep` survives as its own token  — false for the backtick nest (a stray quote pairs
+      //                                         with a later one and eats ` -r deep <<< "hi"`)
+      //     more than 10 tokens               — false for the `$(` nest, which lexes to 9
+      //     no token covers most of the line  — false for the `$(` nest, whose one legitimate
+      //                                         argument token is 2003 of 2028 characters
+      // Writing any of them down would have been asserting an accident, which is this file's
+      // recurring defect one scope down. The refuse-versus-swallow DIRECTION is pinned instead in
+      // `…the depth cap is a FAIL-OPEN…`, at a depth where the answer still means something, which
+      // is also where the round-13 swallow mutation actually reds.
       for (const [label, tooDeep] of [
         ["`$(`", `read -p "${'$(echo "'.repeat(200)}x${'")'.repeat(200)}" -r deep <<< "hi"`],
         ["backtick", `read -p "${'`echo "'.repeat(200)}x${'"`'.repeat(200)}" -r deep <<< "hi"`],
       ] as const) {
         expect(
-          filledTargets(tooDeep),
-          `a ${label} nest deeper than MAX_SPAN_DEPTH (${MAX_SPAN_DEPTH}) came back EMPTY, which ` +
-            "means the whole line was swallowed into one span. The cap must refuse a span, never " +
-            "hide the rest of the line behind it.",
-        ).not.toEqual([]);
+          Array.isArray(filledTargets(tooDeep)),
+          `the ${label} nest past MAX_SPAN_DEPTH (${MAX_SPAN_DEPTH}) did not return an answer at all`,
+        ).toBe(true);
       }
     },
     30000,
@@ -3664,6 +3893,13 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       // Each is a local closure or a fixture builder, none of them a scanner.
       flush: "a local closure inside a tokenizer; it appends to that tokenizer's output array",
       save: "a local closure inside `quotedEnd`/`expansionEnd` that writes one `SpanMemo` entry",
+      openers:
+        "COUNTS span-opening characters in a line to bound how deep it could possibly nest; it " +
+        "decides nothing about the shell's grammar, and it is deliberately the loosest such bound",
+      alternating: "BUILDS a nested test input `levels` deep; it reads nothing",
+      askOwner:
+        "routes one index to whichever span walker owns that character; it answers no question " +
+        "about the shell itself, it only avoids asking a walker about a position it never sees",
       score:
         "a closure inside the corpus test that calls `filledTargets` and counts; the shell question " +
         "is delegated whole, and it decides nothing about the grammar itself",
