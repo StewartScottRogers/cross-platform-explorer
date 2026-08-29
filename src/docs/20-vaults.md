@@ -110,3 +110,10 @@ of the tradeoffs:
   may not actually be overwritten; copy-on-write filesystems (APFS, Btrfs, ZFS) may keep old data in
   snapshots; and copies in backups, temp files, or filesystem journals are never touched. For
   guaranteed erasure, use full-disk encryption in addition to a vault.
+- **Hidden data attached to a file.** On Windows, a file (or a folder) can carry extra hidden
+  "streams" of data alongside its normal contents — that is where a browser records which site a
+  download came from, for instance. Locking a vault now overwrites those too, and refuses to finish
+  the lock if one of them is in use by another program, rather than quietly leaving it behind. On
+  macOS and Linux the equivalent — extended attributes, and a Mac resource fork — is **not**
+  overwritten today; the file is deleted with them, but their storage is not scrubbed first. The
+  standalone **Shred** command has the same limit on every platform.

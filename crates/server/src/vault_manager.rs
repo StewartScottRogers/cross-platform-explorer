@@ -1767,6 +1767,13 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
 /// 4. **Descend**, each subdirectory re-pinned against the identity from step 1 — which is step 0 of
 ///    that child's own invocation.
 ///
+/// **Names are not objects, and on NTFS a name is not even one object's worth of bytes (CPE-1986).**
+/// `read_dir` returns names; a name's **alternate data streams** are separate runs of extents that an
+/// overwrite through that name never touches, and `remove_dir_all` frees them without writing them. So
+/// step 3 shreds each file's named `$DATA` streams as well as its default one, and step 3 also shreds
+/// the directory's own — a directory can carry them too. See [`shred_alternate_streams`], which also
+/// states what the Unix arm does **not** cover and why.
+///
 /// **Nothing here unlinks by path.** The removal is left entirely to one `remove_dir_all(root)`, which
 /// std hardened against exactly this swap in 1.58.1 (CVE-2022-21658): it recurses through directory
 /// handles rather than re-resolving path strings, and deletes a reparse point instead of descending into
@@ -1873,12 +1880,23 @@ fn shred_dir_pinned(
         }
     }
 
-    // STEP 2 — re-pin, before a single byte is destroyed.
-    same_object_or_refuse(dir, expected, aliases, "directory")?;
+    // STEP 2 — re-pin, before a single byte is destroyed. The probe it returns is what step 3 pins this
+    // directory's own alternate data streams to (CPE-1986): it is the identity that was just verified,
+    // and re-asking the path for one would pin to whatever is there *now*.
+    let dir_probe = same_object_or_refuse(dir, expected, aliases, "directory")?;
 
     // STEP 3 — overwrite, each file pinned to the identity captured in step 1.
+    //
+    // **A directory carries alternate data streams too, and they are the same defect (CPE-1986,
+    // measured — see [`shred_alternate_streams`]).** `read_dir` cannot see them and `remove_dir_all`
+    // frees their extents without writing them, so they are shredded here, after step 2 has agreed
+    // this is still the right directory and before anything descends.
+    shred_alternate_streams(dir, &dir_probe, scheme, aliases)?;
     for (path, probe) in &files {
         overwrite_pinned_file(path, probe, scheme, aliases)?;
+        // `read_dir` returns NAMES; a name's alternate data streams are separate runs of the user's
+        // bytes that the default-stream overwrite above never touched (CPE-1986).
+        shred_alternate_streams(path, probe, scheme, aliases)?;
     }
 
     // STEP 4 — descend, each subdirectory pinned to the identity captured in step 1, which was recorded
@@ -1904,12 +1922,18 @@ fn shred_dir_pinned(
 /// which may sit on a network redirector that reports a degenerate identity from a call that otherwise
 /// succeeds — refusing there would break a legitimate feature to defend against an attacker who, by that
 /// path's own threat model ([`AliasPolicy::ShredEveryFile`]), is not present.
+///
+/// **Returns the probe it took** (CPE-1986) rather than `()`. The caller that pins a *directory* now
+/// also has to shred that directory's own alternate data streams, and it must do that against the
+/// identity **this** call verified — re-probing the path afterwards would pin to whatever is there
+/// *now*, which is the object an attacker just swapped in, i.e. it would defeat the pinning rather
+/// than perform it.
 fn same_object_or_refuse(
     path: &Path,
     expected: Option<FileIdentity>,
     aliases: AliasPolicy,
     what: &str,
-) -> Result<(), VaultError> {
+) -> Result<EntryProbe, VaultError> {
     let now = probe_no_follow(path);
     if now.is_link {
         // Deliberately does NOT claim the link "was swapped in" — this same call guards the very first
@@ -1940,7 +1964,7 @@ fn same_object_or_refuse(
         )));
     }
     match (expected, now.id) {
-        (Some(before), Some(after)) if before == after => Ok(()),
+        (Some(before), Some(after)) if before == after => Ok(now),
         (Some(_), Some(_)) => Err(VaultError::Format(format!(
             "refusing to wipe {}: this {what} is no longer the same object it was when the wipe \
              enumerated it, so something replaced it while the wipe was running — nothing further will \
@@ -1953,7 +1977,7 @@ fn same_object_or_refuse(
                  enumerated, so there is no way to tell what an overwrite would land on",
                 path.display()
             ))),
-            AliasPolicy::ShredEveryFile => Ok(()),
+            AliasPolicy::ShredEveryFile => Ok(now),
         },
     }
 }
@@ -2080,6 +2104,290 @@ fn shred_through(file: &mut std::fs::File, path: &Path, scheme: ShredScheme) -> 
     secure_shred::shred_open_file(file, size, scheme, &label)
         .map(|_| ())
         .map_err(|e| VaultError::Format(format!("shred {label}: {e}")))
+}
+
+/// Overwrite every **alternate data stream** on `path` as well as its default one (CPE-1986).
+///
+/// # The defect this closes
+///
+/// `shred_dir_pinned` enumerates with [`std::fs::read_dir`], which returns **names**, and
+/// [`shred_through`] writes through a handle opened at a name — which on Windows is the **default data
+/// stream** and nothing else. An NTFS file (or directory) may carry any number of *named* `$DATA`
+/// streams alongside it, each its own run of extents holding its own bytes. `remove_dir_all` at the end
+/// of [`shred_tree`] unlinks the whole file record, which frees those extents **without writing them**.
+/// So before this existed, the session wipe returned `Ok(())`, the lock said "Locked", the default
+/// stream was genuinely zeroed — and the plaintext in a named stream was still on the volume.
+///
+/// Measured on Windows 11 with the **production** policy
+/// ([`AliasPolicy::UnlinkAliasesInsteadOfOverwriting`], the one [`wipe_session_dir`] passes), before the
+/// fix: `wipe_ok=true main_all_zero=true ads_readable=true ads_still_secret=true` — which is PR #1101's
+/// Security Auditor's original reading, reproduced here rather than taken on trust. The same run showed
+/// a **directory** stream (`sub:dirsecret`) surviving identically, which is why this is called for
+/// directories too and not only for files.
+///
+/// This is the same shape as CPE-1957 one layer down: **a skip is indistinguishable from a success at
+/// the API**, so every existing assertion on this path was satisfied by not touching the data. That is
+/// why `cpe_1986_*` asserts on **bytes**, never on `is_ok()`.
+///
+/// # Why this reuses [`overwrite_pinned_file`] rather than writing its own loop
+///
+/// A named stream is not a second object: measured, a handle opened at `file:name` reports — through
+/// `GetFileInformationByHandle` — **the same volume serial and file index** as the file itself, its link
+/// count, `FILE_ATTRIBUTE_DIRECTORY` clear (even for a stream on a directory), and no reparse tag. So
+/// the `EntryProbe` the walk already captured for the *name* is exactly the right thing to pin a stream
+/// open against, and every refusal [`overwrite_pinned_file`] already makes — wrong object, a link, a
+/// directory, an alias that appeared after enumeration — applies to a stream unchanged and with one
+/// implementation. `metadata().len()` on such a handle returns the **stream's** length (61 of 61 in the
+/// measurement, against a 21-byte default stream), so [`shred_through`] sizes the right thing.
+///
+/// The call is made from [`shred_dir_pinned`], **not** from inside [`overwrite_pinned_file`]: a stream
+/// path enumerated for its own streams would recurse without end.
+///
+/// # What an unshreddable stream does: it **refuses**, and that is deliberate
+///
+/// A stream that cannot be opened for writing — held by another process, say — fails
+/// [`overwrite_pinned_file`]'s own open with `shred …: cannot open it for overwriting`, which aborts the
+/// whole wipe. That is not an accident of reuse; it is the answer this ticket weighed and chose:
+///
+/// - It is **exactly what a locked default stream already does**, so the file's two halves cannot
+///   disagree about what "this file is busy" means.
+/// - A refusal here happens **before** `remove_dir_all`, so nothing is unlinked. The user's plaintext
+///   stays in the session directory — visible, in a known place, and the lock is retryable. CPE-1957's
+///   lesson is that over-refusing at a *wipe* costs retained plaintext; the cost is real, but retained
+///   plaintext **the user can see and retry on** is strictly better than retained plaintext in extents
+///   that no longer have a name, which is what a skip leaves behind and what this whole ticket is about.
+/// - The one thing that is never right is a silent skip, because that is the defect.
+///
+/// # The enumeration failing is the one place the two policies differ, for the module's existing reason
+///
+/// `FindFirstStreamW` reporting `ERROR_HANDLE_EOF` means "no streams" — measured: that is what a
+/// directory with none returns (a *file* always reports at least `::$DATA`). Any other failure is
+/// treated like [`same_object_or_refuse`]'s `Unknown` arm and for the same stated reason: refused under
+/// [`AliasPolicy::UnlinkAliasesInsteadOfOverwriting`], because the session tree is the app's own
+/// directory on a local volume where the call does not fail; **accepted as "no streams" under
+/// [`AliasPolicy::ShredEveryFile`]**, because that folder is the user's own pick and may sit on a
+/// volume with no stream support at all (FAT/exFAT) or behind a network redirector — refusing there
+/// would break vault creation against an attacker who, by that path's threat model, is not present.
+/// **Not measured:** no FAT-formatted volume was available on this machine, so what
+/// `FindFirstStreamW` returns on one is not a number this comment can quote. That is precisely why the
+/// lenient arm is scoped to the policy whose threat model tolerates it rather than applied everywhere.
+///
+/// # Non-Windows, stated because silence here would be the same defect (CPE-1986)
+///
+/// **There is no Unix arm and this is a declared residual, not an oversight.** Streams are NTFS; the
+/// analogue on Linux and macOS is **extended attributes** — including `com.apple.ResourceFork`, where a
+/// macOS resource fork lives, and `com.apple.FinderInfo`. They have the same property that matters here:
+/// writing the file's data does not touch them, and `unlink` frees their storage without overwriting it.
+/// So the same class of residue exists there. It is **not** closed here, for two reasons stated plainly
+/// rather than left to be inferred: (a) an xattr cannot be *overwritten in place* through any portable
+/// API — setting a same-length zeroed value is a request the filesystem may satisfy by allocating
+/// elsewhere (ext4's external attribute block, APFS), so it would buy a weaker guarantee than this
+/// Windows arm gives while reading like the same one; and (b) it would be destruction logic for two
+/// platforms that cannot be exercised on the machine this was written on, which is the axis
+/// PR #1103 went red on. It is written up in `docs/design/VAULT-SECURITY.md` and wants its own ticket.
+///
+/// **How the non-Windows arm was actually checked, since "clippy is clean" only ever meant Windows
+/// here.** A real `cargo check --target x86_64-unknown-linux-gnu` is **not possible on this machine**:
+/// five of this crate's transitive dependencies build C (`bzip2-sys`, `lzma-sys`, `zstd-sys`,
+/// `libsqlite3-sys`, `ring`) and every one fails with `ToolNotFound: x86_64-linux-gnu-gcc`. So the
+/// derivation run instead was to flip this ticket's ten `#[cfg(windows)]` attributes to `#[cfg(any())]`
+/// and the `#[cfg(not(windows))]` one to `#[cfg(not(any()))]` — i.e. select the non-Windows arm *on
+/// Windows* — and run `cargo clippy --locked --all-targets -- -D warnings`, which **finished clean**.
+/// That is the check PR #1103 needed and did not have: it runs anywhere, and it is what proves no
+/// ungated caller names a Windows-gated item.
+#[cfg(windows)]
+fn shred_alternate_streams(
+    path: &Path,
+    probed: &EntryProbe,
+    scheme: ShredScheme,
+    aliases: AliasPolicy,
+) -> Result<(), VaultError> {
+    // Same first question, and the same answer, as `overwrite_pinned_file`'s opening lines: a file with
+    // more than one name (or an unreadable count) is not ours to write through, and its streams belong
+    // to that same file record. Asked here as well as there so an alias is never even *enumerated* —
+    // otherwise an enumeration failure would refuse a wipe over an object the wipe was never going to
+    // touch. If one of these two dispositions is ever changed, change both.
+    if aliases == AliasPolicy::UnlinkAliasesInsteadOfOverwriting
+        && wipe_disposition(&probed.links) == WipeDisposition::UnlinkOnly
+    {
+        return Ok(());
+    }
+    let names = match alternate_stream_names(path) {
+        Ok(names) => names,
+        // **CPE-1929 sabotage pair, run by hand on WINDOWS 11** (`cargo test --lib`, `crates/server`;
+        // baseline **2,461 passed / 0 failed / 14 ignored** at base `2f7b3206`, and **re-measured at
+        // `9bfb21d7` after rebasing — identical, so #1103's 511 lines in `batch_media` moved nothing
+        // here, and both figures below were re-run there and came back the same**; **2,466 in the tree
+        // this ships in** — the same baseline plus this ticket's five new tests. Both figures below were
+        // measured **in this tree** and each sums to 2,466, so they are exactly what a re-run measures
+        // here; a different number means they are stale and must be re-run, not adjusted.) Disabling
+        // this refusal (returning `Ok(())` from the arm) is **2,465 / 1** —
+        // `cpe_1986_an_unlistable_object_refuses_the_session_wipe_and_is_waved_through_by_create_vault`.
+        // Forcing the predicate to lie (`alternate_stream_names` always `Err`) is **2,439 / 27**.
+        //
+        // **Both legs red, so this refusal is COVERED — by a direct-call test — and NOT reachable from
+        // the walk.** Those are different claims and only the first follows from the pair; an earlier
+        // draft of this comment said "reachable" and was wrong. Measured by the third sabotage CPE-1929
+        // prescribes for exactly this shape (neuter everything upstream and read who reports the
+        // failure): with `same_object_or_refuse` returning its probe unconditionally and
+        // `overwrite_pinned_file`'s write-open failure returning `Ok(())` instead of refusing, the suite
+        // is **2,460 / 6** and the string `alternate data streams could not be listed` appears **zero
+        // times in the whole run**. The mechanism is that both earlier guards
+        // touch the same object first — for a file `overwrite_pinned_file`'s write-open runs before
+        // this, so anything that makes `FindFirstStreamW` fail makes that open fail first; for a
+        // directory `same_object_or_refuse`'s probe runs before it. So this is kept as a **deliberate
+        // backstop** for a filesystem that reports a listing failure where the earlier guards succeed,
+        // and `cpe_1986_an_unlistable_object_...` reaches it only by calling this function directly.
+        // Do not be alarmed that no ordinary tree can trip it; that is the expected result.
+        // **The platform is named because it is the axis nobody checks:** on Linux and macOS the whole
+        // `#[cfg(windows)]` arm is absent and neither leg exists at all, so a green run there says
+        // nothing about any of these numbers.
+        Err(why) => match aliases {
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting => {
+                return Err(VaultError::Format(format!(
+                    "refusing to wipe {}: its alternate data streams could not be listed ({why}), so \
+                     there is no way to tell whether this name is hiding another copy of your data",
+                    path.display()
+                )))
+            }
+            AliasPolicy::ShredEveryFile => return Ok(()),
+        },
+    };
+    for name in names {
+        let mut stream = path.as_os_str().to_os_string();
+        stream.push(&name);
+        overwrite_pinned_file(&PathBuf::from(stream), probed, scheme, aliases)?;
+    }
+    Ok(())
+}
+
+/// The non-Windows arm: alternate data streams are an NTFS concept and there are none to shred. See the
+/// Windows arm's doc comment for the extended-attribute residual this deliberately does **not** cover on
+/// Linux and macOS, and `docs/design/VAULT-SECURITY.md` for the same statement in the design doc.
+#[cfg(not(windows))]
+fn shred_alternate_streams(
+    _path: &Path,
+    _probed: &EntryProbe,
+    _scheme: ShredScheme,
+    _aliases: AliasPolicy,
+) -> Result<(), VaultError> {
+    Ok(())
+}
+
+/// Every named `$DATA` stream on `path`, as a suffix ready to append to `path` verbatim (`:name:$DATA`).
+///
+/// `FindFirstStreamW`/`FindNextStreamW` with `FindStreamInfoStandard`, which is the only way to see
+/// these at all — `read_dir` returns names, and a name says nothing about the streams behind it.
+///
+/// - **`ERROR_HANDLE_EOF` from the first call is "none", not a failure.** Measured: that is what a
+///   directory with no streams returns. A file always reports at least `::$DATA`.
+/// - The default stream is filtered out by [`is_shreddable_alternate_stream`] — the caller has already
+///   overwritten it through the plain path, and a directory has none at all.
+/// - The returned name is used **verbatim**: measured, `path` + `":hidden:$DATA"` opens the stream.
+/// - [`MAX_STREAMS_PER_OBJECT`] bounds the walk so a filesystem filter that never reports the end
+///   cannot hang a lock. Hitting it is an error, never a truncated list quietly returned as complete.
+///
+/// The `Err` payload is a reason for the caller's message; the *policy* decision about what a failure
+/// means lives in [`shred_alternate_streams`], with the two alias trust levels.
+#[cfg(windows)]
+fn alternate_stream_names(path: &Path) -> Result<Vec<std::ffi::OsString>, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{ERROR_HANDLE_EOF, WIN32_ERROR};
+    use windows::Win32::Storage::FileSystem::{
+        FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, WIN32_FIND_STREAM_DATA,
+    };
+
+    // Same `\\?\` transformation every other open in this module goes through, so a deep session file is
+    // reachable here too — a raw `CreateFileW`-family call without it is capped at `MAX_PATH`, and the
+    // mismatch would make this refuse on exactly the files the rest of the wipe handles fine.
+    let wide = crate::batch_media::verbatim_wide(path);
+    let mut found: Vec<std::ffi::OsString> = Vec::new();
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string alive for the whole call, and `data` is a
+    // correctly-sized out-parameter of the type `FindStreamInfoStandard` names. The search handle is
+    // closed on every path out of the loop below, including the error ones.
+    unsafe {
+        let mut data: WIN32_FIND_STREAM_DATA = std::mem::zeroed();
+        let handle = match FindFirstStreamW(
+            PCWSTR(wide.as_ptr()),
+            FindStreamInfoStandard,
+            std::ptr::addr_of_mut!(data).cast::<std::ffi::c_void>(),
+            0,
+        ) {
+            Ok(h) => h,
+            // "Reached the end of the file" is how this API says an object has no streams to report.
+            Err(e) if WIN32_ERROR::from_error(&e) == Some(ERROR_HANDLE_EOF) => return Ok(found),
+            Err(e) => return Err(format!("{e}")),
+        };
+        let mut result = Ok(());
+        // Counts every entry the API hands back, NOT every entry kept: the runaway this bounds is the
+        // enumeration, and a filter driver reporting an endless run of names this function *filters out*
+        // would sail past a cap on `found.len()`.
+        let mut seen = 0_usize;
+        loop {
+            // No NUL in the buffer means the name filled it, which cannot happen for a real stream name
+            // (255 chars plus the two colons and `$DATA`, in 296 `u16`s). Taking the whole buffer rather
+            // than an empty slice is the fail-toward-noticing direction: the resulting name will not
+            // open, which refuses, where an empty one would be filtered out and silently skipped.
+            let end = data.cStreamName.iter().position(|&c| c == 0).unwrap_or(data.cStreamName.len());
+            let raw = &data.cStreamName[..end];
+            // The decision is taken on a lossy decode while the *path* is built from the raw UTF-16, so
+            // an unpaired surrogate cannot change the answer: `is_shreddable_alternate_stream` reads
+            // only ASCII `:` and `$DATA`, and U+FFFD is neither.
+            if is_shreddable_alternate_stream(&String::from_utf16_lossy(raw)) {
+                found.push(std::ffi::OsString::from_wide(raw));
+            }
+            seen += 1;
+            if seen > MAX_STREAMS_PER_OBJECT {
+                result = Err(format!("it reports more than {MAX_STREAMS_PER_OBJECT} of them"));
+                break;
+            }
+            if let Err(e) = FindNextStreamW(handle, std::ptr::addr_of_mut!(data).cast::<std::ffi::c_void>())
+            {
+                if WIN32_ERROR::from_error(&e) != Some(ERROR_HANDLE_EOF) {
+                    result = Err(format!("{e}"));
+                }
+                break;
+            }
+        }
+        let _ = FindClose(handle);
+        result.map(|()| found)
+    }
+}
+
+/// A ceiling on how many streams one object may report before the walk gives up and errors. NTFS puts
+/// no small bound on the count, so this is not a correctness limit — it is there so a filesystem filter
+/// that never reports the end cannot spin a lock forever. Far above anything real: the streams seen in
+/// the wild are a handful (`Zone.Identifier`, `AFP_AfpInfo`, `com.dropbox.attrs`).
+#[cfg(windows)]
+const MAX_STREAMS_PER_OBJECT: usize = 4096;
+
+/// Does this `FindStreamInfoStandard` stream name identify a **named `$DATA` stream** — a separate run
+/// of the user's own bytes that a wipe has to overwrite?
+///
+/// Pure, so the rule is pinned by a table rather than only by review — the same reason
+/// [`wipe_disposition`] is its own function. Names arrive in the form `:<name>:<type>`, and the default
+/// stream is the degenerate `::$DATA`.
+///
+/// **The `$DATA` test did not fire in any measurement taken for CPE-1986, and that is said here rather
+/// than left for the next reader to discover.** `FindStreamInfoStandard` returned *only* `$DATA` streams
+/// on this machine: an EFS-encrypted file (`cipher /e`, exit 0) reported `::$DATA` alone with no `:$EFS:`
+/// entry, and a file carrying a GUID reparse point reported `::$DATA` plus its named stream with no
+/// `:$REPARSE_POINT:` entry. It is kept as a **deliberate, unexercised safety valve**: a build or a
+/// filesystem filter that does report a non-`$DATA` attribute would otherwise have it opened for an
+/// ordinary write, which cannot succeed, turning every wipe on such a volume into a refusal. A non-`$DATA`
+/// attribute is filesystem metadata (`$EFS`, `$INDEX_ALLOCATION`, `$BITMAP`, `$REPARSE_POINT`) and not
+/// somewhere an ordinary write puts a user's plaintext — a **declared residual**, in
+/// `docs/design/VAULT-SECURITY.md`. Do not read a green suite as evidence that this branch was reached.
+#[cfg(windows)]
+fn is_shreddable_alternate_stream(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(':') else {
+        return false;
+    };
+    let Some((stream, kind)) = rest.rsplit_once(':') else {
+        return false;
+    };
+    !stream.is_empty() && kind.eq_ignore_ascii_case("$DATA")
 }
 
 /// Remove a symlink/junction **itself**, never its target (CPE-1653). A file symlink unlinks with
@@ -5067,6 +5375,367 @@ mod tests {
             "a name-surrogate must never be written THROUGH — the wipe leaves the name for \
              `remove_dir_all` to unlink rather than overwriting whatever it stands for"
         );
+    }
+
+    // ---- CPE-1986: alternate data streams -----------------------------------------------------------
+
+    /// `<base>:<stream>` — the path of one named `$DATA` stream on `base`. Built by appending rather
+    /// than by `join`, because a stream is not a child name: `join` would escape the colon into a
+    /// separate component on some paths and quietly test nothing.
+    #[cfg(windows)]
+    fn ads_path(base: &Path, stream: &str) -> PathBuf {
+        let mut p = base.as_os_str().to_os_string();
+        p.push(":");
+        p.push(stream);
+        PathBuf::from(p)
+    }
+
+    /// CPE-1986: a named `$DATA` stream on a session file — or on a session **directory** — holds the
+    /// user's plaintext in its own extents, and a wipe must overwrite it.
+    ///
+    /// **Asserts on BYTES, never on `is_ok()`, and that is the whole point.** Before the fix the wipe
+    /// returned `Ok(())`, the default stream was genuinely zeroed, and the named stream was untouched —
+    /// `remove_dir_all` then took the name and left the plaintext extents on the volume while the lock
+    /// reported success. Every assertion that existed on this path was satisfied by not touching the
+    /// data, exactly as in CPE-1957 one layer up.
+    ///
+    /// `shred_dir_pinned` is driven directly rather than `wipe_session_dir`, for the same reason
+    /// CPE-1957's test does: the public entry point removes the tree, so there would be nothing left to
+    /// read back — and "the call returned `Ok`" is satisfied just as well by the skip as by the fix.
+    /// **Both alias policies run, production first**, because `wipe_session_dir` passes
+    /// `UnlinkAliasesInsteadOfOverwriting` and a reader might assume the `ShredEveryFile` that
+    /// `create_vault` uses; a red-proof should name the route the defect actually travelled.
+    ///
+    /// **Red-proofed on Windows 11** (`cargo test --lib`, `crates/server`, baseline **2,461 passed /
+    /// 0 failed / 14 ignored** at base `2f7b3206`, **re-measured identical at `9bfb21d7` after
+    /// rebasing, where this red-proof was also re-run and returned the same numbers**; **2,466 in the
+    /// tree this ships in** — the same baseline plus this ticket's five new tests. The figure below was
+    /// measured **in this tree** and sums to 2,466, so it is exactly what a re-run measures here; a
+    /// different number means it is stale and must be re-run, not adjusted.) Commenting out both
+    /// `shred_alternate_streams` calls in `shred_dir_pinned`
+    /// gives **2,464 passed / 2 failed**: this test, reporting the named stream still readable under
+    /// `UnlinkAliasesInsteadOfOverwriting` — that is the live bug, reproduced — and
+    /// `cpe_1986_a_stream_that_cannot_be_opened_refuses_the_wipe_rather_than_skipping_it`. The other
+    /// two of the five stay green on purpose and it is worth knowing which:
+    /// `..._an_aliased_files_streams_are_left_alone_...` asserts data **survives**, which the defect
+    /// satisfies as well as the fix does, and `..._an_unlistable_object_refuses_...` drives
+    /// `shred_alternate_streams` directly rather than through the walk. Neither speaks for the wiring;
+    /// the two that fail are the ones that do.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1986_a_named_stream_in_the_session_tree_is_overwritten_not_left_behind() {
+        use std::io::Read as _;
+
+        const MAIN: &[u8] = b"the default stream, which the wipe always overwrote";
+        const HIDDEN: &[u8] = b"the user's plaintext in a named stream, which a lock exists to destroy";
+
+        let dir = worktree_tempdir();
+
+        // The production policy FIRST — it is the route `wipe_session_dir` takes.
+        for (policy, stem) in [
+            (AliasPolicy::UnlinkAliasesInsteadOfOverwriting, "session_wipe"),
+            (AliasPolicy::ShredEveryFile, "shred_every"),
+        ] {
+            let session = dir.path().join(stem);
+            let sub = session.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+
+            let top = session.join("secret.txt");
+            std::fs::write(&top, MAIN).unwrap();
+            let top_ads = ads_path(&top, "hidden");
+            let deep = sub.join("deep.txt");
+            std::fs::write(&deep, MAIN).unwrap();
+            let deep_ads = ads_path(&deep, "Zone.Identifier");
+            let dir_ads = ads_path(&sub, "dirsecret");
+            let empty_ads = ads_path(&top, "empty");
+            for p in [&top_ads, &deep_ads, &dir_ads] {
+                if std::fs::write(p, HIDDEN).is_err() {
+                    crate::skip_notice!(
+                        "SKIPPED cpe_1986_a_named_stream_in_the_session_tree_is_overwritten_not_left_behind: \
+                         this volume cannot hold alternate data streams, so NOTHING on this run covered \
+                         the vault wipe's treatment of one."
+                    );
+                    return;
+                }
+            }
+            std::fs::write(&empty_ads, b"").unwrap();
+
+            // FIXTURE LIVENESS, and it is the defect in one line: a stream is invisible to the walk.
+            // If any of these were an ordinary file, `shred_dir_pinned` would have overwritten it for
+            // free and this test would prove nothing about streams.
+            for (root, count) in [(&session, 2_usize), (&sub, 1)] {
+                let names: Vec<_> = std::fs::read_dir(root)
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.contains(':'))
+                    .collect();
+                assert!(
+                    names.is_empty(),
+                    "fixture is inert ({policy:?}): read_dir can see {names:?} in {}, so these are \
+                     ordinary files and not streams",
+                    root.display()
+                );
+                assert_eq!(
+                    std::fs::read_dir(root).unwrap().flatten().count(),
+                    count,
+                    "fixture is unusable ({policy:?}): unexpected entries in {}",
+                    root.display()
+                );
+            }
+            assert_eq!(
+                std::fs::read(&top_ads).unwrap(),
+                HIDDEN,
+                "fixture is inert ({policy:?}): the named stream was not written"
+            );
+
+            let expected = probe_no_follow(&session).id;
+            assert!(expected.is_some(), "fixture is unusable: the session dir has no provable identity");
+            shred_dir_pinned(&session, expected, ShredScheme::Zero, policy).unwrap_or_else(|e| {
+                panic!("the wipe must overwrite an ordinary file's streams, not refuse ({policy:?}): {e}")
+            });
+
+            for (stream, what) in [
+                (&top_ads, "a file at the top of the session tree"),
+                (&deep_ads, "a file one directory down"),
+                (&dir_ads, "the subdirectory itself"),
+            ] {
+                let mut after = Vec::new();
+                crate::batch_media::open_existing_no_follow_read(stream)
+                    .expect("the stream must still be there to read back")
+                    .read_to_end(&mut after)
+                    .unwrap();
+                assert_ne!(
+                    after.as_slice(),
+                    HIDDEN,
+                    "HARM: the wipe left the user's plaintext on the volume under {policy:?} — a named \
+                     data stream on {what} was never written, and `remove_dir_all` would have unlinked \
+                     the name with the stream's extents intact while the lock reported success"
+                );
+                assert!(
+                    after.iter().all(|&b| b == 0),
+                    "the zero scheme must have written zeros over the whole stream on {what} \
+                     ({policy:?}), not merely changed it"
+                );
+                assert_eq!(
+                    after.len(),
+                    HIDDEN.len(),
+                    "the overwrite must cover the STREAM's length on {what} ({policy:?}) — sizing it \
+                     from the default stream would leave a tail of plaintext"
+                );
+            }
+
+            // The control that keeps this from being a test about streams only: the default stream is
+            // still overwritten, and a zero-length stream is neither a failure nor a refusal.
+            let mut main_after = Vec::new();
+            crate::batch_media::open_existing_no_follow_read(&top)
+                .unwrap()
+                .read_to_end(&mut main_after)
+                .unwrap();
+            assert!(
+                main_after.iter().all(|&b| b == 0) && main_after.len() == MAIN.len(),
+                "the default stream must still be zeroed under {policy:?}"
+            );
+            assert_eq!(
+                std::fs::metadata(&empty_ads).unwrap().len(),
+                0,
+                "a zero-length stream must survive the wipe as an ordinary no-op ({policy:?})"
+            );
+        }
+    }
+
+    /// CPE-1986: an **aliased** file's streams are left alone exactly like its default stream is.
+    ///
+    /// The session wipe's whole alias rule (SEC-847 round 3) is that a file with a second name is not
+    /// ours to overwrite — the tree removal takes *our* name, which destroys nothing. A named stream
+    /// lives in the same file record as the default one and is reachable through every name the record
+    /// has, so writing it would destroy the other name's data just as surely. This pins that the
+    /// disposition is asked **before** the streams are enumerated, not after.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1986_an_aliased_files_streams_are_left_alone_like_its_default_stream() {
+        use std::io::Read as _;
+
+        const HIDDEN: &[u8] = b"data reachable through a name that is not the session's";
+
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("Documents");
+        std::fs::create_dir_all(&victim).unwrap();
+        let outside = victim.join("keep.txt");
+        std::fs::write(&outside, b"the other name's default stream").unwrap();
+        let outside_ads = ads_path(&outside, "hidden");
+        if std::fs::write(&outside_ads, HIDDEN).is_err() {
+            crate::skip_notice!(
+                "SKIPPED cpe_1986_an_aliased_files_streams_are_left_alone_like_its_default_stream: \
+                 this volume cannot hold alternate data streams."
+            );
+            return;
+        }
+
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        let alias = session.join("loot.txt");
+        if crate::links::create_hard_link(&outside.to_string_lossy(), &alias.to_string_lossy()).is_err()
+        {
+            crate::skip_notice!(
+                "SKIPPED cpe_1986_an_aliased_files_streams_are_left_alone_like_its_default_stream: \
+                 this volume cannot create a hard link."
+            );
+            return;
+        }
+
+        let expected = probe_no_follow(&session).id;
+        shred_dir_pinned(
+            &session,
+            expected,
+            ShredScheme::Zero,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        )
+        .expect("an alias is skipped, not refused — the wipe walks past it");
+
+        let mut after = Vec::new();
+        crate::batch_media::open_existing_no_follow_read(&outside_ads)
+            .expect("the other name's stream must still be there")
+            .read_to_end(&mut after)
+            .unwrap();
+        assert_eq!(
+            after.as_slice(),
+            HIDDEN,
+            "HARM: the wipe wrote through an alias's named stream — the second name's data is gone, and \
+             an alias is exactly what this policy exists never to overwrite"
+        );
+    }
+
+    /// CPE-1986: a stream that cannot be opened for writing **refuses the whole wipe**, and it refuses
+    /// before anything is unlinked.
+    ///
+    /// This is the decision the ticket asked to be taken deliberately rather than by default. A refusal
+    /// costs retained plaintext — but it is plaintext still sitting in the session directory, where the
+    /// user can see it and retry the lock, which is strictly better than plaintext in extents that no
+    /// longer have a name. It is also **the same thing a locked default stream already does**, so the
+    /// two halves of one file cannot disagree about what "busy" means.
+    ///
+    /// The exclusive handle is taken on the STREAM, and the assertion names the stream in the message,
+    /// so this cannot pass on a refusal that came from the default stream instead.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1986_a_stream_that_cannot_be_opened_refuses_the_wipe_rather_than_skipping_it() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let dir = worktree_tempdir();
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        let f = session.join("secret.txt");
+        std::fs::write(&f, b"the default stream").unwrap();
+        let ads = ads_path(&f, "locked");
+        if std::fs::write(&ads, b"the user's plaintext").is_err() {
+            crate::skip_notice!(
+                "SKIPPED cpe_1986_a_stream_that_cannot_be_opened_refuses_the_wipe_rather_than_skipping_it: \
+                 this volume cannot hold alternate data streams."
+            );
+            return;
+        }
+
+        // share_mode(0) — no sharing at all, the shape another process holding the stream produces.
+        let Ok(held) = std::fs::OpenOptions::new().read(true).share_mode(0).open(&ads) else {
+            crate::skip_notice!(
+                "SKIPPED cpe_1986_a_stream_that_cannot_be_opened_refuses_the_wipe_rather_than_skipping_it: \
+                 the stream could not be opened exclusively."
+            );
+            return;
+        };
+
+        let expected = probe_no_follow(&session).id;
+        let result = shred_dir_pinned(
+            &session,
+            expected,
+            ShredScheme::Zero,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        );
+        drop(held);
+        match result {
+            Err(VaultError::Format(msg)) => assert!(
+                msg.contains(":locked") && msg.contains("cannot open it for overwriting"),
+                "the refusal must name the STREAM it could not write and say that the OPEN is what \
+                 failed — otherwise this passes on a refusal that came from the default stream, or \
+                 from some other guard entirely; got: {msg}"
+            ),
+            other => panic!(
+                "a stream that cannot be overwritten must refuse the wipe — skipping it is the defect \
+                 CPE-1986 exists to close. Got {other:?}"
+            ),
+        }
+        assert!(session.exists(), "a refusal must happen before anything is unlinked");
+    }
+
+    /// CPE-1986: the two alias trust levels genuinely differ when the streams cannot be **listed**, and
+    /// both arms are pinned here because neither is reachable from an ordinary tree.
+    ///
+    /// `FindFirstStreamW` does not fail on a real file on a real NTFS volume, so this drives
+    /// `shred_alternate_streams` directly with a name that is not there — the same failure shape a
+    /// vanished or unlistable object produces. The session tree is the app's own directory on a local
+    /// volume, so a failure there is anomalous and refused; `create_vault`'s folder is the user's own
+    /// pick and may sit on a volume with no stream support at all, where refusing would break vault
+    /// creation against an attacker its threat model says is absent. Same split, same reason, as
+    /// [`same_object_or_refuse`]'s `Unknown` arm.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1986_an_unlistable_object_refuses_the_session_wipe_and_is_waved_through_by_create_vault() {
+        let dir = worktree_tempdir();
+        let missing = dir.path().join("not-there.txt");
+        let probe = EntryProbe {
+            id: probe_no_follow(dir.path()).id,
+            links: HardLinks::One,
+            is_dir: false,
+            is_link: false,
+        };
+
+        match shred_alternate_streams(
+            &missing,
+            &probe,
+            ShredScheme::Zero,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        ) {
+            Err(VaultError::Format(msg)) => assert!(
+                msg.contains("alternate data streams could not be listed"),
+                "the refusal must say what it could not establish, got: {msg}"
+            ),
+            other => panic!(
+                "the session wipe must refuse an object whose streams cannot be listed, got {other:?}"
+            ),
+        }
+
+        shred_alternate_streams(&missing, &probe, ShredScheme::Zero, AliasPolicy::ShredEveryFile)
+            .expect(
+                "create_vault's shred-original must not break on a volume that cannot report streams — \
+                 the user picked that folder and its threat model has no attacker in it",
+            );
+    }
+
+    /// The pure stream-name rule, pinned by a table rather than by review — the same treatment
+    /// [`wipe_disposition`] gets, and for the same reason: the decision is the security-relevant part.
+    ///
+    /// The `$DATA` rows are the safety valve described at [`is_shreddable_alternate_stream`], which no
+    /// measurement taken for CPE-1986 reached: `FindStreamInfoStandard` reported only `$DATA` streams
+    /// here, for an EFS-encrypted file and for one carrying a GUID reparse point alike. A green run of
+    /// this table is evidence about the **rule**, not about what Windows hands it.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1986_only_a_named_data_stream_is_shreddable() {
+        for (name, want, why) in [
+            (":hidden:$DATA", true, "an ordinary named data stream"),
+            (":Zone.Identifier:$DATA", true, "the mark-of-the-web stream a browser writes"),
+            (":b b:$DATA", true, "a stream name with a space in it"),
+            (":x:$data", true, "the type compared case-insensitively"),
+            ("::$DATA", false, "the default stream, already overwritten through the plain path"),
+            (":$EFS:$LOGGED_UTILITY_STREAM", false, "EFS key material, not a data stream"),
+            (":$I30:$INDEX_ALLOCATION", false, "a directory index, not a data stream"),
+            (":$DATA", false, "no type field at all"),
+            ("hidden:$DATA", false, "no leading colon, so not a stream name at all"),
+            ("", false, "empty"),
+        ] {
+            assert_eq!(is_shreddable_alternate_stream(name), want, "{name:?} — {why}");
+        }
     }
 
     // ---- CPE-1669 / CPE-1670: create_vault writes the blob the way the re-seal does -----------------
