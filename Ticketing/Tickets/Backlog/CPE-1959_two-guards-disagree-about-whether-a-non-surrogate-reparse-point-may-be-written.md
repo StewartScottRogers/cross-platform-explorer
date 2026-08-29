@@ -106,12 +106,21 @@ identity reads) and `vault_manager.rs:1930` post-date that count. Of the nine, e
 | site | position on this class | verdict |
 |---|---|---|
 | `batch_media::open_output_verified` | was bare bit → **now `reparse_name_surrogate`** | **changed here** |
-| `fsutil::copy_file_onto_destination_handle` (2252) | narrow since CPE-1896 | fine; note added that the split is closed |
+| `fsutil::claim_destination_handle` (the guard at `fsutil.rs:2258`, reached from `copy_file_onto_destination_handle` at `:1568`) | narrow since CPE-1896 | fine; note added that the split is closed |
 | `fsutil::overwrite_confirmed_no_follow` (3832) | narrow since CPE-1929 | fine; **its docblock claimed the opposite** — fixed |
-| `vault_manager::overwrite_pinned_file` (1942) | bare bit; **CPE-1957 / PR #1101 narrows it** | not touched — that PR owns it |
+| `vault_manager::overwrite_pinned_file` (1942) | bare bit **at this head**; CPE-1957 / PR #1101 narrows it at **both** its checks (the by-path `probe.is_link` in `shred_dir_pinned` and the handle check) | not touched — that PR owns it |
 | `backup.rs:296`, `fsutil.rs:2752`, `3103`, `4237`, `4335` | use `.id`/`links` only | no position; nothing to do |
 
 A fifth consumer of the rule, `open_beneath::sys::name_surrogate_at`, is already narrow (CPE-1938).
+
+**The `vault_manager` row is order-dependent and is stated as of this branch's head.** It becomes stale
+the moment PR #1101 lands, which is the intended merge order — so no sentence in the code says
+"`batch_media` was the *last* site on the bare bit". The site comments say what is true of their own two
+sites unconditionally and leave the crate-wide count to this table (CPE-1932).
+
+**A naming correction from the review:** the narrow guard reached from `copy_file_onto_destination_handle`
+lives in `claim_destination_handle`. Round 1 named the caller, so a reader grepping the named function
+would have found no `is_reparse_point` at all.
 
 **A false provenance claim found and fixed (CPE-1933).** `overwrite_confirmed_no_follow`'s docblock said
 *"This site refuses a reparse point on the **bare bit**"*. It has narrowed since CPE-1929 and a green
@@ -119,27 +128,51 @@ test pins that it does. Prose about a check thirty lines away, with the suite re
 vouched for it.
 
 **Sabotages — three, all red, Windows 11 / NTFS, `cargo test -p cpe-server --lib`.** Baseline
-**2,458 passed / 2 failed / 14 ignored** (the two are `ticket_board::…nearest_project_root…` and
-`archive::…cpe1774…`, environmental to running from a worktree nested in the repo, red before and after);
-the count did not move because this ticket replaced one test with one test. Disable → **2,457 / 3**;
-predicate forced to lie → **2,457 / 3**; un-narrow to the bare bit → **2,457 / 3**. The extra failure is
-the new test each time.
+**2,460 passed / 0 failed / 14 ignored**; each sabotage **2,459 / 1**, the failure being the new test
+every time. Disable; predicate forced to lie; un-narrow to the bare bit. The count does not move between
+baseline and merged state because this ticket replaced one test with one test.
+
+**`TMP` must be on the platform default to reproduce those numbers** — and round 1 of this log got the
+reason wrong, which mattered. It reported 2,458 / 2 and attributed the two failures to "running from a
+worktree nested inside the repo". Re-measured: the same nested worktree with a normal `TMP` gives
+2,460 / 0. The cause is `TMP`'s **location** — inside the repo tree,
+`ticket_board::…nearest_project_root…` finds the repo's own `Ticketing/` above the tempdir and
+`archive::…cpe1774…` hits a path-length limit. A reader reproducing from a nested worktree with a default
+`TMP` would have got a baseline the comment did not predict and no way to tell whether the deltas were
+stale.
 
 **And a correction worth more than the result.** Round 1 built the surrogate half of the two-halves
 fixture from a GUID surrogate tag, asserted the handle refusal's `"stands in for another name"` wording,
 and passed — *and went on passing with the handle refusal disabled*, i.e. a green sabotage that read as
 safety. `classify_reparse_tag` sends an **unrecognised** surrogate to the path-side `WHY_SURROGATE_TAG`
 before the open, and that constant contains the same phrase. So the one-bit-apart GUID pair cannot reach
-the narrowed handle check at all. The test now has a **third leg** — a real symlink, the tag
-`classify_reparse_tag` passes through as `Probe::Link` — asserting on `"(a symlink, a junction, or a
-mount point)"`, which belongs to the handle refusal alone. That leg is what makes the disable sabotage
-red.
+the narrowed handle check at all.
+
+**Four legs, and the last two make different claims.**
+
+- **Half 3** — a real symlink, the tag `classify_reparse_tag` passes through as `Probe::Link`: the one
+  fixture that reaches the handle check unaided. Asserts on `"(a symlink, a junction, or a mount point)"`,
+  which belongs to the handle refusal alone. This is what makes the disable sabotage red.
+- **Half 4** — added in round 2 rather than documenting the remainder as a gap. Half 3 only proves the
+  check fires for a *recognised* tag; every other surrogate is answered by `WHY_SURROGATE_TAG` first, so
+  the handle check's coverage of the **non-symlink surrogate class** was still shadowed in CPE-1929's
+  sense. The crate already owned the seam: `between_containment_and_open` now also plants a GUID tag,
+  armed by `surrogate_between_containment_and_open_for_test`, in the window *after* the path probe has
+  passed the name as an ordinary file — where the handle check is the **sole** decider. The seam records
+  whether the plant took, so "the guard refused" cannot be confused with "the fixture never armed"
+  (CPE-1923).
 
 **The test asserts filesystem state, never `Ok`** (CPE-1957's lesson). Half 1 drives the whole write and
 reads the bytes back, plus asserts the reparse bit is **gone** — which is the staged replace, and the
 direct evidence for reason 1 above. Half 2 asserts the refused object still carries its reparse bit and
 its `$DATA` length (it cannot be `fs::read` — a driverless surrogate answers `ERROR_CANT_ACCESS_FILE`
-(1920), measured). Half 3 asserts the link is still a link.
+(1920), measured). Half 3 asserts the link is still a link; half 4 that the planted tag survives.
+
+**Reason 1 is structural on both halves, not just "the handle isn't used"** (PR #1103 review, recorded at
+the site). `read_alternate_data_streams` filters to `BACKUP_ALTERNATE_DATA` and explicitly skips
+`BACKUP_REPARSE_DATA`; `carried_attribute_mask()` is `HIDDEN|SYSTEM|ARCHIVE|NOT_CONTENT_INDEXED` with no
+`REPARSE_POINT`. So the staged replacement **cannot come back as a reparse point**, and a filter driver
+behind a non-surrogate tag (WCI, ProjFS) cannot act — the bytes never reach it.
 
 **Also corrected, because the decision inverts them:** `batch_execute::execute_one`'s step 4 still said
 "Truncate + write **through the handle from step 2**", and its CPE-1725 note still said the bytes go

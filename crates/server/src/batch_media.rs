@@ -2067,6 +2067,31 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+// **CPE-1959's use of the same window, for the other shadowed guard.** What GUID reparse tag to plant
+// on the output between `classify_output_containment` and `open_no_follow`, as `(at, tag)`. (A plain
+// `//` comment, for the reason the seam above gives: rustdoc does not document a macro invocation, and
+// `-D unused-doc-comments` is right to say so — measured here as a real warning before it was demoted.)
+//
+// The narrowed reparse refusal below is reachable from only ONE fixture class without this — a real
+// symlink — because `classify_reparse_tag` answers `WHY_SURROGATE_TAG` by path, before the open, for
+// every *other* surrogate tag. So for the non-symlink surrogate class the handle check was still
+// shadowed exactly the way CPE-1929 describes, and the honest note saying so was the best that could be
+// done at the time. It is not the best that can be done: this window is the one place where the path
+// probe has already answered and the handle check is the **sole** decider, and the crate already owned
+// a seam into it. Arming this plants the tag on an output that was an ordinary file when containment
+// looked at it, which is the only way to hand the handle check a non-symlink surrogate.
+//
+// Same one-shot, take-don't-read discipline as the hard-link seam above, and the same reason.
+#[cfg(test)]
+thread_local! {
+    static SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN: std::cell::RefCell<Option<(String, u32)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Whether the plant actually took. `make_guid_reparse_point` can decline on a volume that will not
+    /// hold one, and a test that cannot tell "the guard refused" from "the fixture never armed" is the
+    /// CPE-1923 trap — so the verdict is recorded here for the test to read rather than inferred.
+    static SURROGATE_PLANTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Arm the seam above for exactly one call. Taken rather than read, so an armed test cannot leak into
 /// the next one on the same thread even if it panics before the call it armed.
 #[cfg(test)]
@@ -2075,12 +2100,31 @@ pub(crate) fn link_between_containment_and_open_for_test(victim: &str, at: &str)
         .with(|c| *c.borrow_mut() = Some((victim.to_string(), at.to_string())));
 }
 
+/// Arm the reparse-tag seam for exactly one call (CPE-1959). Clears the previous verdict so a stale
+/// `true` from an earlier test cannot be read as this one's.
+#[cfg(test)]
+pub(crate) fn surrogate_between_containment_and_open_for_test(at: &str, tag: u32) {
+    SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| *c.borrow_mut() = Some((at.to_string(), tag)));
+    SURROGATE_PLANTED.with(|c| c.set(false));
+}
+
+/// Did the last armed reparse-tag plant take? See [`SURROGATE_PLANTED`].
+#[cfg(test)]
+pub(crate) fn surrogate_was_planted_for_test() -> bool {
+    SURROGATE_PLANTED.with(std::cell::Cell::get)
+}
+
 #[cfg(test)]
 fn between_containment_and_open() {
     let armed = LINK_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| c.borrow_mut().take());
     if let Some((victim, at)) = armed {
         let _ = std::fs::remove_file(&at);
         let _ = crate::links::create_hard_link(&victim, &at);
+    }
+    let armed_tag = SURROGATE_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| c.borrow_mut().take());
+    if let Some((at, tag)) = armed_tag {
+        let ok = crate::fsutil::make_guid_reparse_point(std::path::Path::new(&at), tag, false);
+        SURROGATE_PLANTED.with(|c| c.set(ok));
     }
 }
 
@@ -2140,16 +2184,16 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // substituted after the open, whereas the name can be swapped either way in the window before a
     // `symlink_metadata`. Covered now by
     // `cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written`,
-    // and the same sabotage on the merged state is **2,457 passed / 3 failed** against a 2,458 / 2
-    // baseline — that test is the red-proof; the numbers and the two environmental failures are broken
-    // down at the refusal itself. (It replaced CPE-1929's
+    // and the same sabotage on the merged state is **2,459 passed / 1 failed** against a 2,460 / 0
+    // baseline — that test is the red-proof; all three sabotages and the `TMP` caveat that reproduces
+    // them are at the refusal itself. (It replaced CPE-1929's
     // `..._a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`, which pinned the
     // opposite verdict; see the doctrine section below.)
     //
     // # The reparse-point doctrine split is RESOLVED here, in `fsutil`'s direction (CPE-1959)
     //
     // Until now this refusal read the **bare** `FILE_ATTRIBUTE_REPARSE_POINT` bit while
-    // `fsutil::overwrite_confirmed_no_follow` and `fsutil::copy_file_onto_destination_handle` narrowed to
+    // `fsutil::overwrite_confirmed_no_follow` and `fsutil::claim_destination_handle` narrowed to
     // `reparse_name_surrogate`, so the crate wrote a dehydrated cloud placeholder at one site and refused
     // it at another. That was non-regressive but it was two doctrines about one input class. It now asks
     // the narrow question, and **calling `reparse_name_surrogate` IS the derivation** — that function is
@@ -2174,6 +2218,16 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     //    `FILE_OPEN_REPARSE_POINT` handle — `Ok(16)` onto an object then unopenable by path, the reparse
     //    bit surviving `set_len(0)`, `landed_inside` diverging — are unreachable on a staged write. This
     //    site's checks were the last difference between the two, for this input class.
+    //
+    //    **And the result cannot come back a reparse point either, which is the stronger half and is
+    //    structural rather than observed** (PR #1103 review). The staged sibling is a fresh `create_new`
+    //    file; the only things carried onto it from the destination are `HandleCarryover`'s, and both
+    //    relevant carriers exclude the tag by construction — `read_alternate_data_streams` filters to
+    //    `BACKUP_ALTERNATE_DATA` and explicitly skips `BACKUP_REPARSE_DATA`, and
+    //    `carried_attribute_mask()` is `HIDDEN|SYSTEM|ARCHIVE|NOT_CONTENT_INDEXED` with no
+    //    `REPARSE_POINT` in it. So a filter driver behind a non-surrogate tag (WCI, ProjFS) cannot act
+    //    on this write: the bytes never reach it, and nothing hands the tag to the file that replaces
+    //    the name. Half 1 of the test measures exactly that — the reparse bit is **gone** afterwards.
     // 2. **The cost of over-refusing is not one item, and the code says so.** OneDrive dehydrates exactly
     //    the files it has already synced, which on a re-run are exactly this batch's own previous
     //    outputs, so the refusal is systematic over the selection rather than incidental — CPE-1896's
@@ -2197,11 +2251,13 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     //    attacker-blocking one: its only marginal effect was to let anyone who can write to the output
     //    folder deny the user their batch item.
     //
-    // CPE-1957 answered the same question at `vault_manager`'s wipe and narrowed there too, but declined
-    // to let that settle this — rightly, because over-refusing at a wipe leaves plaintext on the volume,
-    // which is the opposite cost function from a skip. This site is decided on its own three reasons
-    // above, not on that one. The remaining per-site verdicts are enumerated in the ticket rather than
-    // counted here (CPE-1932: a number written here would be a second, unguarded copy).
+    // CPE-1957 answered the same question at `vault_manager`'s wipe and narrowed there **at both of its
+    // checks — the by-path `probe.is_link` in `shred_dir_pinned` and the handle check in
+    // `overwrite_pinned_file`** — but declined to let that settle this, rightly, because over-refusing at
+    // a wipe leaves plaintext on the volume, which is the opposite cost function from a skip. This site
+    // is decided on its own three reasons above, not on that one. The remaining per-site verdicts are
+    // enumerated in the ticket rather than counted here (CPE-1932: a number written here would be a
+    // second, unguarded copy).
     let facts = match handle_facts(&verified.file) {
         Some(f) if !f.id.is_degenerate() => f,
         _ => {
@@ -2213,24 +2269,31 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
         }
     };
     // **Three sabotages, all run on this narrowed predicate, Windows 11 / NTFS, `cargo test -p
-    // cpe-server --lib`.** Baseline on this machine is **2,458 passed / 2 failed / 14 ignored** — the two
-    // failures are `ticket_board::…nearest_project_root_walks_up_to_the_ticketing_folder` and
-    // `archive::…cpe1774…`, both environmental to running from a worktree nested inside the repo, present
-    // before this change and after it. The count did not move: this ticket replaced one test with one
-    // test.
+    // cpe-server --lib`.** Baseline **2,460 passed / 0 failed / 14 ignored**; each sabotage is
+    // **2,459 / 1**, the one failure being `cpe_1959_…` every time. The count does not move between
+    // baseline and merged state because this ticket replaced one test with one test.
     //
-    // - **Disabled** (`if false && …`): **2,457 / 3**. Red.
+    // - **Disabled** (`if false && …`): red.
     // - **Predicate forced to lie** (`reparse_name_surrogate` replaced by a `Some(false)` that still
-    //   calls it, so the call is made and the answer is a lie rather than absent): **2,457 / 3**. Red.
-    // - **Un-narrowed back to the bare bit** (`if facts.is_reparse_point`): **2,457 / 3**. Red. This
-    //   third one is the doctrine measurement rather than the reachability one — it is what makes "a
-    //   placeholder is written here now" a measured fact and not an assertion.
+    //   calls it, so the call is made and the answer is a lie rather than absent): red.
+    // - **Un-narrowed back to the bare bit** (`if facts.is_reparse_point`): red. This third one is the
+    //   doctrine measurement rather than the reachability one — it is what makes "a placeholder is
+    //   written here now" a measured fact and not an assertion.
     //
-    // The extra failure is `cpe_1959_…` in every case. Two green sabotages would have meant this refusal
-    // was shadowed (CPE-1929); none of the three is green. **Getting there took a correction worth
-    // recording**: round 1's fixture for the surrogate half was a GUID surrogate tag, and that is refused
-    // by `WHY_SURROGATE_TAG` at containment *before the open*, so the disable sabotage came back green at
-    // 2,458 / 2 and read as safety. See the test's own doc for the fixture that actually reaches here.
+    // **`TMP` must be on the platform default to reproduce those numbers, and this is not a footnote**
+    // (PR #1103 review). Round 1 of this comment reported 2,458 / 2 and blamed "running from a worktree
+    // nested inside the repo". That was measured false: the same nested worktree with a normal `TMP`
+    // gives 2,460 / 0. The cause is `TMP`'s **location** — placing it inside the repo tree makes
+    // `ticket_board::…nearest_project_root_walks_up_to_the_ticketing_folder` find the repo's own
+    // `Ticketing/` above the tempdir, and pushes `archive::…cpe1774…` past a path-length limit. A reader
+    // reproducing from a nested worktree with a default `TMP` would have got a baseline this comment did
+    // not predict, and no way to tell whether the deltas above were stale.
+    //
+    // Two green sabotages would have meant this refusal was shadowed (CPE-1929); none of the three is
+    // green. **Getting there took a correction worth recording**: round 1's fixture for the surrogate
+    // half was a GUID surrogate tag, which is refused by `WHY_SURROGATE_TAG` at containment *before the
+    // open*, so the disable sabotage came back green and read as safety. The test's own doc has the two
+    // fixtures that reach here and what each one proves.
     if facts.is_reparse_point && reparse_name_surrogate(&verified.file).unwrap_or(true) {
         verified.abandon(output);
         return Err(format!(
@@ -5026,15 +5089,26 @@ mod tests {
     /// arrangement that lets the test claim the **tag** is what decides rather than some other
     /// difference between the fixtures.
     ///
-    /// **There is a half 3, and the reason it exists is a measurement, not symmetry.** Round 1 of this
-    /// test used the surrogate GUID half to pin the handle check and it passed — *and went on passing
-    /// with the handle refusal disabled outright*, the CPE-1929 tell. An unrecognised surrogate tag is
-    /// classified `ReparseKind::UnknownSurrogate` by the by-path `classify_reparse_tag` and refused as
-    /// `WHY_SURROGATE_TAG` **before the open**, and that constant's own wording contains the phrase the
-    /// assertion was reading. So the GUID pair cannot reach the narrowed handle check at all; the only
-    /// fixture that can is a tag `classify_reparse_tag` recognises and passes through as
-    /// `Probe::Link` — a real symlink. Half 3 is that fixture, and it is what makes the disable
-    /// sabotage red.
+    /// **There are two more halves, and the reason for each is a measurement, not symmetry.** Round 1
+    /// of this test used the surrogate GUID half to pin the handle check and it passed — *and went on
+    /// passing with the handle refusal disabled outright*, the CPE-1929 tell. An unrecognised surrogate
+    /// tag is classified `ReparseKind::UnknownSurrogate` by the by-path `classify_reparse_tag` and
+    /// refused as `WHY_SURROGATE_TAG` **before the open**, and that constant's own wording contains the
+    /// phrase the assertion was reading. So the GUID pair cannot reach the narrowed handle check at
+    /// all.
+    ///
+    /// - **Half 3** is the one fixture that reaches it unaided: a tag `classify_reparse_tag`
+    ///   recognises and passes through as `Probe::Link` — a real symlink. It is what makes the disable
+    ///   sabotage red.
+    /// - **Half 4** covers what half 3 cannot. Half 3 only proves the check fires for a *recognised*
+    ///   tag; every other surrogate is still answered by `WHY_SURROGATE_TAG` first, so the handle
+    ///   check's coverage of the **non-symlink surrogate class** was shadowed in CPE-1929's exact sense.
+    ///   Round 2 stopped documenting that gap and closed it with the seam the crate already owned:
+    ///   `surrogate_between_containment_and_open_for_test` plants the tag in the window *after* the path
+    ///   probe has passed the name as an ordinary file, where the handle check is the **sole** decider.
+    ///
+    /// Two legs, two different claims: half 3 says the guard fires, half 4 says it fires for the class
+    /// nothing else can see.
     ///
     /// **Every verdict is read off the filesystem, never off a `Result`** — CPE-1957's lesson is that a
     /// silent skip returns `Ok` too, and here the mirror-image trap is real: `open_output_verified`
@@ -5194,6 +5268,56 @@ mod tests {
                 std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink(),
                 "a refused link must still be a link — a staged commit replacing it with an ordinary \
                  file is exactly what this refusal exists to prevent"
+            );
+        }
+
+        // --- Half 4: the NON-SYMLINK surrogate class, in the only window where the handle check is
+        //             the sole decider (CPE-1959 round 2). ---
+        //
+        // Half 3 leaves a real gap and it is worth naming precisely: it proves the handle check fires,
+        // but only for a tag `classify_reparse_tag` recognises. For every *other* surrogate tag the
+        // by-path `WHY_SURROGATE_TAG` verdict answers first (half 2 measured that), so the handle
+        // check's coverage of that class was still shadowed in CPE-1929's exact sense — safe, and
+        // unverifiable, at the same time.
+        //
+        // `between_containment_and_open` is the window where that stops being true: the path probe has
+        // already run and seen an **ordinary file**, and nothing else between here and the refusal can
+        // answer. Planting the surrogate tag there hands the handle check the one input class it could
+        // not otherwise be given. Same seam, same reason, as
+        // `cpe_1961_a_link_planted_after_the_path_check_is_still_caught_by_the_handle_census`.
+        let planted_late = selected.join("out4.png");
+        let late_bytes = b"ordinary when containment looked".to_vec();
+        std::fs::write(&planted_late, &late_bytes).unwrap();
+        let planted_late_s = planted_late.to_string_lossy().to_string();
+        surrogate_between_containment_and_open_for_test(&planted_late_s, SURROGATE_FILE_TAG);
+        let late = open_output_verified(&input.to_string_lossy(), &planted_late_s);
+        if surrogate_was_planted_for_test() {
+            let err = late.err().expect(
+                "a surrogate tag planted after the path check must still be refused — on the handle, \
+                 which is the only thing left that can see it",
+            );
+            assert!(
+                err.contains("(a symlink, a junction, or a mount point)"),
+                "only the HANDLE-side tag refusal can have fired here: containment already passed this \
+                 name as an ordinary file, so neither WHY_SURROGATE_TAG nor the symlink_metadata check \
+                 below can be what answered: {err}"
+            );
+            let after_late = std::fs::symlink_metadata(&planted_late).unwrap();
+            assert!(
+                after_late.file_attributes() & REPARSE_ATTR != 0,
+                "the refused output must still carry the tag that was planted on it"
+            );
+            assert_eq!(
+                after_late.len(),
+                late_bytes.len() as u64,
+                "a refused output's bytes must be untouched"
+            );
+        } else {
+            crate::skip_notice!(
+                "SKIPPING half 4 of \
+                 cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written: \
+                 could not plant a surrogate GUID reparse point at the seam. NOTHING on this run covered \
+                 the handle check against a NON-SYMLINK surrogate."
             );
         }
 
