@@ -54,3 +54,9 @@ for host-keys. HARD constraint: `fs_route::require_local` keeps local paths byte
 CPE-1511's own Work Log says this plainly - *"preview/read and transfer command-layer wiring is a later slice on this same epic"* - **and no such ticket was ever filed.**
 
 Cost: roughly one L slice. The same shape as the `list_dir` remote arm, repeated for the read and transfer commands, plus queue wiring for progress and cancel.
+
+**Confirmed by a second sweep:** `remote_read` / `remote_stat` appear **only** inside
+`crates/vfs/src/connect.rs` - their definitions and their own unit tests - with no caller anywhere in
+`src-tauri` or `crates`. And the code says so itself: the comment at `connect.rs:785` names
+*"CPE-1499's still-to-come remote-open wiring"*. **The gap is self-documenting at the site**, so
+whoever picks this up will find the seam rather than have to rediscover it.
