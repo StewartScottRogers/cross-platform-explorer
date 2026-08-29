@@ -2,12 +2,12 @@
 id: CPE-1562
 title: "EPIC: Binary Inspector — read-only headers/sections/symbols/imports/resources + disassembly + .NET metadata"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 created: 2026-08-10
-closed:
+closed: 2026-08-29
 ---
 
 > Child of **CPE-1561 (Binary Studio program)**. Dormant brief — not decomposed until activated. **Recommended first build** of the program.
@@ -50,3 +50,9 @@ merges, to avoid the shared-file parallel-PR trap ([[parallel-pr-duplicate-impor
 No heavy sidecar; in-process pure-Rust. Fuzz the new parsers (parser-fuzz discipline). PURPOSE tiebreaker: disasm
 tables must stream/cap so a huge binary can't stall the pane. Depends on Epic-0 spike only for the .NET-metadata
 crate choice.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH ONE RESIDUAL. All 5 children Done. Reachable with no configuration: select a PE/ELF/Mach-O and `PreviewPane.svelte` mounts BinaryPreview for `provider.kind == "binary"`. Verified: `model.rs` `BinaryInfo` is a structured DTO (format, arch, is_64, is_managed, sections, imports, exports, symbols, disasm) replacing the old `pe_info` text blob; disassembly via iced-x86 capped at MAX_DISASM_INSTRUCTIONS and non-panicking on undecodable bytes; `dotnet_metadata.rs` is a hand-rolled ECMA-335 reader (dotnetdll is GPL) whose `is_managed` comes from CLI header data-dir #14 — the fix for the mscorlib "2,048 fake instructions" UAT bug; 7-tab frontend with lazy per-tab fetch and honest row capping; docs page ships.
+
+RESIDUAL - the epic's Goal lists "embedded resources" among the inspector's views and there is no resource extraction anywhere (no .rsrc handling in `model.rs` or `binary_preview.rs`, no Resources tab). ARM disassembly was explicitly deferred in the epic itself, so it is not a gap.

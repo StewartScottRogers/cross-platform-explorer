@@ -2,12 +2,12 @@
 id: CPE-1000
 title: "EPIC: True file-type detection & extension-mismatch flagging"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
 created: 2026-07-24
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed + activated 2026-07-24** (sprint, Foreman). First slice = the **pure magic-byte type detector +
@@ -52,3 +52,7 @@ mismatches. Pure byte-prefix matching: no AI, no new deps, delete-testable.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** True-type column + mismatch badge/review UI unbuilt (only pure detector).
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit). All 10 children Done. Reachable with no configuration on three surfaces: the true-type / mismatch metadata columns, Properties inspection rows, and Tools menu / palette -> Find type mismatches. Verified: `file_type.rs` `detect_type`/`mismatch` (extended by CPE-1341/1342/1344 for ftyp brands, OLE2/CFBF, tar header cap); `column_extract.rs` `MetaColumn::{TrueType,TypeMismatch}` applying to all files; FileHealthDialog mismatch tab with a per-row rename-to-correct-extension fix-it (CPE-1322); tree sweep streams (CPE-1285/1294).

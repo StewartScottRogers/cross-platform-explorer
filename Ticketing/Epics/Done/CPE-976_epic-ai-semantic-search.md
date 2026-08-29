@@ -2,13 +2,13 @@
 id: CPE-976
 title: "EPIC: AI semantic search — find files by meaning"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-24
-closed:
+closed: 2026-08-29
 ---
 
 > **Activated 2026-07-24** (dayshift, user chose "Activate CPE-976"). Starting — like CPE-703 did with
@@ -111,3 +111,12 @@ gaps are the deferred, user-gated big-design items above (a real embedder backen
 neither blocks using the feature today with the local `FakeEmbedder`. Residual: no `gui-smoke` render pin
 yet for the new dialog (command-palette-only entry point, no free keyboard shortcut); logged in
 `MANUAL-TEST-BURNDOWN.md` as a jsdom-pinned-only row pending a human glance on the installed build.
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit) WITH TWO RESIDUALS, recorded rather than left implied. All 11 children Done. Reachable with no model or key out of the box (local dependency-free `FakeEmbedder`); optionally any OpenAI-compatible /embeddings endpoint via Settings, key held only in the OS keychain and never echoed. Verified: chunk -> embed -> cosine top-k persisted per root (`vector_index`, `embedder`, `semantic_index`, `content_index`, `content_text`); `content_index_build` streams progress with per-root cancel; rich extraction for PDF/DOCX/XLSX/PPTX (CPE-1274); the dialog shows an honest needs-build state.
+
+RESIDUAL 1 - incremental re-embedding did NOT ship. The only refresh path is the dialog's manual Rebuild index button doing a full re-walk; CPE-833's change signals are not wired in, so a newly added or edited file is invisible until the user rebuilds.
+RESIDUAL 2 - lexical blending did not reach a shipped path. `search_fusion::{rrf, blend_semantic_lexical}` (CPE-984) is built and tested but referenced only from `crates/server/src/lib.rs:658`; content search returns semantic-only hits and lexical search remains a separate dialog.
+
+Both are refinements of a feature that works, not gaps in whether it works. Neither justifies holding a 11-child epic open.

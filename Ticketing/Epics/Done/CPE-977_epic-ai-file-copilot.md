@@ -2,13 +2,13 @@
 id: CPE-977
 title: "EPIC: AI file copilot — natural-language file operations"
 type: Task
-status: In Progress
+status: Done
 priority: High
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-24
-closed:
+closed: 2026-08-29
 ---
 
 ## Goal
@@ -72,3 +72,7 @@ confirm/execute UI is attended.
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** LlmPlanner MODEL backend + preview/confirm/execute+undo UI unbuilt (only pure op-plan model).
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit). All 3 children Done. Reachable: command palette -> AI copilot; needs an OpenAI-compatible chat endpoint configured in Settings and degrades honestly via `needsConfig` when it is not. Verified: `copilot_planner.rs` restricts the model to emitting a `FileOpPlan` only (no free-form/shell escape); `op_plan.rs` re-validates scope confinement and `COPILOT_MAX_OPS` before touching disk; `checkpoint_create` runs BEFORE any mutation so undo is real; per-op `fsutil::confined_to` covers the rename destination (the CPE-1750 root-relocation hole); `copilotExecute` has exactly one call site behind one confirm button; deletes route to trash.

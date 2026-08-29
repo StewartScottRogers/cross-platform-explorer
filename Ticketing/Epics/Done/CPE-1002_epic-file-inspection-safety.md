@@ -2,12 +2,12 @@
 id: CPE-1002
 title: "EPIC: File inspection & safety utilities"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Backend
 tags: [epic]
 created: 2026-07-24
-closed:
+closed: 2026-08-29
 ---
 
 > **Filed + activated 2026-07-24** (sprint, Foreman; ideas from a research sweep — each grep-verified
@@ -55,3 +55,7 @@ remains is the **attended UI** (columns/badges/cleanup views) that surfaces thes
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** The DoD's 'the UI surfaces them' clause unbuilt (all 6 pure detectors shipped).
+
+## Closed 2026-08-29
+
+Closed 2026-08-29 (closeout audit). All 33 children Done — the largest epic in the queue. Reachable with no configuration via Tools menu, command palette, the archive context menu, Properties, and the Near-Duplicates dialog. Verified: all six detectors exist as pure modules (text_encoding, archive_safety, empty_dirs, orphan_sidecars, folder_similarity, dangling_links) each with a streaming `*_scan.rs` sibling; four have FileHealthDialog tabs entered through `openFileHealth()`, which bumps `fileHealthNonce` so re-invoking the same tab still jumps; encoding and line endings surface in Properties; the hardening children (fuzz/panic harnesses CPE-1169/1297/1338, exclude-globs CPE-1302/1323) all landed.
