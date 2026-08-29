@@ -127,8 +127,10 @@ behaves identically on all three platforms.
 something else on the machine (another app, a sync client, a malicious script) can change what a name
 points at after the batch has started. Checking the *name* again is not enough, because the whole trick
 is changing what the name refers to. So the app instead **opens the output file once, refuses to follow
-any shortcut or link at it, checks that exact opened file, and writes through it** — the file being
-checked and the file being written are guaranteed to be the same one. If the check fails, that file is
+any shortcut or link at it, and checks that exact opened file** — so the thing being checked cannot be
+swapped for something else afterwards. (Since CPE-1961 the new image is then written into a fresh file
+alongside and put in place of the name, rather than written into the old file; see **Safety & undo**.)
+If the check fails, that file is
 **skipped with a reason** in the results panel and the rest of the batch carries on normally.
 
 Two consequences you may notice:
@@ -139,6 +141,15 @@ Two consequences you may notice:
 - **A file with more than one name is checked properly.** On Windows and Linux a single file can have
   several names (hard links). If a planned output has other names living outside the folder you picked,
   writing to it would change a file outside that folder, so it is refused.
+- **A cloud-offloaded output is written, not skipped (CPE-1959).** OneDrive Files-On-Demand,
+  deduplication and Windows compression leave a marker on a file that looks superficially like a
+  shortcut's. Batch Media used to treat any such marker as a link and skip the file — which mattered
+  most on a second run over a synced folder, because the files OneDrive offloads are precisely the
+  outputs your last run wrote, so *every* item could be skipped with a message about symlinks and
+  junctions that did not describe anything you had. It now checks for the specific "this name stands for
+  another name" flag instead, the same check the backup and restore paths use, so an offloaded output is
+  replaced with your converted image like any ordinary file. Real shortcuts, symlinks, junctions and
+  mount points are still refused.
 
 ### Confirming an in-place overwrite (CPE-1590)
 

@@ -2139,41 +2139,69 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // the object this question is asked of is the one the bytes will land in and it cannot be
     // substituted after the open, whereas the name can be swapped either way in the window before a
     // `symlink_metadata`. Covered now by
-    // `cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`, and the
-    // same sabotage on the merged state is **2,424 passed / 1 failed** — that test is the red-proof.
+    // `cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written`,
+    // and the same sabotage on the merged state is **2,457 passed / 3 failed** against a 2,458 / 2
+    // baseline — that test is the red-proof; the numbers and the two environmental failures are broken
+    // down at the refusal itself. (It replaced CPE-1929's
+    // `..._a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`, which pinned the
+    // opposite verdict; see the doctrine section below.)
     //
-    // **This refusal reads the BARE reparse bit, and `fsutil` no longer does — record that split rather
-    // than let a reader assume the crate agrees with itself (CPE-1929 security audit).** After CPE-1929,
-    // `fsutil::overwrite_confirmed_no_follow` and `fsutil::copy_file_onto_destination_handle` narrow to
-    // `reparse_name_surrogate` and therefore **write** a non-surrogate reparse point — a dehydrated
-    // OneDrive placeholder, dedup, WOF — on CPE-1896's rule that refusing those turned every such file
-    // into a failed backup entry. This site still **refuses** it, and the test named above now cements
-    // that. It is not a regression: this site refused them before CPE-1929 too, and the reorder changed
-    // which check says so, not the verdict.
+    // # The reparse-point doctrine split is RESOLVED here, in `fsutil`'s direction (CPE-1959)
     //
-    // The one real asymmetry, and it is an argument rather than a measurement, which is why it is
-    // recorded here instead of being acted on: a batch item that is refused is **skipped**, and the
-    // user still has every other item and the original input — whereas a restore or a backup that
-    // refuses has failed at the only thing it was asked to do. So the cost of over-refusing is
-    // asymmetric between the two callers, in the direction that makes this site's stricter answer
-    // cheap. **That has not been established as the right answer**, nobody has asked a user whose
-    // batch output landed on a cloud placeholder, and the two sites now say opposite things about the
-    // same input class. Unresolved on purpose, and **owned by CPE-1959**, which carries this asymmetry
-    // argument and the evidence that would settle it. Deliberately not CPE-1958: that one is the
-    // `links > 1` TOCTOU race at a neighbouring guard — a different problem — and a worker arriving
-    // there would be working the race and might never read this.
+    // Until now this refusal read the **bare** `FILE_ATTRIBUTE_REPARSE_POINT` bit while
+    // `fsutil::overwrite_confirmed_no_follow` and `fsutil::copy_file_onto_destination_handle` narrowed to
+    // `reparse_name_surrogate`, so the crate wrote a dehydrated cloud placeholder at one site and refused
+    // it at another. That was non-regressive but it was two doctrines about one input class. It now asks
+    // the narrow question, and **calling `reparse_name_surrogate` IS the derivation** — that function is
+    // this crate's single owner of the tag rule (CPE-1933), so no comment here needs to claim agreement
+    // with `fsutil`; the shared callee is the agreement. Every symlink, junction and mount point carries
+    // the surrogate bit and is still refused, by this same check, before the path check below.
     //
-    // **A third site has since taken a position, which CPE-1959 asked for and should weigh (CPE-1957).**
-    // `vault_manager`'s session wipe now narrows to `reparse_name_surrogate` at **both** of its checks —
-    // the by-path `probe.is_link` in `shred_dir_pinned` and the handle check in `overwrite_pinned_file`
-    // — so it lands with `fsutil` and against this site. Its reason does not generalise to here, and
-    // that is the useful part: over-refusing at a *wipe* is not a skip, it is plaintext left on the
-    // volume after a lock the user asked for, so a vault's asymmetry runs the opposite way to the
-    // batch's. That leaves the choice at this site resting on the batch-specific argument above rather
-    // than on "the crate refuses these", which is no longer true. No count of narrowing-vs-refusing
-    // sites is asserted here: CPE-1959 owns that enumeration and PR #1066 already listed the
-    // `handle_facts` call sites to derive it from, and a number written here would be a second,
-    // unguarded copy of it (CPE-1932).
+    // **The reason is not the asymmetry argument this site used to carry, which was tested rather than
+    // inherited and does not survive.** That argument was: a refused batch item is *skipped*, so
+    // over-refusing costs the user one item, whereas a refused restore has failed at its only job. Three
+    // things are wrong with it.
+    //
+    // 1. **The mechanism the refusal defended is gone (CPE-1961).** Its stated property was "a batch
+    //    never writes *through* one". `VerifiedOutput::write_all` no longer writes through this handle at
+    //    all: it hands the handle to `fsutil::stage_bytes_over_checked_handle`, whose own doc says it
+    //    performs "the same three steps `overwrite_confirmed_no_follow` performs after its own checks, in
+    //    the same order, for the same reasons; only the checks in front differ". So a placeholder here is
+    //    **replaced by name** — the bytes go into a sibling created with `create_new` — exactly as at
+    //    `overwrite_confirmed_no_follow`, whose docblock already recorded that this is "a different
+    //    question with a different answer (the user gets a real file and loses the placeholder, rather
+    //    than a possibly-corrupt object)". CPE-1896's three unresolved worries about writing *through* a
+    //    `FILE_OPEN_REPARSE_POINT` handle — `Ok(16)` onto an object then unopenable by path, the reparse
+    //    bit surviving `set_len(0)`, `landed_inside` diverging — are unreachable on a staged write. This
+    //    site's checks were the last difference between the two, for this input class.
+    // 2. **The cost of over-refusing is not one item, and the code says so.** OneDrive dehydrates exactly
+    //    the files it has already synced, which on a re-run are exactly this batch's own previous
+    //    outputs, so the refusal is systematic over the selection rather than incidental — CPE-1896's
+    //    "turned every dehydrated file into a failed backup entry", one engine over. And the user is not
+    //    shown a list: `batch_execute::execute_plan_walk`'s loop pushes `(input, reason)` into
+    //    `BatchReport::skipped`, and `App.svelte`'s `notice.convertedWithSkipped` renders a count plus
+    //    **`report.skipped[0]`** only — "{written} converted, {failed} skipped: first \"{name}\" —
+    //    {reason}". So the whole user-visible evidence for a fully-dehydrated folder is one sentence,
+    //    and until this change that sentence was the link-shaped one below, which for a placeholder is
+    //    false (it is not a symlink, a junction, or a name standing in for another) and names no action.
+    //    That is the input CPE-1959 was filed to get, derived from the code rather than from asking
+    //    anyone.
+    // 3. **CPE-1957's unprivileged-plantable finding cuts toward narrowing, not away from it.** Its
+    //    Security Auditor planted the real Microsoft non-surrogate tags (`0x9000001A` OneDrive
+    //    Files-On-Demand, `0x80000018` Windows Container Isolation) with `FSCTL_SET_REPARSE_POINT` from
+    //    an unprivileged process, so "only cloud sync makes these" is false. But an attacker who can
+    //    plant a non-surrogate tag on the output can equally plant a **surrogate** one, which both
+    //    doctrines refuse. All the bare bit denied was the non-surrogate tag — which by definition does
+    //    not redirect the name — on a name this function is about to replace by rename inside a folder it
+    //    has already contained. The bare bit was therefore an attacker-**triggerable** refusal, not an
+    //    attacker-blocking one: its only marginal effect was to let anyone who can write to the output
+    //    folder deny the user their batch item.
+    //
+    // CPE-1957 answered the same question at `vault_manager`'s wipe and narrowed there too, but declined
+    // to let that settle this — rightly, because over-refusing at a wipe leaves plaintext on the volume,
+    // which is the opposite cost function from a skip. This site is decided on its own three reasons
+    // above, not on that one. The remaining per-site verdicts are enumerated in the ticket rather than
+    // counted here (CPE-1932: a number written here would be a second, unguarded copy).
     let facts = match handle_facts(&verified.file) {
         Some(f) if !f.id.is_degenerate() => f,
         _ => {
@@ -2184,13 +2212,32 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
             ));
         }
     };
-    if facts.is_reparse_point {
+    // **Three sabotages, all run on this narrowed predicate, Windows 11 / NTFS, `cargo test -p
+    // cpe-server --lib`.** Baseline on this machine is **2,458 passed / 2 failed / 14 ignored** — the two
+    // failures are `ticket_board::…nearest_project_root_walks_up_to_the_ticketing_folder` and
+    // `archive::…cpe1774…`, both environmental to running from a worktree nested inside the repo, present
+    // before this change and after it. The count did not move: this ticket replaced one test with one
+    // test.
+    //
+    // - **Disabled** (`if false && …`): **2,457 / 3**. Red.
+    // - **Predicate forced to lie** (`reparse_name_surrogate` replaced by a `Some(false)` that still
+    //   calls it, so the call is made and the answer is a lie rather than absent): **2,457 / 3**. Red.
+    // - **Un-narrowed back to the bare bit** (`if facts.is_reparse_point`): **2,457 / 3**. Red. This
+    //   third one is the doctrine measurement rather than the reachability one — it is what makes "a
+    //   placeholder is written here now" a measured fact and not an assertion.
+    //
+    // The extra failure is `cpe_1959_…` in every case. Two green sabotages would have meant this refusal
+    // was shadowed (CPE-1929); none of the three is green. **Getting there took a correction worth
+    // recording**: round 1's fixture for the surrogate half was a GUID surrogate tag, and that is refused
+    // by `WHY_SURROGATE_TAG` at containment *before the open*, so the disable sabotage came back green at
+    // 2,458 / 2 and read as safety. See the test's own doc for the fixture that actually reaches here.
+    if facts.is_reparse_point && reparse_name_surrogate(&verified.file).unwrap_or(true) {
         verified.abandon(output);
         return Err(format!(
-            "refusing at write time: \"{output}\" is a link or other reparse point (a symlink, a \
-             junction, or any name that can stand in for another), and a batch never writes through \
-             one — such a name's target can be re-pointed after any check, even a dangling link that \
-             happens to point back inside this same folder. Nothing was written for this file"
+            "refusing at write time: \"{output}\" is a link that stands in for another name (a symlink, \
+             a junction, or a mount point), and a batch never writes through one — such a name's target \
+             can be re-pointed after any check, even a dangling link that happens to point back inside \
+             this same folder. Nothing was written for this file"
         ));
     }
 
@@ -4965,72 +5012,190 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
-    /// **CPE-1929 — the test the handle-side reparse refusal never had.** Sabotaging that refusal
-    /// (`if false && facts.is_reparse_point`) left the lib suite **unchanged** — 2,423 passed / 0 failed,
-    /// the whole suite at that moment — and forcing `is_reparse_point` to a lying `false` changed
-    /// nothing in `batch_media` either: the two-sabotage
-    /// tell for a guard an earlier check is shadowing. The earlier check was the
-    /// `symlink_metadata(output).is_symlink()` path check, which on Windows reads the **same
-    /// name-surrogate bit**, so every symlink and junction anyone could stage was refused there and the
-    /// handle check was never the decider for any fixture in the crate.
+    /// **CPE-1959 — the doctrine test, replacing CPE-1929's
+    /// `..._a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`.** That test
+    /// pinned the opposite verdict (a bare-bit refusal of every reparse point). It is replaced rather
+    /// than loosened: the two halves below pin the *new* verdict exactly as hard, and the surrogate half
+    /// still carries CPE-1929's whole reason for existing — it is the fixture that proves the handle
+    /// check, not the `symlink_metadata` path check, is the decider.
     ///
-    /// The fixture that breaks the shadow is a **non-surrogate** reparse point: `std` does not call it a
-    /// symlink, so the path check cannot answer, and only the handle's `FILE_ATTRIBUTE_REPARSE_POINT`
-    /// bit is left to refuse it. The assertion below that `is_symlink()` is **false** is not decoration
-    /// — it is what makes this test prove the handle check fired rather than the path check passing for
-    /// free. `make_guid_reparse_point` needs no privilege and no filter driver (see its doc), so this
-    /// cannot silently degrade into a skip on a normal runner.
+    /// Halves 1 and 2 are the two-halves shape `fsutil`'s
+    /// `cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point`
+    /// already uses, pointed at this engine: the two outputs differ in **exactly one bit**
+    /// (`0x2000_1959` is `0x0000_1959` with `IO_REPARSE_TAG_NAME_SURROGATE` set), which is the only
+    /// arrangement that lets the test claim the **tag** is what decides rather than some other
+    /// difference between the fixtures.
+    ///
+    /// **There is a half 3, and the reason it exists is a measurement, not symmetry.** Round 1 of this
+    /// test used the surrogate GUID half to pin the handle check and it passed — *and went on passing
+    /// with the handle refusal disabled outright*, the CPE-1929 tell. An unrecognised surrogate tag is
+    /// classified `ReparseKind::UnknownSurrogate` by the by-path `classify_reparse_tag` and refused as
+    /// `WHY_SURROGATE_TAG` **before the open**, and that constant's own wording contains the phrase the
+    /// assertion was reading. So the GUID pair cannot reach the narrowed handle check at all; the only
+    /// fixture that can is a tag `classify_reparse_tag` recognises and passes through as
+    /// `Probe::Link` — a real symlink. Half 3 is that fixture, and it is what makes the disable
+    /// sabotage red.
+    ///
+    /// **Every verdict is read off the filesystem, never off a `Result`** — CPE-1957's lesson is that a
+    /// silent skip returns `Ok` too, and here the mirror-image trap is real: `open_output_verified`
+    /// returns a `VerifiedOutput` that has not written anything yet, so an `Ok` from it proves nothing
+    /// about bytes. The non-surrogate half therefore drives the whole write through `write_all` and then
+    /// reads the file back; the surrogate half reads the untouched bytes back and re-checks the reparse
+    /// attribute is still there, so "refused" means "the object on disk is as it was", not "an `Err` was
+    /// returned".
+    ///
+    /// The `!is_symlink()` assertion on each half is not decoration — it is what stops the path check
+    /// below the handle check from answering for free and making either half prove nothing.
+    /// `make_guid_reparse_point` needs no privilege and no filter driver (see its doc), so this cannot
+    /// silently degrade into a skip on a normal runner.
     ///
     /// Windows-only by construction: `HandleFacts::is_reparse_point` is hard-coded `false` on Unix.
     #[cfg(windows)]
     #[test]
-    fn cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check() {
+    fn cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written() {
+        use std::os::windows::fs::MetadataExt as _;
+
         /// Non-Microsoft (bit 31 clear), NOT a name surrogate (bit 29 clear) — the dehydrated-cloud-file
         /// shape, which `std::fs::FileType::is_symlink` answers `false` for.
-        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1929;
+        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1959;
+        /// The same tag with `IO_REPARSE_TAG_NAME_SURROGATE` set, and nothing else changed.
+        const SURROGATE_FILE_TAG: u32 = 0x2000_1959;
+        const REPARSE_ATTR: u32 = 0x400;
 
-        let dir = scratch("cpe1929-handle-reparse");
+        let dir = scratch("cpe1959-doctrine");
         let selected = dir.path().join("selected");
         std::fs::create_dir_all(&selected).unwrap();
         let input = selected.join("photo.png");
         std::fs::write(&input, b"input bytes").unwrap();
-        let output = selected.join("out.png");
-        std::fs::write(&output, b"stale").unwrap();
 
-        if !crate::fsutil::make_guid_reparse_point(&output, NON_SURROGATE_FILE_TAG, false) {
+        // --- Half 1: the non-surrogate placeholder must be WRITTEN, and written correctly. ---
+        let placeholder = selected.join("out.png");
+        std::fs::write(&placeholder, b"stale").unwrap();
+        if !crate::fsutil::make_guid_reparse_point(&placeholder, NON_SURROGATE_FILE_TAG, false) {
             crate::skip_notice!(
-                "SKIPPING cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check: \
+                "SKIPPING cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written: \
                  could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
-                 handle-side reparse refusal in open_output_verified."
+                 handle-side reparse doctrine in open_output_verified."
             );
             let _ = std::fs::remove_dir_all(dir.path());
             return;
         }
-
-        // Liveness: without the attribute this is a test that an ordinary file is refused, which it is
-        // not — the whole point of `open_output_verified` is that an ordinary existing output is opened.
         assert!(
-            std::os::windows::fs::MetadataExt::file_attributes(
-                &std::fs::symlink_metadata(&output).unwrap()
-            ) & 0x400
-                != 0,
-            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the output"
+            std::fs::symlink_metadata(&placeholder).unwrap().file_attributes() & REPARSE_ATTR != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder, so this half would \
+             pass for an ordinary file"
         );
-        // The control that makes this test mean anything: the path check standing next to the handle
-        // check cannot see this object, so it cannot be the one that refuses.
         assert!(
-            !std::fs::symlink_metadata(&output).unwrap().file_type().is_symlink(),
-            "fixture is shadowed: std calls this a symlink, so the symlink_metadata path check would \
-             refuse it for free and this test would prove nothing about the handle check"
+            !std::fs::symlink_metadata(&placeholder).unwrap().file_type().is_symlink(),
+            "fixture is shadowed: std calls the non-surrogate placeholder a symlink, so the \
+             symlink_metadata path check would refuse it and this half could never pass"
         );
 
-        let err = open_output_verified(&input.to_string_lossy(), &output.to_string_lossy())
+        let placeholder_s = placeholder.to_string_lossy().to_string();
+        let verified = open_output_verified(&input.to_string_lossy(), &placeholder_s).expect(
+            "a reparse point that does not stand in for another name must be written — refusing it is \
+             what turned every dehydrated cloud output into a skipped batch item (CPE-1896's rule, \
+             CPE-1959's decision)",
+        );
+        verified.write_all(b"CONVERTED BYTES", &placeholder_s).expect("the staged write must commit");
+        // THE assertion, and it is on the filesystem rather than on the `Ok` above: `open_output_verified`
+        // returns before a byte is written, so an `Ok` from it is not evidence of anything.
+        assert_eq!(
+            std::fs::read(&placeholder).unwrap(),
+            b"CONVERTED BYTES",
+            "the placeholder's name must be holding the batch's output bytes"
+        );
+        // And the write went through CPE-1961's staging commit, so the placeholder was REPLACED by an
+        // ordinary file rather than written through — which is the fact this ticket's decision rests on.
+        // `carried_attribute_mask` deliberately does not carry FILE_ATTRIBUTE_REPARSE_POINT.
+        assert!(
+            std::fs::symlink_metadata(&placeholder).unwrap().file_attributes() & REPARSE_ATTR == 0,
+            "the output must be an ordinary file now: a surviving reparse bit would mean the bytes were \
+             written THROUGH the placeholder, which is the outcome CPE-1896 could not rule out and \
+             CPE-1961's stage-and-rename is what rules out here"
+        );
+
+        // --- Half 2: the surrogate, differing in exactly one bit, must still be REFUSED. ---
+        let surrogate = selected.join("out2.png");
+        let surrogate_bytes = b"the surrogate's own bytes".to_vec();
+        std::fs::write(&surrogate, &surrogate_bytes).unwrap();
+        if !crate::fsutil::make_guid_reparse_point(&surrogate, SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPING the surrogate half of \
+                 cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written: \
+                 could not plant a surrogate GUID reparse point on this volume."
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+        let err = open_output_verified(&input.to_string_lossy(), &surrogate.to_string_lossy())
             .err()
-            .expect("a reparse point at the output must be refused, whatever its tag");
+            .expect("a name-surrogate reparse point at the output must still be refused");
+        // **Which guard answers here is measured, not assumed, and it is NOT the handle check.** Round 1
+        // of this test asserted the handle refusal's `"stands in for another name"` wording and passed —
+        // then passed again with the handle refusal disabled outright, because `WHY_SURROGATE_TAG`
+        // (the path-side `classify_reparse_tag` verdict for a surrogate tag this module does not
+        // recognise) contains that same phrase and runs *before* the open. A GUID surrogate is therefore
+        // refused at containment, one guard earlier, and cannot reach the tag check on the handle. That
+        // is pinned as what it is, so nobody re-derives it: half 3 below is the leg that reaches the
+        // handle check, and this half's job is the one-bit-apart claim — the *tag* is what decides
+        // written-vs-refused — not which guard says it.
         assert!(
-            err.contains("reparse point"),
-            "the handle-side refusal must be the one that fired, and must name the reason: {err}"
+            err.contains("a write would follow it somewhere this check cannot predict"),
+            "the path-side WHY_SURROGATE_TAG verdict must be the one that fired for an unrecognised \
+             surrogate tag; if this moved, the shadowing note above it is stale: {err}"
         );
+        // Refused means the object on disk is as it was, not merely that an `Err` came back. It cannot
+        // be read back with `fs::read` the way half 1's output can — a *surrogate* GUID tag with no
+        // filter driver behind it answers `ERROR_CANT_ACCESS_FILE` (1920) to an ordinary open, measured
+        // here — which is why the untouched-ness is asserted on the metadata instead: the reparse bit
+        // still set (so nothing replaced it, as a successful staged commit would have) and the same
+        // `$DATA` length it was given (so nothing truncated or rewrote it).
+        let after = std::fs::symlink_metadata(&surrogate).unwrap();
+        assert!(
+            after.file_attributes() & REPARSE_ATTR != 0,
+            "a refused output must still be the reparse point it was — a cleared reparse bit would mean \
+             the staged commit replaced the name, which is exactly what the refusal must prevent"
+        );
+        assert_eq!(
+            after.len(),
+            surrogate_bytes.len() as u64,
+            "a refused output's bytes must be untouched"
+        );
+
+        // --- Half 3: the surrogate class that actually REACHES the narrowed handle check. ---
+        //
+        // `classify_reparse_tag` sends an unrecognised surrogate to `WHY_SURROGATE_TAG` before the open
+        // (half 2) but sends `IO_REPARSE_TAG_SYMLINK`/`MOUNT_POINT` through as `Probe::Link`, which
+        // containment lets past — so a real symlink is the only fixture in the crate that arrives at the
+        // tag check on the handle. Dangling-inside-the-folder, the same shape `cpe_1667_…` uses, because
+        // that is the one guaranteed to survive containment.
+        //
+        // The assertion is on the parenthetical, not on `"stands in for another name"`: that phrase is in
+        // `WHY_SURROGATE_TAG` too (half 2 measured it), so it would pass for free if the fixture ever
+        // stopped reaching here. `"(a symlink, a junction, or a mount point)"` belongs to the handle
+        // refusal alone — the `symlink_metadata` path check below it says only "is a link".
+        let dangling = selected.join("out3.png");
+        if try_symlink(
+            &selected.join("does-not-exist.png"),
+            &dangling,
+            "half 3 of cpe_1959_a_surrogate_at_the_output_is_refused_by_the_handle_check_and_a_placeholder_is_written",
+        ) {
+            let err = open_output_verified(&input.to_string_lossy(), &dangling.to_string_lossy())
+                .err()
+                .expect("a symlink at the output must still be refused after the narrowing");
+            assert!(
+                err.contains("(a symlink, a junction, or a mount point)"),
+                "the HANDLE-side tag refusal must be the one that fired — both the containment verdict \
+                 and the symlink_metadata path check produce sentences a looser assertion would accept \
+                 for free: {err}"
+            );
+            assert!(
+                std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink(),
+                "a refused link must still be a link — a staged commit replacing it with an ordinary \
+                 file is exactly what this refusal exists to prevent"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(dir.path());
     }

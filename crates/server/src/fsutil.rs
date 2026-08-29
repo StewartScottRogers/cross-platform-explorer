@@ -2214,6 +2214,12 @@ pub(crate) fn claim_destination_handle<'a>(
         // was therefore turning "back up a folder inside OneDrive" into a per-file refusal reading
         // "this name is a reparse point … never writes through one".
         //
+        // **CPE-1959 closed the split this narrowing opened, in this direction, and there is nothing
+        // left to keep in sync here.** `batch_media::open_output_verified` was the one site still
+        // refusing on the bare bit; it calls `reparse_name_surrogate` now too, so the crate has one
+        // doctrine about this input class and one owner of the tag rule. Its site carries the reasoning,
+        // the user-visible evidence, and three sabotage results. Nothing to re-open.
+        //
         // `reparse_name_surrogate` is asked **only** when the reparse bit is already set, so the
         // ordinary case pays nothing, and it **fails closed** — an unreadable tag counts as a surrogate.
         // The security property is unchanged: a non-surrogate tag does not redirect the name, so the
@@ -3669,8 +3675,10 @@ fn create_exclusive_with_access(
 /// macro root to a name outside it made a confirmed Convert write the new bytes at the outside name too,
 /// with `overwrite_confirmed_no_follow` reporting `Ok`. [`crate::batch_media::handle_facts`] reads the
 /// open handle's own identity (`GetFileInformationByHandle` on Windows / `fstat` on Unix) — a question a
-/// path swap cannot defeat — and refuses `is_reparse_point` (a junction that `is_symlink` may not tag as
-/// a link, per that function's own doc) and `links > 1` (a hard link), exactly as
+/// path swap cannot defeat — and refuses a reparse point that [`crate::batch_media::reparse_name_surrogate`]
+/// calls a **name surrogate** (a junction that `is_symlink` may not tag as a link, per that function's
+/// own doc; a dehydrated cloud placeholder is not one and is written, CPE-1896/CPE-1959) and
+/// `links > 1` (a hard link), exactly as
 /// [`copy_file_onto_no_follow_with_wording`] does for its callers. `None` only on a platform whose
 /// identity model `batch_media` does not know, where the path check above is the whole defence, same as
 /// every other caller of `handle_facts`.
@@ -3789,21 +3797,30 @@ fn create_exclusive_with_access(
 /// and its `Beneath` arm has the Unix residual with no comparison in front of it — CPE-1961 measured
 /// 2,785 / 3,000 aliased there on Linux. `copilot::apply_op` is deferred on the same primitive.
 ///
-/// ## The reparse-point doctrine split is NOT settled here, and one input to it moved
+/// ## The reparse-point doctrine split is SETTLED, and this site is on the narrow side (CPE-1959)
 ///
-/// This site refuses a reparse point on the **bare bit**; [`claim_destination_handle`] refuses one only
-/// when it is a **name surrogate**, so a dehydrated cloud placeholder is written there and refused here.
-/// PR #1066 recorded that disagreement as deliberately unresolved and pointed at this ticket. **It is
-/// still unresolved and this change does not resolve it** — nothing here was quietly unified. It now has
-/// a ticket of its own, **CPE-1959**, rather than riding on a hard-link one.
+/// **The paragraph this replaces was wrong about its own function**, which is worth saying because it is
+/// the shape [[derive-provenance-dont-claim-it]] warns about: it read *"this site refuses a reparse
+/// point on the bare bit"*, and the guard below has narrowed to `reparse_name_surrogate` since CPE-1929
+/// — pinned by `cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point`,
+/// which fails if it stops. A prose claim about a check thirty lines away, next to a green suite that
+/// never reads it.
 ///
-/// What did move is one of the facts the answer depends on. The argument for refusing a non-surrogate
-/// reparse point was always about what a write *through* the handle does to it — CPE-1896 measured a
-/// synthetic tag surviving `set_len(0)` and the object coming back unopenable by ordinary path. This
-/// function no longer writes through the destination handle at all: the placeholder would be **replaced
-/// by name**, which is a different question with a different answer (the user gets a real file and
-/// loses the placeholder, rather than a possibly-corrupt object). That is a reason the split may be
-/// resolvable at this site later; it is not a reason to resolve it in a ticket about hard links.
+/// The split it described was real: `batch_media::open_output_verified` refused on the bare bit while
+/// this function and [`claim_destination_handle`] narrowed, so the crate wrote a dehydrated cloud
+/// placeholder at one site and refused it at another. **CPE-1959 resolved it in this direction** —
+/// `batch_media` now calls the same `reparse_name_surrogate`, and its site carries the reasoning and the
+/// three sabotage results. The single owner of the tag rule is that function, so there is nothing to
+/// keep in sync here beyond continuing to call it.
+///
+/// One of the facts that decided it moved at this site first, and is recorded here because this is where
+/// it moved: the argument for refusing a non-surrogate reparse point was always about what a write
+/// *through* the handle does to it — CPE-1896 measured a synthetic tag surviving `set_len(0)` and the
+/// object coming back unopenable by ordinary path. This function no longer writes through the
+/// destination handle at all; the placeholder is **replaced by name**, which is a different question
+/// with a different answer (the user gets a real file and loses the placeholder, rather than a
+/// possibly-corrupt object). CPE-1961 gave `batch_media` the same commit primitive
+/// ([`stage_bytes_over_checked_handle`]), which is what carried that argument across to it.
 pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let (file, created) = crate::batch_media::open_no_follow(target)
         .map_err(|e| format!("{}: could not open for writing: {e}", target.display()))?;
