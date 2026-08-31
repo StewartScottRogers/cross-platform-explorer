@@ -1,0 +1,82 @@
+name: Gource history visualization
+
+# Renders a Gource animation of the full commit history and publishes it as a single
+# file on a dedicated orphan branch (`gource`), which the README embeds by raw URL.
+#
+# WHY an orphan branch instead of committing the MP4 to `main` (as naive Gource setups do):
+# the video is regenerated on every run and is several–tens of MB. Committing it to `main`
+# would add that much to the repository's permanent history *every week*, which fights this
+# project's small/lean guardrail (see PURPOSE.md). Force-pushing a single-commit orphan
+# branch keeps exactly one copy of the latest video and never accumulates history — the repo
+# that people clone (`main`) stays lean, and the landing page still shows a fresh animation.
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # every Sunday 00:00 UTC
+  workflow_dispatch: {}
+
+# Least-privilege: only the token capability we actually need (push the orphan branch).
+permissions:
+  contents: write
+
+# Never let two renders race on the orphan branch; a newer run supersedes an older one.
+concurrency:
+  group: gource-visualization
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for Gource)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Gource needs the whole history
+
+      - name: Install gource, ffmpeg, xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gource ffmpeg xvfb
+
+      - name: Render Gource → MP4
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s "-screen 0 1280x720x24" gource \
+            -1280x720 \
+            --title "Cross-Platform Explorer" \
+            --max-files 0 \
+            --seconds-per-day 1 \
+            --auto-skip-seconds 1 \
+            --hide mouse,progress \
+            --key \
+            --output-framerate 30 \
+            --output-ppm-stream - \
+          | ffmpeg -y -r 30 -f image2pipe -vcodec ppm -i - \
+              -vcodec libx264 -pix_fmt yuv420p -crf 23 -movflags +faststart \
+              gource-history.mp4
+          ls -lh gource-history.mp4
+
+      # Keep the raw artifact on the run too (handy for a manual `workflow_dispatch`).
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gource-history
+          path: gource-history.mp4
+          if-no-files-found: error
+
+      - name: Publish to the orphan `gource` branch (single commit, force-pushed)
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Move the video aside, build a clean orphan branch containing ONLY it, force-push.
+          mv gource-history.mp4 "${RUNNER_TEMP}/gource-history.mp4"
+          git checkout --orphan gource-publish
+          # Clear the working tree + index (everything except .git) so the branch holds one file.
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          find . -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} + 2>/dev/null || true
+          mv "${RUNNER_TEMP}/gource-history.mp4" gource-history.mp4
+          git add gource-history.mp4
+          git commit -m "chore: update gource project history visualization [skip ci]"
+          git branch -M gource-publish gource
+          git push -f origin gource
